@@ -1,0 +1,16 @@
+# Dependencies for running this repository's benchmarks on an Alliance Canada cluster
+# (docs/reports/plan_lot8.md §0.11, §1.5). Installed inside the job's own $SLURM_TMPDIR
+# virtualenv with `pip install --no-index -r requirements-cluster.txt`, i.e. against the cluster's
+# curated wheelhouse rather than PyPI (compute nodes have no internet on Rorqual).
+#
+# Minimum versions only, never exact pins: the wheelhouse carries specific versions per
+# Python/CUDA build, and a pin taken from a local macOS dev box routinely does not exist there and
+# would fail the install outright.
+#
+# The package itself is NOT installed: the SLURM scripts export PYTHONPATH=$SLURM_SUBMIT_DIR/src,
+# matching how every script in this repository already runs (see CLAUDE.md's "Environment" note on
+# the editable install's .pth entry).
+torch>=2.0
+torchvision>=0.15
+numpy>=1.24
+matplotlib>=3.7

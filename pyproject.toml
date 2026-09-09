@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adafisher-modes"
+version = "0.1.0"
+description = "Interchangeable Fisher approximation modes (K-FAC, EKFAC, TKFAC, TEKFAC) for the AdaFisher optimizer."
+requires-python = ">=3.10"
+keywords = [
+    "second-order-optimization",
+    "fisher-information",
+    "kfac",
+    "ekfac",
+    "natural-gradient",
+    "deep-learning",
+    "pytorch",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "torch>=2.0",
+]
+
+[project.optional-dependencies]
+bench = ["torchvision>=0.15", "matplotlib>=3.7"]
+dev = [
+    "pytest>=8.0",
+    "ruff==0.4.4",
+    "mypy==1.10.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["adafisher_modes*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E9", "F", "I"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+pretty = true
+show_error_codes = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["torch.*", "torchvision.*"]
+follow_imports = "skip"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The editable install's sys.path .pth entry is not honoured in this sandboxed environment
+# (site.addpackage silently no-ops on it — see docs/reports/plan_lot1.md notes). Fall back to
+# pytest's own pythonpath mechanism, which does not depend on site.py at all.
+pythonpath = ["src"]
