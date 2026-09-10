@@ -8,9 +8,10 @@ dataset, so a new model folder brings its own jobs with no edit here. Design rat
 choice below: `docs/reports/plan_lot8.md`, §0.7 (the WCT budget protocol), §0.11 (why the cluster
 at all) and §1.5.
 
-**Submit only the models you are actually running.** Only `resnet50_cifar` and `vit_small_cifar`
-have `--time` values resting on real `sacct` numbers; every other script says `UNMEASURED` in its
-header and needs its calibration job first.
+**Every `--time` is now measured.** The calibration pass has run for all eight models; each
+script's header quotes the worst arm's steady-state `median fwd+bwd + median step` on one
+`h100_1g.10gb` slice, extrapolated to that model's own full split and epoch count. Re-run
+`generate_jobs.py` after changing any model's epoch count or batch size.
 
 **Cluster.** The Alliance Canada H100 clusters (Fir or Rorqual) that
 `/Users/baolgr/Documents/AtlasAnalyticsLab` already runs on. Every cluster-specific line in these
@@ -102,8 +103,11 @@ log, before spending real cluster time:
 
 - **median step time and steps/s per arm** → turns each training script's `--time` from an
   extrapolation into a measurement (see "What the scripts request" below);
-- **peak memory** → confirms `plan_lot8.md` §0.4's `fisher_batch_samples=32` (ResNet-50) and §0.5's
-  mandatory `conv_sua=True` keep `ekfac`/`tekfac` inside the 10 GB MIG slice. If they do not, lower
+- **peak VRAM** → the `peak VRAM` column of `summary.md` (`torch.cuda.max_memory_allocated`,
+  reset per arm, covering training *and* evaluation) confirms `plan_lot8.md` §0.4's
+  `fisher_batch_samples=32` (ResNet-50) and §0.5's mandatory `conv_sua=True` keep `ekfac`/`tekfac`
+  inside the 10 GB MIG slice. It is *allocator* memory: the CUDA context and cuDNN workspaces sit
+  on top, so it under-reports `nvidia-smi` by roughly 0.5-1 GB. If they do not, lower
   `--fisher-batch-samples` (16, 8) rather than dropping an arm; if there is headroom to spare, raise
   it — the knob changes the curvature *estimator*, so it is reported in the summary and must not be
   changed silently between arms.
@@ -172,15 +176,27 @@ scheduler for everyone.
 - **`--cpus-per-task=8`**, matching `--num-workers 8` in each script, and under both clusters'
   documented per-GPU maximum (Fir 12, Rorqual 16). Raise both together if `sacct -j <id>
   --format=Elapsed,MaxRSS` suggests the job is data-loading bound.
-- **`--time=04:00:00` (ResNet-50) / `01:30:00` (ViT-S/4)** — **unmeasured extrapolations**, flagged
-  as such in every script's header. Basis: real `sacct` numbers for the same two models, the same
-  batch size 128 and the same 45k CIFAR-10 split, on this cluster, from
-  `AtlasAnalyticsLab/experiments/*/slurm/README.md` — ~85 min for 40 ResNet-50 epochs (≈2.1
-  min/epoch → ≈1h45 for 50) and 20-22 min for 40 ViT-small epochs (≈0.55 min/epoch → ≈28 min for
-  50), doubled for AdaFisher's per-step overhead and job setup. Under the WCT protocol every arm of
-  a model takes ≈ the reference arm's wall-clock time, which is why all seven share one budget.
-  Re-tighten after the calibration job, and again from real `sacct` data after the first training
-  submission.
+- **`--time`, per model** — measured, from the calibration pass; the basis is quoted verbatim in
+  every script's header and lives in `generate_jobs.py`'s `WALLTIME` table.
+
+  | model | worst arm, ms/step | steps | training | `--time` (train / calibration) |
+  |---|---:|---:|---:|---|
+  | `mnist_autoencoder` | 6.91 (tekfac) | 2 200 | ~15 s | 00:20:00 / 00:20:00 |
+  | `mlp_ln_mnist` | 2.02 (tekfac) | 8 580 | ~17 s | 00:20:00 / 00:20:00 |
+  | `cnn_gn_cifar` | 3.89 (ekfac) | 10 530 | ~41 s | 00:20:00 / 00:20:00 |
+  | `vit_micro_cifar` | 6.54 (tekfac) | 10 530 | ~69 s | 00:20:00 / 00:20:00 |
+  | `cct_2_3x2_cifar` | 13.47 (ekfac) | 17 550 | ~4.1 min | 00:30:00 / 00:20:00 |
+  | `resnet20_cifar` | 20.76 (tekfac) | 17 550 | ~6.3 min | 00:30:00 / 00:20:00 |
+  | `vit_small_cifar` | 56.30 (ekfac) | 17 550 | ~17.1 min | 01:00:00 / 00:20:00 |
+  | `resnet50_cifar` | 191.4 (ekfac) | 17 550 | ~58 min | 02:00:00 / 00:25:00 |
+
+  Two facts bound the margin. Every calibration job completed inside its own `--time`, the
+  smallest being 00:15:00 for 0.6 s of training, so module load + `virtualenv` + `pip install
+  --no-index` + dataset load together take **under 15 minutes**. And under the WCT protocol every
+  arm of one model shares the reference arm's budget, so one `--time` per model covers all seven —
+  a *cheap* arm cannot overrun it, `--max-epoch-factor` only lets it fit more epochs into the same
+  wall-clock. Each value is therefore ~15 min of setup headroom plus roughly twice the measured
+  worst-arm training time.
 - **No `--partition`** — deliberate; the Alliance docs' own guidance is to let the scheduler place
   the job from the requested resources.
 - **`module purge` before `module load`** — the docs' own troubleshooting guidance, so jobs are

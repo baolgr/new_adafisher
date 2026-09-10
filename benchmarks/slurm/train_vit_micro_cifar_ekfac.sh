@@ -9,10 +9,10 @@
 #SBATCH --gpus=h100_1g.10gb:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
-#SBATCH --time=01:00:00
+#SBATCH --time=00:20:00
 #SBATCH --output=benchmarks/slurm/logs/%x-%j.out
 
-# --time: UNMEASURED. 21 k params but 64 tokens x 2 attention blocks per step.
+# --time: MEASURED. Worst arm tekfac at 6.54 ms/step; 351 steps/epoch x 30 epochs = 10 530 steps -> ~69 s of training. Setup-dominated.
 # Dataset: cifar10 must be staged under $SLURM_SUBMIT_DIR/dataset (compute nodes have no
 # internet; --no-allow-download turns a missing dataset into a clear error, not a timeout).
 

@@ -36,10 +36,17 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 
 from .checkpoints import CheckpointWriter, parse_fractions
-from .loop import default_prepare_batch, evaluate, train_under_budget
+from .loop import (
+    default_prepare_batch,
+    evaluate,
+    peak_memory_bytes,
+    reset_peak_memory,
+    train_under_budget,
+)
 from .optimizers import ARMS, HParams, build_optimizer, resolve_device
 from .records import (
     ArmResult,
+    format_bytes,
     write_epoch_csv,
     write_manifest,
     write_plots,
@@ -210,6 +217,7 @@ def run_arm(
 
     budget_label = "unbounded" if budget_s == float("inf") else f"{budget_s:.1f}s"
     print(f"[{arm}] budget={budget_label} max_epochs={max_epochs} device={device}")
+    reset_peak_memory(device)  # the arm's peak covers training *and* evaluation
     steps, epochs = train_under_budget(
         model, optimizer, train_loader, bench.loss_fn,
         budget_s=budget_s, max_epochs=max_epochs, device=device, scheduler=scheduler,
@@ -225,10 +233,11 @@ def run_arm(
                                        prepare_batch=bench.prepare_batch,
                                        metric_fn=bench.metric_fn)
     total_s = steps[-1].elapsed_s if steps else 0.0
+    peak_vram = peak_memory_bytes(device)
     print(f"[{arm}] done: {len(steps)} steps, {len(epochs)} epochs, "
-          f"test_acc={test_acc * 100:.2f}%")
+          f"test_acc={test_acc * 100:.2f}%, peak VRAM={format_bytes(peak_vram)}")
     return ArmResult(arm, steps, epochs, test_acc, test_loss, total_s,
-                     dict(writer.written) if writer is not None else {})
+                     dict(writer.written) if writer is not None else {}, peak_vram)
 
 
 # ----------------------------------------------------------------------------------------------

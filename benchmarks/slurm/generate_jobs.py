@@ -29,31 +29,46 @@ from benchmarks.common.runner import discover_benchmarks  # noqa: E402
 REFERENCE_ARM = "diag"
 
 # Per-model ``--time`` for one training job and for the calibration job, plus the basis of the
-# training figure. Only the two lot-8 rows rest on real ``sacct`` numbers; the six others are
-# UNMEASURED extrapolations from parameter count and epoch budget, which the calibration job
-# exists to replace. Under the WCT protocol every arm of one model shares one budget, so one
-# ``--time`` per model is enough.
+# training figure. **All eight rows are now measured**, from the calibration pass of
+# 2025-xx (`benchmarks/outputs/<model>/_calibration/summary.md`, Rorqual, one
+# `h100_1g.10gb` MIG slice): the basis quotes the *worst* arm's steady-state
+# `median fwd+bwd + median step`, extrapolated to that model's own full training split
+# (45 000 CIFAR / 55 000 MNIST examples) and nominal epoch count, plus forward-only validation.
+#
+# Two facts bound the margin. (1) Every calibration job completed inside its own `--time`, the
+# smallest of which was 00:15:00 for 0.6 s of training — so module load + `virtualenv` +
+# `pip install --no-index` + dataset load together take **under 15 minutes**. (2) Under the WCT
+# protocol every arm of one model shares the reference arm's budget, so one `--time` per model
+# covers all seven; a *cheap* arm cannot overrun it, `--max-epoch-factor` only lets it fit more
+# epochs into the same wall-clock. Each value below is therefore ~15 min of setup headroom plus
+# roughly twice the measured worst-arm training time.
 WALLTIME = {
-    "mnist_autoencoder": ("01:00:00", "00:20:00",
-                          "UNMEASURED. 2.8 M params, 110 steps/epoch at batch 500; MNIST is CPU-"
-                          "bound at this size."),
-    "mlp_ln_mnist": ("00:30:00", "00:15:00",
-                     "UNMEASURED. 27 k params; dominated by data loading and env setup."),
-    "cnn_gn_cifar": ("00:45:00", "00:20:00",
-                     "UNMEASURED. 24 k params, 3 convolutions on 32x32."),
-    "vit_micro_cifar": ("01:00:00", "00:20:00",
-                        "UNMEASURED. 21 k params but 64 tokens x 2 attention blocks per step."),
-    "resnet20_cifar": ("01:30:00", "00:30:00",
-                       "UNMEASURED. 270 k params, 20 conv layers, 50 epochs."),
-    "cct_2_3x2_cifar": ("02:00:00", "00:30:00",
-                        "UNMEASURED. 284 k params, conv tokenizer + 2 encoder layers, 50 epochs."),
-    "resnet50_cifar": ("04:00:00", "00:45:00",
-                       "~85 min for 40 epochs of ResNet50/AdamW on this cluster -> ~2.1 min/epoch"
-                       " -> ~1h45 at 50 epochs (AtlasAnalyticsLab/experiments/default/slurm/"
-                       "README.md)."),
-    "vit_small_cifar": ("01:30:00", "00:30:00",
-                        "20-22 min for 40 epochs of ViT-small on this cluster -> ~0.55 min/epoch"
-                        " -> ~28 min at 50 epochs (same source)."),
+    "mnist_autoencoder": ("00:20:00", "00:20:00",
+                          "MEASURED. Worst arm tekfac at 6.91 ms/step (2.17 fwd+bwd + 4.74 step);"
+                          " 110 steps/epoch at batch 500 x 20 epochs = 2 200 steps -> ~15 s of"
+                          " training. Setup-dominated."),
+    "mlp_ln_mnist": ("00:20:00", "00:20:00",
+                     "MEASURED. Worst arm tekfac at 2.02 ms/step; 429 steps/epoch x 20 epochs"
+                     " = 8 580 steps -> ~17 s of training. Setup-dominated."),
+    "cnn_gn_cifar": ("00:20:00", "00:20:00",
+                     "MEASURED. Worst arm ekfac at 3.89 ms/step; 351 steps/epoch x 30 epochs"
+                     " = 10 530 steps -> ~41 s of training. Setup-dominated."),
+    "vit_micro_cifar": ("00:20:00", "00:20:00",
+                        "MEASURED. Worst arm tekfac at 6.54 ms/step; 351 steps/epoch x 30 epochs"
+                        " = 10 530 steps -> ~69 s of training. Setup-dominated."),
+    "resnet20_cifar": ("00:30:00", "00:20:00",
+                       "MEASURED. Worst arm tekfac at 20.76 ms/step; 351 steps/epoch x 50 epochs"
+                       " = 17 550 steps -> ~6.1 min of training, ~6.3 min with validation."),
+    "cct_2_3x2_cifar": ("00:30:00", "00:20:00",
+                        "MEASURED. Worst arm ekfac at 13.47 ms/step; 351 steps/epoch x 50 epochs"
+                        " = 17 550 steps -> ~3.9 min of training, ~4.1 min with validation."),
+    "resnet50_cifar": ("02:00:00", "00:25:00",
+                       "MEASURED. Worst arm ekfac at 191.4 ms/step (149.0 fwd+bwd + 42.4 step);"
+                       " 351 steps/epoch x 50 epochs = 17 550 steps -> ~56 min of training,"
+                       " ~58 min with validation. diag, the reference arm, is ~47 min."),
+    "vit_small_cifar": ("01:00:00", "00:20:00",
+                        "MEASURED. Worst arm ekfac at 56.3 ms/step; 351 steps/epoch x 50 epochs"
+                        " = 17 550 steps -> ~16.5 min of training, ~17.1 min with validation."),
 }
 
 HEADER = """#!/bin/bash

@@ -9,10 +9,10 @@
 #SBATCH --gpus=h100_1g.10gb:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
-#SBATCH --time=04:00:00
+#SBATCH --time=02:00:00
 #SBATCH --output=benchmarks/slurm/logs/%x-%j.out
 
-# --time: ~85 min for 40 epochs of ResNet50/AdamW on this cluster -> ~2.1 min/epoch -> ~1h45 at 50 epochs (AtlasAnalyticsLab/experiments/default/slurm/README.md).
+# --time: MEASURED. Worst arm ekfac at 191.4 ms/step (149.0 fwd+bwd + 42.4 step); 351 steps/epoch x 50 epochs = 17 550 steps -> ~56 min of training, ~58 min with validation. diag, the reference arm, is ~47 min.
 # Dataset: cifar10 must be staged under $SLURM_SUBMIT_DIR/dataset (compute nodes have no
 # internet; --no-allow-download turns a missing dataset into a clear error, not a timeout).
 

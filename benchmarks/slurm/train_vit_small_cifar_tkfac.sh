@@ -9,10 +9,10 @@
 #SBATCH --gpus=h100_1g.10gb:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
-#SBATCH --time=01:30:00
+#SBATCH --time=01:00:00
 #SBATCH --output=benchmarks/slurm/logs/%x-%j.out
 
-# --time: 20-22 min for 40 epochs of ViT-small on this cluster -> ~0.55 min/epoch -> ~28 min at 50 epochs (same source).
+# --time: MEASURED. Worst arm ekfac at 56.3 ms/step; 351 steps/epoch x 50 epochs = 17 550 steps -> ~16.5 min of training, ~17.1 min with validation.
 # Dataset: cifar10 must be staged under $SLURM_SUBMIT_DIR/dataset (compute nodes have no
 # internet; --no-allow-download turns a missing dataset into a clear error, not a timeout).
 

@@ -16,7 +16,7 @@ import json
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 
 @dataclass
@@ -49,6 +49,18 @@ class ArmResult:
     test_loss: float
     total_s: float
     checkpoints: Dict[str, str] = field(default_factory=dict)
+    # Peak *device* memory over the whole arm (training and evaluation), in bytes. ``None`` on
+    # any backend where PyTorch exposes no peak-memory counter — CPU, and MPS, which has
+    # ``current_allocated_memory`` but no high-water mark.
+    peak_vram_bytes: Optional[int] = None
+
+
+def format_bytes(value: Optional[int]) -> str:
+    """``None`` -> ``-`` (no peak counter on this backend), otherwise MiB or GiB."""
+    if value is None:
+        return "-"
+    mib = value / 1024**2
+    return f"{mib / 1024:.2f} GiB" if mib >= 1024 else f"{mib:.0f} MiB"
 
 
 def median(values: Sequence[float]) -> float:
@@ -94,12 +106,12 @@ def write_summary(results: Sequence[ArmResult], path: Path, skip_first: int = 5)
     """
     lines = [
         "| arm | steps | epochs | final train loss | best val acc | test acc | "
-        "median fwd+bwd | median step | step/fwd+bwd | total wall-clock |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "median fwd+bwd | median step | step/fwd+bwd | total wall-clock | peak VRAM |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for result in results:
         if not result.steps:
-            lines.append(f"| {result.arm} | 0 | - | - | - | - | - | - | - | - |")
+            lines.append(f"| {result.arm} | 0 | - | - | - | - | - | - | - | - | - |")
             continue
         steady = result.steps[skip_first:] if len(result.steps) > skip_first else result.steps
         fwd_bwd = median([r.fwd_bwd_s for r in steady])
@@ -110,7 +122,8 @@ def write_summary(results: Sequence[ArmResult], path: Path, skip_first: int = 5)
         lines.append(
             f"| {result.arm} | {len(result.steps)} | {len(result.epochs)} | {final_loss:.4f} | "
             f"{best_val * 100:.2f}% | {result.test_acc * 100:.2f}% | {fwd_bwd * 1e3:.2f} ms | "
-            f"{step * 1e3:.2f} ms | {ratio:.2f}x | {result.total_s:.1f}s |"
+            f"{step * 1e3:.2f} ms | {ratio:.2f}x | {result.total_s:.1f}s | "
+            f"{format_bytes(result.peak_vram_bytes)} |"
         )
     text = "\n".join(lines) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,6 +209,7 @@ def write_manifest(results: Sequence[ArmResult], config: Dict[str, Any], path: P
                 "best_val_acc": max((e.val_acc for e in r.epochs), default=None),
                 "final_epoch": asdict(r.epochs[-1]) if r.epochs else None,
                 "checkpoints": r.checkpoints,
+                "peak_vram_bytes": r.peak_vram_bytes,
             }
             for r in results
         },

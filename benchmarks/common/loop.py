@@ -40,6 +40,22 @@ def sync(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
+def reset_peak_memory(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
+
+def peak_memory_bytes(device: torch.device) -> Optional[int]:
+    """High-water mark of allocated device memory since the last ``reset_peak_memory``, or
+    ``None`` where PyTorch exposes no such counter (CPU; MPS, which reports current allocation
+    only). This is *allocator* memory, not the process's whole VRAM footprint — the CUDA context
+    and cuDNN workspaces sit on top, so it under-reports what ``nvidia-smi`` shows.
+    """
+    if device.type == "cuda":
+        return int(torch.cuda.max_memory_allocated(device))
+    return None
+
+
 def default_prepare_batch(batch: Any) -> Tuple[Tensor, Tensor]:
     """Supervised convention: ``(inputs, targets)`` straight off the loader."""
     return batch[0], batch[1]

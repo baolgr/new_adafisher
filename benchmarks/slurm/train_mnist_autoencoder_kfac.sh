@@ -9,10 +9,10 @@
 #SBATCH --gpus=h100_1g.10gb:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
-#SBATCH --time=01:00:00
+#SBATCH --time=00:20:00
 #SBATCH --output=benchmarks/slurm/logs/%x-%j.out
 
-# --time: UNMEASURED. 2.8 M params, 110 steps/epoch at batch 500; MNIST is CPU-bound at this size.
+# --time: MEASURED. Worst arm tekfac at 6.91 ms/step (2.17 fwd+bwd + 4.74 step); 110 steps/epoch at batch 500 x 20 epochs = 2 200 steps -> ~15 s of training. Setup-dominated.
 # Dataset: mnist must be staged under $SLURM_SUBMIT_DIR/dataset (compute nodes have no
 # internet; --no-allow-download turns a missing dataset into a clear error, not a timeout).
 

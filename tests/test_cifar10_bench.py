@@ -33,6 +33,7 @@ from benchmarks.common.records import (  # noqa: E402
     ArmResult,
     EpochRecord,
     StepRecord,
+    format_bytes,
     write_epoch_csv,
     write_step_csv,
     write_summary,
@@ -462,12 +463,25 @@ def test_summary_and_csv_schema(tmp_path: Path) -> None:
     assert epoch_lines[0] == "arm,epoch,steps,elapsed_s,train_loss,val_loss,val_acc,lr"
     assert len(epoch_lines) == 1 + 2 * 2
 
-    for column in ("best val acc", "test acc", "step/fwd+bwd", "total wall-clock"):
+    for column in ("best val acc", "test acc", "step/fwd+bwd", "total wall-clock", "peak VRAM"):
         assert column in summary
     assert "| diag |" in summary and "| adamw |" in summary
     assert "2.00x" in summary  # step_s / fwd_bwd_s = 0.02 / 0.01
     assert "40.00%" in summary  # best val acc = 0.3 + 0.1
     assert "42.00%" in summary  # test acc
+
+
+def test_peak_vram_column_reports_bytes_and_absence(tmp_path: Path) -> None:
+    """``peak_vram_bytes`` is ``None`` on any backend with no high-water-mark counter (CPU, MPS)
+    and must render as ``-`` rather than crash the report; a real measurement renders in MiB/GiB.
+    """
+    measured = _fake_result("ekfac")
+    measured.peak_vram_bytes = 3 * 1024**3 + 512 * 1024**2
+    summary = write_summary([measured, _fake_result("diag")], tmp_path / "summary.md",
+                            skip_first=0)
+    assert "3.50 GiB" in summary
+    assert summary.count("| - |") >= 1  # diag's, left at None
+    assert format_bytes(None) == "-" and format_bytes(700 * 1024**2) == "700 MiB"
 
 
 def test_empty_arm_does_not_crash_the_report(tmp_path: Path) -> None:
