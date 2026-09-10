@@ -88,3 +88,18 @@ def tiny_model_pair():
 def tiny_batch():
     seed_all(1)
     return torch.randn(6, 2, 5, 5)
+
+
+def pytest_addoption(parser) -> None:
+    parser.addoption("--runslow", action="store_true", default=False,
+                     help="also run tests marked slow (the full-size networks of "
+                          "tests/test_benchmark_models.py)")
+
+
+def pytest_collection_modifyitems(config, items) -> None:
+    if config.getoption("--runslow"):
+        return
+    skip = pytest.mark.skip(reason="needs --runslow")
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip)

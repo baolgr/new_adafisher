@@ -1,5 +1,5 @@
 """Lot 7 (docs/reports/plan_lot7.md §1.3, §2): exercises the dataset- and model-agnostic
-``train_under_time_budget`` harness (``benchmarks/equal_wallclock_bench.py``) directly, against a
+``train_under_budget`` harness (``benchmarks/common/loop.py``) directly, against a
 tiny synthetic in-memory task — never MNIST, never network I/O (plan_lot7.md §0.8). The real §6.3
 deliverable (five loss-vs-epoch / loss-vs-time curves on the actual MNIST auto-encoder) is produced
 by running the script itself, not by this test (plan_lot7.md §2).
@@ -18,10 +18,11 @@ from conftest import seed_all
 from torch.utils.data import DataLoader, TensorDataset
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "benchmarks"))
+sys.path.insert(0, str(REPO_ROOT))
 
 from adafisher_modes import AdaFisherMulti  # noqa: E402
-from equal_wallclock_bench import train_under_time_budget  # noqa: E402
+
+from benchmarks.common.loop import train_under_budget  # noqa: E402
 
 # Small enough that a sub-second budget still crosses several cadence periods (plan_lot7.md §1.3).
 _MODE_KWARGS = {
@@ -54,8 +55,9 @@ def test_budget_is_respected_and_run_completes(mode: str) -> None:
     loss_fn = nn.MSELoss()
 
     budget = 0.3
-    records = train_under_time_budget(
-        model, optimizer, loader, loss_fn, budget, prepare_batch=_prepare_batch
+    records, _ = train_under_budget(
+        model, optimizer, loader, loss_fn, budget_s=budget, prepare_batch=_prepare_batch,
+        log_fn=lambda _: None,
     )
 
     assert len(records) >= 1, f"{mode}: no step completed within a {budget}s budget"
@@ -82,8 +84,9 @@ def test_max_steps_guard_is_effective() -> None:
     optimizer = AdaFisherMulti(model, lr=1e-3, TCov=1, fisher_mode="diag")
     loss_fn = nn.MSELoss()
 
-    records = train_under_time_budget(
-        model, optimizer, loader, loss_fn, time_budget_s=1e6, max_steps=5, prepare_batch=_prepare_batch
+    records, _ = train_under_budget(
+        model, optimizer, loader, loss_fn, budget_s=1e6, max_steps=5,
+        prepare_batch=_prepare_batch, log_fn=lambda _: None,
     )
     assert len(records) == 5
     assert [r.step for r in records] == [0, 1, 2, 3, 4]
@@ -122,9 +125,10 @@ def test_eigenbasis_modes_pay_more_per_step_than_diag(capsys) -> None:
         model, loader = _toy_task(d_in=256, d_hidden=192, d_out=96, n=512, batch_size=32)
         optimizer = AdaFisherMulti(model, lr=1e-3, TCov=1, fisher_mode=mode, **kwargs)
         loss_fn = nn.MSELoss()
-        records = train_under_time_budget(
+        records, _ = train_under_budget(
             model, optimizer, loader, loss_fn,
-            time_budget_s=1e6, max_steps=n_steps, prepare_batch=_prepare_batch,
+            budget_s=1e6, max_steps=n_steps, prepare_batch=_prepare_batch,
+            log_fn=lambda _: None,
         )
         assert len(records) == n_steps
         steady = records[10:]

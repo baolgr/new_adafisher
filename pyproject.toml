@@ -68,3 +68,6 @@ testpaths = ["tests"]
 # (site.addpackage silently no-ops on it — see docs/reports/plan_lot1.md notes). Fall back to
 # pytest's own pythonpath mechanism, which does not depend on site.py at all.
 pythonpath = ["src"]
+markers = [
+    "slow: full-size networks (ResNet-50); deselected unless --runslow is given",
+]

@@ -23,20 +23,26 @@ from conftest import TinyMultiLayerNet, seed_all
 from torch.utils.data import DataLoader, TensorDataset
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "benchmarks"))
+sys.path.insert(0, str(REPO_ROOT))
 
 from adafisher_modes import AdaFisherMulti  # noqa: E402
-from cifar10_classification import (  # noqa: E402
+
+from benchmarks.common.data import Cutout, seeded_train_val_split  # noqa: E402
+from benchmarks.common.loop import train_under_budget  # noqa: E402
+from benchmarks.common.records import (  # noqa: E402
     ArmResult,
     EpochRecord,
-    train_classifier_under_budget,
+    StepRecord,
     write_epoch_csv,
     write_step_csv,
     write_summary,
 )
-from cifar10_data import Cutout, seeded_train_val_split  # noqa: E402
-from cifar10_models import MODELS, build_resnet50_cifar, build_vit_small_cifar  # noqa: E402
-from equal_wallclock_bench import StepRecord  # noqa: E402
+from benchmarks.resnet50_cifar.model import build_resnet50_cifar  # noqa: E402
+from benchmarks.vit_small_cifar.model import build_vit_small_cifar  # noqa: E402
+
+# The two lot-8 nets, kept as a local table: the repository-wide registry is now the folder list
+# (plan_exp_step1.md §5), exercised by tests/test_benchmark_models.py.
+MODELS = {"resnet50": build_resnet50_cifar, "vit_small": build_vit_small_cifar}
 
 _MODE_KWARGS = {
     "diag": {},
@@ -111,7 +117,7 @@ def test_every_parameter_is_updated(model_name: str) -> None:
     one module its turn in a loop that ran exactly ``len(self.modules)`` times.
     """
     seed_all(0)
-    model = MODELS[model_name].build(10)
+    model = MODELS[model_name](10)
     before = {name: p.detach().clone() for name, p in model.named_parameters()}
     optimizer = AdaFisherMulti(model, lr=1e-2, TCov=1, fisher_mode="diag")
     loss_fn = nn.CrossEntropyLoss()
@@ -353,7 +359,7 @@ def test_budget_is_respected_and_eval_time_is_excluded() -> None:
 
     budget = 0.3
     t0 = perf_counter()
-    steps, epochs = train_classifier_under_budget(
+    steps, epochs = train_under_budget(
         model, optimizer, loader, nn.CrossEntropyLoss(),
         budget_s=budget, max_epochs=1000, eval_fn=slow_eval, log_fn=lambda _: None,
     )
@@ -378,7 +384,7 @@ def test_max_epochs_caps_a_cheap_arm() -> None:
     seed_all(0)
     model, loader = _synthetic_task()
     optimizer = AdaFisherMulti(model, lr=1e-3, TCov=1, fisher_mode="diag")
-    steps, epochs = train_classifier_under_budget(
+    steps, epochs = train_under_budget(
         model, optimizer, loader, nn.CrossEntropyLoss(),
         budget_s=1e6, max_epochs=3, log_fn=lambda _: None,
     )
@@ -391,7 +397,7 @@ def test_scheduler_steps_once_per_completed_epoch() -> None:
     model, loader = _synthetic_task()
     optimizer = AdaFisherMulti(model, lr=1.0, TCov=1, fisher_mode="diag")
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.5)
-    _, epochs = train_classifier_under_budget(
+    _, epochs = train_under_budget(
         model, optimizer, loader, nn.CrossEntropyLoss(),
         budget_s=1e6, max_epochs=3, scheduler=scheduler, log_fn=lambda _: None,
     )
