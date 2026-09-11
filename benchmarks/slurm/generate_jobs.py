@@ -29,67 +29,64 @@ from benchmarks.common.runner import discover_benchmarks  # noqa: E402
 REFERENCE_ARM = "diag"
 
 # Per-model ``--time`` for one training job and for the calibration job, plus the basis of the
-# training figure. **All eight rows are now measured**, from the calibration pass of
-# 2025-xx (`benchmarks/outputs/<model>/_calibration/summary.md`, Rorqual, one
-# `h100_1g.10gb` MIG slice): the basis quotes the *worst* arm's steady-state
-# `median fwd+bwd + median step`, extrapolated to that model's own full training split
-# (45 000 CIFAR / 55 000 MNIST examples) and nominal epoch count, plus forward-only validation.
+# training figure. **Every row is measured from a completed run**, not extrapolated: the reference
+# arm's own ``total_s`` (``benchmarks/outputs/<model>/[<arm>/]manifest.json``, or its log for
+# ``resnet20_cifar``, whose grouped job died before writing one), on one ``h100_1g.10gb`` MIG slice.
 #
-# Two facts bound the margin. (1) Every calibration job completed inside its own `--time`, the
-# smallest of which was 00:15:00 for 0.6 s of training — so module load + `virtualenv` +
-# `pip install --no-index` + dataset load together take **under 15 minutes**. (2) Under the WCT
-# protocol every arm of one model shares the reference arm's budget, so one `--time` per model
-# covers all seven; a *cheap* arm cannot overrun it, `--max-epoch-factor` only lets it fit more
-# epochs into the same wall-clock. Each value below is therefore ~15 min of setup headroom plus
-# roughly twice the measured worst-arm training time.
+# Three measurements bound the margin:
+#   * **setup is ~40 s**, not the ~10 min an earlier draft of this table assumed:
+#     ``cal_mlp_ln_mnist`` COMPLETED in ``00:00:44`` *including* module load, ``virtualenv``,
+#     ``pip install --no-index`` and 7 arms x 2 epochs, and ``mlp_ln_mnist_diag`` in ``00:00:58``
+#     for 21.6 s of training. The wheelhouse is node-local, so the install is a disk copy.
+#   * **validation adds ~6%** on top of training: ``cct_2_3x2_cifar_all`` ran ``00:30:22`` against
+#     1662.5 s of accounted training (eval time is excluded from the budget clock, not from the
+#     job's wall-clock).
+#   * under the WCT protocol **every arm of a model takes the reference arm's time**, so one
+#     ``--time`` per model covers all seven; ``--max-epoch-factor`` only lets a cheap arm fit more
+#     epochs into the same wall-clock, never overrun it.
+# Each value below is the measured job duration plus roughly 40-60% headroom, rounded up.
 WALLTIME = {
-    "mnist_autoencoder": ("00:20:00", "00:20:00",
-                          "MEASURED. Worst arm tekfac at 6.91 ms/step (2.17 fwd+bwd + 4.74 step);"
-                          " 110 steps/epoch at batch 500 x 20 epochs = 2 200 steps -> ~15 s of"
-                          " training. Setup-dominated."),
-    "mlp_ln_mnist": ("00:20:00", "00:20:00",
-                     "MEASURED. Worst arm tekfac at 2.02 ms/step; 429 steps/epoch x 20 epochs"
-                     " = 8 580 steps -> ~17 s of training. Setup-dominated."),
-    "cnn_gn_cifar": ("00:20:00", "00:20:00",
-                     "MEASURED. Worst arm ekfac at 3.89 ms/step; 351 steps/epoch x 30 epochs"
-                     " = 10 530 steps -> ~41 s of training. Setup-dominated."),
-    "vit_micro_cifar": ("00:20:00", "00:20:00",
-                        "MEASURED. Worst arm tekfac at 6.54 ms/step; 351 steps/epoch x 30 epochs"
-                        " = 10 530 steps -> ~69 s of training. Setup-dominated."),
-    "resnet20_cifar": ("00:30:00", "00:20:00",
-                       "MEASURED. Worst arm tekfac at 20.76 ms/step; 351 steps/epoch x 50 epochs"
-                       " = 17 550 steps -> ~6.1 min of training, ~6.3 min with validation."),
-    "cct_2_3x2_cifar": ("00:30:00", "00:20:00",
-                        "MEASURED. Worst arm ekfac at 13.47 ms/step; 351 steps/epoch x 50 epochs"
-                        " = 17 550 steps -> ~3.9 min of training, ~4.1 min with validation."),
-    "resnet50_cifar": ("02:00:00", "00:25:00",
-                       "MEASURED. Worst arm ekfac at 191.4 ms/step (149.0 fwd+bwd + 42.4 step);"
-                       " 351 steps/epoch x 50 epochs = 17 550 steps -> ~56 min of training,"
-                       " ~58 min with validation. diag, the reference arm, is ~47 min."),
-    "vit_small_cifar": ("01:00:00", "00:20:00",
-                        "MEASURED. Worst arm ekfac at 56.3 ms/step; 351 steps/epoch x 50 epochs"
-                        " = 17 550 steps -> ~16.5 min of training, ~17.1 min with validation."),
+    "mnist_autoencoder": ("00:15:00", "00:10:00",
+                          "MEASURED. T_diag = 13.7 s; 7 arms = 95.7 s of training, ~2.5 min of"
+                          " job. Setup-dominated."),
+    "mlp_ln_mnist": ("00:15:00", "00:10:00",
+                     "MEASURED. T_diag = 21.6 s; 7 arms = 151 s of training, ~3.5 min of job."),
+    "cnn_gn_cifar": ("00:20:00", "00:10:00",
+                     "MEASURED. T_diag = 46.0 s; 7 arms = 322 s of training, ~6.5 min of job."),
+    "vit_micro_cifar": ("00:25:00", "00:10:00",
+                        "MEASURED. T_diag = 67.4 s; 7 arms = 472 s of training, ~9.5 min of job."),
+    "resnet20_cifar": ("01:05:00", "00:10:00",
+                       "MEASURED. T_diag = 360.3 s (resnet20_cifar_all-20851634.out); 7 arms ="
+                       " 42 min of training, ~45 min of job."),
+    "cct_2_3x2_cifar": ("00:45:00", "00:10:00",
+                        "MEASURED. T_diag = 237.5 s; 7 arms = 27.7 min of training, and the job"
+                        " itself ran 00:30:22 end to end."),
+    "resnet50_cifar": ("01:15:00", "00:15:00",
+                       "MEASURED. T_diag = 2822.8 s = 47.0 min per arm; ~50 min of job with"
+                       " validation and setup. One arm per job here, not seven."),
+    "vit_small_cifar": ("00:30:00", "00:10:00",
+                        "MEASURED. T_diag = 987.8 s = 16.5 min per arm; ~18 min of job. One arm"
+                        " per job here, not seven."),
 }
 
 # Models whose seven arms are ALSO emitted as a single job (``train_<model>_all.sh``), with the
-# ``--time`` that job needs. Grouping trades parallelism for setup: a job pays module load +
-# ``virtualenv`` + ``pip install --no-index`` + dataset load once instead of seven times, which on
-# these models costs more than the training itself (the six here total ~1.3 h of compute against
-# ~7 h of setup across 42 separate jobs). ``resnet50_cifar`` and ``vit_small_cifar`` are
-# deliberately absent: their setup is a quarter of the total, and serialising ResNet-50's seven
-# arms would be a ~6.5 h job, which backfills far worse than seven 47-minute ones. A grouped job
-# also loses every completed arm if a later one crashes, since ``main`` writes its report only at
-# the end — acceptable at 26 k parameters, not at 23.5 M.
+# ``--time`` that job needs. Grouping trades parallelism for one setup instead of seven — a ~4 min
+# saving per model, not the ~1 h an earlier draft of this file claimed, since setup is measured at
+# ~40 s (see WALLTIME above). The real arguments for grouping are therefore fewer jobs to track and
+# no dispatcher or ``--dependency`` to chain, not machine time.
 #
-# ``--time`` = 7 x the measured T_diag of WALLTIME's basis, plus per-arm validation, plus the same
-# ~15 min setup headroom.
+# ``resnet50_cifar`` and ``vit_small_cifar`` are deliberately absent: serialising ResNet-50's seven
+# 47-minute arms would be a ~6 h job, which backfills far worse than seven concurrent ones, and a
+# grouped job loses every completed arm if a later one crashes — ``main`` writes its report only at
+# the end. That is not hypothetical: ``resnet20_cifar_all`` and ``mlp_ln_mnist_all`` both died in
+# their third arm and lost the two that had finished (cause in ``_eigh_utils.py``'s docstring).
 GROUPED = {
-    "mnist_autoencoder": ("00:25:00", "7 x T_diag = 7 x 7 s = ~1 min of training."),
-    "mlp_ln_mnist": ("00:25:00", "7 x T_diag = 7 x 15 s = ~1.8 min of training."),
-    "cnn_gn_cifar": ("00:30:00", "7 x T_diag = 7 x 36 s = ~4.2 min of training."),
-    "vit_micro_cifar": ("00:35:00", "7 x T_diag = 7 x 56 s = ~6.5 min of training."),
-    "cct_2_3x2_cifar": ("01:00:00", "7 x T_diag = 7 x 222 s = ~26 min of training."),
-    "resnet20_cifar": ("01:15:00", "7 x T_diag = 7 x 329 s = ~38 min of training."),
+    "mnist_autoencoder": ("00:15:00", "MEASURED. 7 x T_diag = 7 x 13.7 s = 95.7 s of training."),
+    "mlp_ln_mnist": ("00:15:00", "MEASURED. 7 x T_diag = 7 x 21.6 s = 151 s of training."),
+    "cnn_gn_cifar": ("00:20:00", "MEASURED. 7 x T_diag = 7 x 46.0 s = 322 s of training."),
+    "vit_micro_cifar": ("00:25:00", "MEASURED. 7 x T_diag = 7 x 67.4 s = 472 s of training."),
+    "cct_2_3x2_cifar": ("00:45:00", "MEASURED. The job ran 00:30:22 end to end for all 7 arms."),
+    "resnet20_cifar": ("01:05:00", "MEASURED. 7 x T_diag = 7 x 360.3 s = 42 min of training."),
 }
 
 HEADER = """#!/bin/bash

@@ -9,10 +9,10 @@
 #SBATCH --gpus=h100_1g.10gb:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
-#SBATCH --time=00:30:00
+#SBATCH --time=00:20:00
 #SBATCH --output=benchmarks/slurm/logs/%x-%j.out
 
-# --time: 7 x T_diag = 7 x 36 s = ~4.2 min of training.
+# --time: MEASURED. 7 x T_diag = 7 x 46.0 s = 322 s of training.
 # Dataset: cifar10 must be staged under $SLURM_SUBMIT_DIR/dataset (compute nodes have no
 # internet; --no-allow-download turns a missing dataset into a clear error, not a timeout).
 

@@ -6,9 +6,18 @@ Off by default. ``--checkpoints 0,0.01,0.1,0.5,1`` writes ``<arm dir>/ckpt_<frac
 ``dict`` carrying the model state, the step and epoch it was taken at, the run's seed, and the
 fraction — everything needed to reload it into a fresh model and to label it in a result table.
 
-The schedule is expressed in *completed steps*, so ``t=0`` is the initialization (the loop calls
-``on_step`` once with ``0`` before the first batch) and ``t=1`` is the last step actually run —
-which under a wall-clock budget is not known in advance, hence ``save_final``.
+The schedule is expressed in *completed steps* against the run's **nominal** length (``--epochs``
+times the batches per epoch), which under the WCT protocol is shared by every arm of a model — so
+``ckpt_0.5`` means the same amount of training in every arm, and the fractions are comparable
+across them. ``t=0`` is the initialization (the loop calls ``on_step`` once with ``0`` before the
+first batch).
+
+A wall-clock-budgeted arm need not reach the nominal length: an expensive mode stops short, a cheap
+one overshoots it. ``save_final`` therefore pins the largest requested fraction to wherever the arm
+actually ended, *if* it never fired on schedule — and marks that payload ``scheduled=False``, so a
+consumer can tell "the 100% point of the nominal trajectory" from "this arm's own last step". Every
+payload carries its ``step``, ``epoch`` and the ``total_steps`` denominator, so no fraction is ever
+ambiguous.
 """
 
 from __future__ import annotations
@@ -54,16 +63,18 @@ class CheckpointWriter:
             self.save(fraction, completed_steps, epoch, model)
 
     def save_final(self, completed_steps: int, epoch: int, model: nn.Module) -> None:
-        """A wall-clock-budgeted run stops at a step count no schedule could predict; the largest
-        requested fraction is therefore pinned to wherever the run actually ended.
+        """A wall-clock-budgeted run can stop short of the nominal length; the largest requested
+        fraction is then pinned to wherever the run actually ended, flagged ``scheduled=False``.
+        An arm that overshot the nominal length already has that fraction on schedule, and keeps it.
         """
         if not self.fractions:
             return
         fraction = max(self.fractions)
         if label(fraction) not in self.written:
-            self.save(fraction, completed_steps, epoch, model)
+            self.save(fraction, completed_steps, epoch, model, scheduled=False)
 
-    def save(self, fraction: float, completed_steps: int, epoch: int, model: nn.Module) -> None:
+    def save(self, fraction: float, completed_steps: int, epoch: int, model: nn.Module,
+             scheduled: bool = True) -> None:
         path = self.output_dir / f"ckpt_{label(fraction)}.pt"
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
@@ -73,6 +84,10 @@ class CheckpointWriter:
                 "step": completed_steps,
                 "epoch": epoch,
                 "seed": self.seed,
+                # The denominator the fraction is relative to, and whether this payload landed on
+                # the scheduled step or was pinned to the arm's own end by ``save_final``.
+                "total_steps": self.total_steps,
+                "scheduled": scheduled,
             },
             path,
         )

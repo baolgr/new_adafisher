@@ -9,9 +9,8 @@ dataset, so a new model folder brings its own jobs with no edit here. Design rat
 choice below: `docs/reports/plan_lot8.md`, §0.7 (the WCT budget protocol), §0.11 (why the cluster
 at all) and §1.5.
 
-**Every `--time` is now measured.** The calibration pass has run for all eight models; each
-script's header quotes the worst arm's steady-state `median fwd+bwd + median step` on one
-`h100_1g.10gb` slice, extrapolated to that model's own full split and epoch count. Re-run
+**Every `--time` is measured from a completed run**, not extrapolated: each script's header
+quotes that model's reference-arm `total_s` on one `h100_1g.10gb` slice, plus headroom. Re-run
 `generate_jobs.py` after changing any model's epoch count or batch size.
 
 **Cluster.** The Alliance Canada H100 clusters (Fir or Rorqual) that
@@ -101,20 +100,20 @@ Two ways to run one model's seven arms; the trade is parallelism against setup c
 | `train_<model>_all.sh` | **1** | the six small models — `mnist_autoencoder`, `mlp_ln_mnist`, `cnn_gn_cifar`, `vit_micro_cifar`, `cct_2_3x2_cifar`, `resnet20_cifar` |
 | `train_<model>_<arm>.sh` + dispatcher | 7 (+1) | `resnet50_cifar`, `vit_small_cifar` |
 
-Every job pays module load + `virtualenv` + `pip install --no-index` + dataset load, and on the
-six small models that setup costs more than the training: 42 per-arm jobs are ~1.3 h of compute
-against ~7 h of setup. One grouped job per model turns that into ~1 h of setup, and the runner
-does the whole WCT protocol in-process — reference arm unbudgeted, its measured time as every
-other arm's budget, one combined report — so there is no `WCT_BUDGET` to pass and no dependency
-to chain.
+Grouping saves six setups per model, which is ~4 min — setup is measured at ~40 s, not the
+~10 min an earlier version of this file assumed, so **machine time is not the argument**. What
+grouping actually buys is fewer jobs to track and no orchestration: the runner does the whole WCT
+protocol in-process — reference arm unbudgeted, its measured time as every other arm's budget, one
+combined report — so there is no `WCT_BUDGET` to pass and no dependency to chain.
 
-The two large models stay split. Their setup is a quarter of the total, serialising ResNet-50's
-seven arms would be a ~6.5 h job (which backfills far worse than seven 47-minute ones), and a
-grouped job loses every completed arm if a later one crashes, since `main` writes its report only
-at the end.
+The two large models stay split. Serialising ResNet-50's seven 47-minute arms would be a ~6 h
+job, which backfills far worse than seven concurrent ones, and a grouped job loses every completed
+arm if a later one crashes, since `main` writes its report only at the end. That is not
+hypothetical: `resnet20_cifar_all` and `mlp_ln_mnist_all` both died in their third arm and lost the
+two that had finished.
 
-Whole campaign, both strategies combined: **21 jobs, ~12 h of MIG-slice time** — against 57 jobs
-and ~18 h if every arm gets its own job.
+Whole campaign, both strategies combined: **21 jobs, ~9 h of MIG-slice time**, of which ~8.6 h is
+actual training (`resnet50_cifar` alone is 5.5 h of it).
 
 ```bash
 # the six small models, one job each — nothing to chain
@@ -227,27 +226,30 @@ scheduler for everyone.
 - **`--cpus-per-task=8`**, matching `--num-workers 8` in each script, and under both clusters'
   documented per-GPU maximum (Fir 12, Rorqual 16). Raise both together if `sacct -j <id>
   --format=Elapsed,MaxRSS` suggests the job is data-loading bound.
-- **`--time`, per model** — measured, from the calibration pass; the basis is quoted verbatim in
-  every script's header and lives in `generate_jobs.py`'s `WALLTIME` table.
+- **`--time`, per model** — measured from completed runs; the basis is quoted verbatim in every
+  script's header and lives in `generate_jobs.py`'s `WALLTIME` / `GROUPED` tables.
 
-  | model | worst arm, ms/step | steps | training | `--time` (train / calibration) |
-  |---|---:|---:|---:|---|
-  | `mnist_autoencoder` | 6.91 (tekfac) | 2 200 | ~15 s | 00:20:00 / 00:20:00 |
-  | `mlp_ln_mnist` | 2.02 (tekfac) | 8 580 | ~17 s | 00:20:00 / 00:20:00 |
-  | `cnn_gn_cifar` | 3.89 (ekfac) | 10 530 | ~41 s | 00:20:00 / 00:20:00 |
-  | `vit_micro_cifar` | 6.54 (tekfac) | 10 530 | ~69 s | 00:20:00 / 00:20:00 |
-  | `cct_2_3x2_cifar` | 13.47 (ekfac) | 17 550 | ~4.1 min | 00:30:00 / 00:20:00 |
-  | `resnet20_cifar` | 20.76 (tekfac) | 17 550 | ~6.3 min | 00:30:00 / 00:20:00 |
-  | `vit_small_cifar` | 56.30 (ekfac) | 17 550 | ~17.1 min | 01:00:00 / 00:20:00 |
-  | `resnet50_cifar` | 191.4 (ekfac) | 17 550 | ~58 min | 02:00:00 / 00:25:00 |
+  | model | `T_diag` (per arm) | grouped job | per-arm job | calibration |
+  |---|---:|---|---|---|
+  | `mnist_autoencoder` | 13.7 s | 00:15:00 | 00:15:00 | 00:10:00 |
+  | `mlp_ln_mnist` | 21.6 s | 00:15:00 | 00:15:00 | 00:10:00 |
+  | `cnn_gn_cifar` | 46.0 s | 00:20:00 | 00:20:00 | 00:10:00 |
+  | `vit_micro_cifar` | 67.4 s | 00:25:00 | 00:25:00 | 00:10:00 |
+  | `cct_2_3x2_cifar` | 237.5 s | 00:45:00 | 00:45:00 | 00:10:00 |
+  | `resnet20_cifar` | 360.3 s | 01:05:00 | 01:05:00 | 00:10:00 |
+  | `resnet50_cifar` | 2822.8 s | — | 01:15:00 | 00:15:00 |
+  | `vit_small_cifar` | 987.8 s | — | 00:30:00 | 00:10:00 |
 
-  Two facts bound the margin. Every calibration job completed inside its own `--time`, the
-  smallest being 00:15:00 for 0.6 s of training, so module load + `virtualenv` + `pip install
-  --no-index` + dataset load together take **under 15 minutes**. And under the WCT protocol every
-  arm of one model shares the reference arm's budget, so one `--time` per model covers all seven —
-  a *cheap* arm cannot overrun it, `--max-epoch-factor` only lets it fit more epochs into the same
-  wall-clock. Each value is therefore ~15 min of setup headroom plus roughly twice the measured
-  worst-arm training time.
+  Three measurements bound the margin. **Setup is ~40 s**, not the ~10 min an earlier version of
+  this file assumed: `cal_mlp_ln_mnist` COMPLETED in `00:00:44` *including* module load,
+  `virtualenv`, `pip install --no-index` and 7 arms × 2 epochs — the wheelhouse is node-local, so
+  the install is a disk copy, not a download. **Validation adds ~6%** on top of training
+  (`cct_2_3x2_cifar_all` ran `00:30:22` against 1662.5 s of accounted training; eval time is
+  excluded from the budget clock but not from the job's wall-clock). And under the WCT protocol
+  **every arm of a model takes the reference arm's time**, so one `--time` per model covers all
+  seven — `--max-epoch-factor` only lets a cheap arm fit more epochs into the same wall-clock,
+  never overrun it.
+
 - **No `--partition`** — deliberate; the Alliance docs' own guidance is to let the scheduler place
   the job from the requested resources.
 - **`module purge` before `module load`** — the docs' own troubleshooting guidance, so jobs are

@@ -12,7 +12,7 @@
 #SBATCH --time=00:20:00
 #SBATCH --output=benchmarks/slurm/logs/%x-%j.out
 
-# --time: MEASURED. Worst arm ekfac at 3.89 ms/step; 351 steps/epoch x 30 epochs = 10 530 steps -> ~41 s of training. Setup-dominated.
+# --time: MEASURED. T_diag = 46.0 s; 7 arms = 322 s of training, ~6.5 min of job.
 # Dataset: cifar10 must be staged under $SLURM_SUBMIT_DIR/dataset (compute nodes have no
 # internet; --no-allow-download turns a missing dataset into a clear error, not a timeout).
 

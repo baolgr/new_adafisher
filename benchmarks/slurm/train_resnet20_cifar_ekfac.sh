@@ -9,10 +9,10 @@
 #SBATCH --gpus=h100_1g.10gb:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
-#SBATCH --time=00:30:00
+#SBATCH --time=01:05:00
 #SBATCH --output=benchmarks/slurm/logs/%x-%j.out
 
-# --time: MEASURED. Worst arm tekfac at 20.76 ms/step; 351 steps/epoch x 50 epochs = 17 550 steps -> ~6.1 min of training, ~6.3 min with validation.
+# --time: MEASURED. T_diag = 360.3 s (resnet20_cifar_all-20851634.out); 7 arms = 42 min of training, ~45 min of job.
 # Dataset: cifar10 must be staged under $SLURM_SUBMIT_DIR/dataset (compute nodes have no
 # internet; --no-allow-download turns a missing dataset into a clear error, not a timeout).
 

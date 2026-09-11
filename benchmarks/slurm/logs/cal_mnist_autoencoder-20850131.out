@@ -1,0 +1,95 @@
+Les modules suivants n'ont pas été elevés de votre environnement :
+  (Utilisez "module --force purge" pour tous les enlever):
+
+  1) CCconfig        6)  ucx/1.14.1         11) flexiblas/3.3.1
+  2) gentoo/2023     7)  libfabric/1.18.0   12) aocl-blas/5.1
+  3) gcccore/.12.3   8)  pmix/4.2.4         13) aocl-lapack/5.1
+  4) gcc/12.3        9)  ucc/1.2.0          14) StdEnv/2023
+  5) hwloc/2.9.1     10) openmpi/4.1.5
+
+Dû à un changement dans la variable MODULEPATH, les modules suivants ont été rechargés :
+  1) aocl-blas/5.1     2) aocl-lapack/5.1
+
+Les modules suivants ont été rechargés avec un changement de version :
+  1) flexiblas/3.3.1 => flexiblas/3.4.4       6) openmpi/4.1.5 => openmpi/5.0.3
+  2) gcc/12.3 => gcc/13.3                     7) pmix/4.2.4 => pmix/5.0.2
+  3) gcccore/.12.3 => gcccore/.13.3           8) ucc/1.2.0 => ucc/1.3.0
+  4) hwloc/2.9.1 => hwloc/2.10.0              9) ucx/1.14.1 => ucx/1.16.0
+  5) libfabric/1.18.0 => libfabric/1.21.0
+
+created virtual environment CPython3.11.5.final.0-64 in 688ms
+  creator CPython3Posix(dest=/localscratch/blgr.20850131.0/env, clear=False, no_vcs_ignore=False, global=False)
+  seeder FromAppData(download=False, pip=bundle, setuptools=bundle, wheel=bundle, via=copy, app_data_dir=/home/blgr/.local/share/virtualenv)
+    added seed packages: pip==26.1.2+computecanada, setuptools==83.0.0+computecanada, wheel==0.46.3+computecanada
+  activators BashActivator,CShellActivator,FishActivator,NushellActivator,PowerShellActivator,PythonActivator
+Looking in links: /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v4, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic
+Requirement already satisfied: pip in /localscratch/blgr.20850131.0/env/lib/python3.11/site-packages (26.1.2+computecanada)
+Looking in links: /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v4, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3/torch-2.14.0+computecanada-cp311-cp311-linux_x86_64.whl (from -r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic/torchvision-0.29.0+computecanada-cp311-cp311-linux_x86_64.whl (from -r requirements-cluster.txt (line 14))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic/numpy-2.4.2+computecanada-cp311-cp311-linux_x86_64.whl (from -r requirements-cluster.txt (line 15))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3/matplotlib-3.11.1+computecanada-cp311-cp311-linux_x86_64.whl (from -r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/filelock-3.31.1+computecanada-py3-none-any.whl (from torch>=2.0->-r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/typing_extensions-4.16.0+computecanada-py3-none-any.whl (from torch>=2.0->-r requirements-cluster.txt (line 13))
+Requirement already satisfied: setuptools>=77.0.3 in /localscratch/blgr.20850131.0/env/lib/python3.11/site-packages (from torch>=2.0->-r requirements-cluster.txt (line 13)) (83.0.0+computecanada)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/sympy-1.14.0+computecanada-py3-none-any.whl (from torch>=2.0->-r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/networkx-3.6.1+computecanada-py3-none-any.whl (from torch>=2.0->-r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/jinja2-3.1.6+computecanada-py3-none-any.whl (from torch>=2.0->-r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/fsspec-2026.7.0+computecanada-py3-none-any.whl (from torch>=2.0->-r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3/Pillow_SIMD-9.5.0.post2+computecanada-cp311-cp311-linux_x86_64.whl (from torchvision>=0.15->-r requirements-cluster.txt (line 14))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic/contourpy-1.3.3+computecanada-cp311-cp311-linux_x86_64.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/cycler-0.12.1+computecanada-py3-none-any.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/fonttools-4.64.0+computecanada-cp311-cp311-linux_x86_64.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/kiwisolver-1.4.9+computecanada-cp311-cp311-linux_x86_64.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/packaging-26.3+computecanada-py3-none-any.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3/pillow-12.1.0+computecanada-cp311-cp311-linux_x86_64.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/pyparsing-3.3.2+computecanada-py3-none-any.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/python_dateutil-2.9.0.post0+computecanada-py2.py3-none-any.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/six-1.17.0+computecanada-py2.py3-none-any.whl (from python-dateutil>=2.7->matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/mpmath-1.3.0+computecanada-py3-none-any.whl (from sympy>=1.13.3->torch>=2.0->-r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/markupsafe-3.0.3+computecanada-cp311-cp311-linux_x86_64.whl (from jinja2->torch>=2.0->-r requirements-cluster.txt (line 13))
+Installing collected packages: mpmath, typing-extensions, sympy, six, pyparsing, pillow-simd, pillow, packaging, numpy, networkx, MarkupSafe, kiwisolver, fsspec, fonttools, filelock, cycler, python-dateutil, jinja2, contourpy, torch, matplotlib, torchvision
+
+Successfully installed MarkupSafe-3.0.3+computecanada contourpy-1.3.3+computecanada cycler-0.12.1+computecanada filelock-3.31.1+computecanada fonttools-4.64.0+computecanada fsspec-2026.7.0+computecanada jinja2-3.1.6+computecanada kiwisolver-1.4.9+computecanada matplotlib-3.11.1+computecanada mpmath-1.3.0+computecanada networkx-3.6.1+computecanada numpy-2.4.2+computecanada packaging-26.3+computecanada pillow-12.1.0+computecanada pillow-simd-9.5.0.post2+computecanada pyparsing-3.3.2+computecanada python-dateutil-2.9.0.post0+computecanada six-1.17.0+computecanada sympy-1.14.0+computecanada torch-2.14.0+computecanada torchvision-0.29.0+computecanada typing-extensions-4.16.0+computecanada
+model=mnist_autoencoder arms=['diag', 'kfac', 'ekfac', 'tkfac', 'tekfac', 'adam', 'adamw'] device=cuda hparams=HParams(lr=0.001, baseline_lr=0.001, weight_decay=0.0, lam=0.001, beta=0.9, gammas=(0.92, 0.008), tcov=100, t_inv=100, t_eig=100, t_re=1, minmax=True, conv_sua=False, fisher_batch_samples=None, decoupled_wd=False)
+[diag] budget=unbounded max_epochs=2 device=cuda
+sys:1: UserWarning: Full backward hook is firing when gradients are computed with respect to module outputs since no inputs require gradients. See https://docs.pytorch.org/docs/main/generated/torch.nn.Module.html#torch.nn.Module.register_full_backward_hook for more details.
+  epoch   0 | steps     10 |      0.5s | train 0.8776 | val_acc   nan% | lr 5.00e-04
+  epoch   1 | steps     20 |      0.6s | train 0.7278 | val_acc   nan% | lr 0.00e+00
+[diag] done: 20 steps, 2 epochs, test_acc=nan%
+[kfac] budget=unbounded max_epochs=2 device=cuda
+  epoch   0 | steps     10 |      0.4s | train 1.0584 | val_acc   nan% | lr 5.00e-04
+  epoch   1 | steps     20 |      0.6s | train 1.0436 | val_acc   nan% | lr 0.00e+00
+[kfac] done: 20 steps, 2 epochs, test_acc=nan%
+[ekfac] budget=unbounded max_epochs=2 device=cuda
+  epoch   0 | steps     10 |      0.4s | train 1.0650 | val_acc   nan% | lr 5.00e-04
+  epoch   1 | steps     20 |      0.6s | train 1.0614 | val_acc   nan% | lr 0.00e+00
+[ekfac] done: 20 steps, 2 epochs, test_acc=nan%
+[tkfac] budget=unbounded max_epochs=2 device=cuda
+  epoch   0 | steps     10 |      0.3s | train 1.0463 | val_acc   nan% | lr 5.00e-04
+  epoch   1 | steps     20 |      0.5s | train 1.0123 | val_acc   nan% | lr 0.00e+00
+[tkfac] done: 20 steps, 2 epochs, test_acc=nan%
+[tekfac] budget=unbounded max_epochs=2 device=cuda
+  epoch   0 | steps     10 |      1.6s | train 1.0650 | val_acc   nan% | lr 5.00e-04
+  epoch   1 | steps     20 |      1.9s | train 1.0614 | val_acc   nan% | lr 0.00e+00
+[tekfac] done: 20 steps, 2 epochs, test_acc=nan%
+[adam] budget=unbounded max_epochs=2 device=cuda
+  epoch   0 | steps     10 |      0.2s | train 0.7883 | val_acc   nan% | lr 5.00e-04
+  epoch   1 | steps     20 |      0.4s | train 0.7230 | val_acc   nan% | lr 0.00e+00
+[adam] done: 20 steps, 2 epochs, test_acc=nan%
+[adamw] budget=unbounded max_epochs=2 device=cuda
+  epoch   0 | steps     10 |      0.2s | train 0.7883 | val_acc   nan% | lr 5.00e-04
+  epoch   1 | steps     20 |      0.4s | train 0.7230 | val_acc   nan% | lr 0.00e+00
+[adamw] done: 20 steps, 2 epochs, test_acc=nan%
+
+| arm | steps | epochs | final train loss | best val acc | test acc | median fwd+bwd | median step | step/fwd+bwd | total wall-clock |
+|---|---|---|---|---|---|---|---|---|---|
+| diag | 20 | 2 | 0.8027 | nan% | nan% | 2.19 ms | 0.92 ms | 0.42x | 0.6s |
+| kfac | 20 | 2 | 1.0510 | nan% | nan% | 2.17 ms | 2.55 ms | 1.18x | 0.6s |
+| ekfac | 20 | 2 | 1.0632 | nan% | nan% | 2.17 ms | 4.72 ms | 2.17x | 0.6s |
+| tkfac | 20 | 2 | 1.0293 | nan% | nan% | 2.17 ms | 2.62 ms | 1.21x | 0.4s |
+| tekfac | 20 | 2 | 1.0632 | nan% | nan% | 2.17 ms | 4.74 ms | 2.18x | 1.8s |
+| adam | 20 | 2 | 0.7557 | nan% | nan% | 2.15 ms | 0.74 ms | 0.34x | 0.4s |
+| adamw | 20 | 2 | 0.7557 | nan% | nan% | 2.13 ms | 0.73 ms | 0.34x | 0.4s |
+
+plots written to /home/blgr/new_adafisher/benchmarks/outputs/mnist_autoencoder/_calibration

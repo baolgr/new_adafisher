@@ -201,10 +201,17 @@ def run_arm(
 
     writer: Optional[CheckpointWriter] = None
     if args.checkpoints:
+        # The checkpoint schedule is expressed against the **nominal** trajectory
+        # (``--epochs``), never against ``max_epochs``: under the WCT protocol every arm of a model
+        # shares one nominal length, so ``ckpt_0.5`` means the same amount of training in every arm
+        # and the fractions are comparable across them — which is the whole point of the dumps
+        # (plan_exp_draft.md §7). Using ``max_epochs`` instead put a budgeted arm's ``ckpt_0.1`` at
+        # ~31% of its own run and made ``ckpt_0.5`` unreachable, since ``max_epochs`` is
+        # ``--max-epoch-factor`` times longer than anything an arm actually runs.
         writer = CheckpointWriter(
             output_dir=output_dir,
             fractions=parse_fractions(args.checkpoints),
-            total_steps=min(args.max_steps, max_epochs * len(train_loader)),
+            total_steps=min(args.max_steps, args.epochs * len(train_loader)),
             seed=args.seed,
         )
 

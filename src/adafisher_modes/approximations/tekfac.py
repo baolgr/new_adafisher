@@ -49,12 +49,13 @@ from __future__ import annotations
 
 from typing import Dict, Optional, Sequence, Tuple, Union
 
-from torch import Tensor, diag, kron, linalg
+from torch import Tensor, diag, kron
 from torch.nn import Conv2d, Module
 
 from adafisher_modes.ema import update_running_avg
 from adafisher_modes.factors import augment_input, flatten_output_grad
 
+from ._eigh_utils import eigenbasis
 from ._kron_utils import (
     augment_conv2d_direction_sua,
     augment_direction,
@@ -119,8 +120,8 @@ class TEKFACApproximation(FisherApproximation):
         # Eigenvectors of Phi_raw/Psi_raw == eigenvectors of Phi_raw/delta, Psi_raw/delta
         # (plan_lot3.md §0.4): dividing a symmetric matrix by a positive scalar leaves its
         # eigenvectors unchanged, so eigh can skip the division.
-        _, Q_Phi = linalg.eigh(self._Phi_raw[module])
-        _, Q_Psi = linalg.eigh(self._Psi_raw[module])
+        Q_Phi = eigenbasis(self._Phi_raw[module])
+        Q_Psi = eigenbasis(self._Psi_raw[module])
         if module not in self._Q_Phi:
             # Bootstrap, the direct generalisation of ekfac's `s*` bootstrap (plan_lot2.md §0.3):
             # no Theta estimate exists before an eigenbasis does.

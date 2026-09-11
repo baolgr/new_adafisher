@@ -130,6 +130,35 @@ root on `v^(t)` — is **identical across the five modes**.
 > `--budget-mode wct` the *reference* arm was given `max_epoch_factor x --epochs`, so it would have
 > set the WCT budget from a 3x-long run; the factor now applies to budgeted arms only, which is
 > what `plan_lot8.md` §0.7 step 3 describes. Nothing in `src/adafisher_modes/` changed.
+>
+> **Step-1 follow-up, after the first real cluster campaign: done.** 6 of 8 models completed all 7
+> arms (`mnist_autoencoder`, `cnn_gn_cifar`, `vit_micro_cifar`, `cct_2_3x2_cifar` via one grouped
+> job each; `resnet50_cifar`, `vit_small_cifar` via 7 per-arm jobs). `mlp_ln_mnist` and
+> `resnet20_cifar` died in their `ekfac` arm with `FAILED 1:0`, and the tracebacks
+> (`benchmarks/slurm/logs/*_all-*.out`) put both on the same line: `linalg.eigh` on the raw EMA
+> factor, `_LinAlgError: ill-conditioned or has too many repeated eigenvalues`. **Three fixes came
+> out of it, each measured rather than assumed.** (1) `src/adafisher_modes/` reopened for the first
+> time since lot 8: the new `approximations/_eigh_utils.py::eigenbasis` adds a relative
+> conditioning ridge before decomposing and falls back to the CPU solver on failure, used by both
+> `ekfac.py` and `tekfac.py`. It is inert on the returned basis (`M + cI` shares every eigenvector
+> with `M`), so no EKFAC/TEKFAC semantics change and all 238 pre-existing tests stayed green
+> unmodified; the cause is measured — `mlp_ln_mnist`'s first `Linear` has `A` of rank 646 out of
+> 785 with 136 exactly-zero eigenvalues, because 130 of MNIST's 784 pixels are identically zero.
+> The crash is cuSOLVER-specific (replaying the failing arm on CPU runs clean and reaches 97.01%),
+> so `tests/test_eigh_conditioning.py` pins the fix's *contract* rather than the crash. (2) The
+> checkpoint schedule's denominator was `max_epochs x batches`, i.e. `--max-epoch-factor` times too
+> long for every budgeted arm: measured on a completed `cct_2_3x2_cifar` run, `ckpt_0.1` sat at 31%
+> of the arm's own run and `ckpt_0.5` never fired at all, on 6 of 7 arms. It is now the *nominal*
+> trajectory, shared by every arm of a model, and each payload carries its `total_steps` denominator
+> plus a `scheduled` flag. **Every checkpoint produced before this fix is mislabelled except the
+> `diag` arms'.** (3) Every SLURM `--time` is now measured from a completed run rather than
+> extrapolated, which also corrected an earlier claim in this repository's own SLURM README: setup
+> is **~40 s** (`cal_mlp_ln_mnist` COMPLETED in `00:00:44` including `pip install --no-index`), not
+> the ~10 min that had been assumed, so "setup costs more than the compute" was false and grouping
+> the small models buys ~4 min per model, not ~1 h — it is worth doing for having fewer jobs to
+> track, not for machine time. Two non-failures were also cleared up: the missing
+> `resnet20_cifar`/`cct_2_3x2_cifar` per-arm `diag` reports are `CANCELLED+` at an identical
+> `Elapsed`, i.e. a deliberate `scancel` when the submission strategy changed, not a bug.
 
 ## Working language
 
@@ -181,6 +210,9 @@ adafisher /
 │   │   │                         #   conv_sua flag, precondition's per-offset branch (lot 6: done,
 │   │   │                         #   plan_lot6.md §1.3-§1.4) — the first lot since lot 1 to touch
 │   │   │                         #   every approximations/*.py file, see plan_lot6.md §0.5
+│   │   ├── _eigh_utils.py        # eigenbasis(): the conditioning ridge + CPU fallback shared by
+│   │   │                         #   ekfac/tekfac (step 1 follow-up: cuSOLVER's eigh crashed on an
+│   │   │                         #   exactly rank-deficient factor, killing two cluster runs)
 │   │   ├── _kron_utils.py        # shared weight/bias augment/split for kfac/ekfac/tkfac/tekfac;
 │   │   │                         #   Conv2d 4D-weight reshape added lot 4 (plan_lot2.md §0.2,
 │   │   │                         #   plan_lot4.md §0.3); unchanged by lot 5 (1-D norm-layer weight
@@ -227,6 +259,10 @@ adafisher /
 │                                  #   belonging to no hooked module, "no parameter left
 │                                  #   un-updated", all 5 modes, the bench spec (<= 50 lines, no
 │                                  #   control flow), and the checkpoint schedule; all offline
+│                                  # step 1 follow-up: test_eigh_conditioning.py (new) — the ridge's
+│                                  #   mathematical inertness, orthonormality on the exact
+│                                  #   rank-deficient structure that killed two runs, the CPU
+│                                  #   fallback; all offline
 ├── benchmarks/                   # step 1 (plan_exp_step1.md): a package — one shared harness in
 │   │                             #   common/, one folder per tested model. The five flat modules
 │   │                             #   of lots 1/7/8 are gone; every line of them landed here.
@@ -238,7 +274,8 @@ adafisher /
 │   │   │                         #   build_optimizer(arm, model, hp)
 │   │   ├── records.py            # StepRecord/EpochRecord/ArmResult + csv/summary/plot/manifest
 │   │   │                         #   writers, lot 8's column schema unchanged
-│   │   ├── checkpoints.py        # --checkpoints 0,0.01,0.1,0.5,1 -> ckpt_<frac>.pt (D5)
+│   │   ├── checkpoints.py        # --checkpoints 0,0.01,0.1,0.5,1 -> ckpt_<frac>.pt (D5); fractions are
+│   │   │                         #   relative to the NOMINAL trajectory, shared across arms
 │   │   └── runner.py             # Benchmark, build_parser(bench), main(bench),
 │   │                             #   discover_benchmarks() — the folder list *is* the registry
 │   ├── mnist_autoencoder/        # model.py bench.py  (migrated, lots 1+7)
@@ -384,7 +421,7 @@ install may "just work" elsewhere — no need to route around it there too.
 ## Running the tests
 
 ```bash
-.venv/bin/pytest tests/ -v                                    # everything (lots 1-8 + step 1: 237 tests,
+.venv/bin/pytest tests/ -v                                    # everything (lots 1-8 + step 1: 247 tests,
                                                                #   + 6 marked slow, run with --runslow)
 .venv/bin/pytest tests/test_diag_bitexact.py -v                # exit criteria 1 & 3 (bit-exactness)
 .venv/bin/pytest tests/test_diag_eq4_semantics.py -v            # exit criterion 2 (Eq. 4 semantics)
@@ -403,6 +440,8 @@ install may "just work" elsewhere — no need to route around it there too.
                                                                  #   guard, eigenbasis-mode overhead sanity (lot 7)
 .venv/bin/pytest tests/test_cifar10_bench.py -v                 # models, the ViT pairing regression, fisher_batch_
                                                                  #   samples, both weight-decay rules, budget+eval (lot 8)
+.venv/bin/pytest tests/test_eigh_conditioning.py -v              # the ekfac/tekfac eigh conditioning ridge:
+                                                                 #   inertness, rank-deficient factors, CPU fallback
 .venv/bin/pytest tests/test_benchmark_models.py -v               # every model folder: parameter count,
                                                                  #   hooked-module inventory, "no parameter
                                                                  #   left un-updated", all 5 modes, the
@@ -558,6 +597,30 @@ What each existing test guarantees:
   putting `F~_D` on `[0,1]+lambda`, so `m_hat/F~` can be ~`1/lambda` times the gradient early on.
   Four steps says nothing about 50 epochs under a cosine schedule; it is recorded so nobody
   re-discovers it and mistakes it for a bug. See `plan_lot8.md` §6.
+- **`ekfac`/`tekfac` never call `linalg.eigh` on a raw factor.** Both go through
+  `approximations/_eigh_utils.py::eigenbasis`, which adds a *relative* ridge
+  (`1e-6 * mean(diag(M))`) before decomposing and falls back to the CPU solver with a
+  `RuntimeWarning` if the device solver still raises. This is a **conditioning device, not
+  damping**: `M + cI` shifts every eigenvalue by `c` and leaves every eigenvector and their
+  ascending order unchanged, so the returned basis is mathematically identical and the
+  "`lambda` only" rule above still holds — the applied scaling is still `s* + lambda` /
+  `Theta + lambda`. Without it, cuSOLVER raises `_LinAlgError` ("ill-conditioned or has too many
+  repeated eigenvalues") on an **exactly** rank-deficient factor, which killed two real cluster
+  runs mid-training (`mlp_ln_mnist`, `resnet20_cifar`); `kfac`/`tkfac` were immune only because
+  they damp *before* inverting. The measured instance: `mlp_ln_mnist`'s first `Linear` has
+  `A` of shape `785x785`, rank 646, **136 exactly-zero eigenvalues**, `cond = 4e301` — MNIST's
+  border pixels are identically zero in 130 of 784 coordinates. LAPACK on CPU solves the same
+  matrices happily, so this is not reproducible on a CPU-only test runner; don't "simplify" the
+  ridge away because the suite is green locally. See `_eigh_utils.py`'s docstring.
+- **Checkpoint fractions are relative to the *nominal* trajectory (`--epochs`), not to
+  `max_epochs`.** Under the WCT protocol every arm of a model shares one nominal length, so
+  `ckpt_0.5` means the same amount of training in every arm and the dumps are comparable across
+  them — which is the whole point of `plan_exp_draft.md` §7. Using `max_epochs` (which is
+  `--max-epoch-factor` times longer) put a budgeted arm's `ckpt_0.1` at ~31% of its own run and
+  made `ckpt_0.5` unreachable; measured on a real `cct_2_3x2_cifar` run. A budgeted arm need not
+  reach the nominal length: `save_final` then pins the largest fraction to the arm's own end and
+  marks that payload `scheduled=False`, and every payload carries `step`, `epoch` and the
+  `total_steps` denominator so no fraction is ever ambiguous.
 - SUA's input-factor construction (`augment_conv2d_input_sua`, center-slicing every patch
   `extract_patches` already produces) is deliberately **not** `EKFAC-pytorch`'s own SUA
   construction (pooling the raw, un-unfolded input independently over `(N, H_in, W_in)`) — the two

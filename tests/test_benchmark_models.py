@@ -275,6 +275,9 @@ def test_checkpoints_are_written_on_schedule_and_reload(tmp_path: Path) -> None:
         payload = torch.load(tmp_path / f"ckpt_{fraction:g}.pt", weights_only=False)
         assert payload["step"] == round(fraction * total_steps)
         assert payload["seed"] == 0 and payload["fraction"] == fraction
+        # Self-describing payload: the denominator, and whether it landed on schedule.
+        assert payload["total_steps"] == total_steps
+        assert payload["scheduled"] is True
         fresh.load_state_dict(payload["model_state_dict"])  # reloads into a fresh model
     # t=0 is the initialization and t=1 the final state — they must differ.
     initial = torch.load(tmp_path / "ckpt_0.pt", weights_only=False)["model_state_dict"]
@@ -298,3 +301,56 @@ def test_save_final_pins_the_last_fraction_under_a_wall_clock_budget(tmp_path: P
     assert sorted(writer.written) == ["0", "1"]
     payload = torch.load(tmp_path / "ckpt_1.pt", weights_only=False)
     assert (payload["step"], payload["epoch"], payload["seed"]) == (37, 2, 3)
+    # Pinned to the arm's own end, not to the nominal 100% point — the consumer must be able to
+    # tell the two apart.
+    assert payload["scheduled"] is False and payload["total_steps"] == 10_000
+
+
+def test_checkpoint_fractions_share_one_denominator_across_arms(tmp_path: Path) -> None:
+    """The whole runner, offline, on a synthetic task: under ``--budget-mode wct`` the reference arm
+    and a budgeted arm must schedule their checkpoints against the **same** nominal denominator, so
+    ``ckpt_0.5`` means the same amount of training in both.
+
+    Regression: the denominator used to be ``max_epochs * batches``, i.e. ``--max-epoch-factor``
+    times too long for every budgeted arm — putting its ``ckpt_0.1`` at ~31% of its own run and
+    making ``ckpt_0.5`` unreachable. Measured on a real ``cct_2_3x2_cifar`` run before the fix.
+    """
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from benchmarks.common.optimizers import HParams
+    from benchmarks.common.runner import main as run_main
+
+    epochs, n, batch = 4, 64, 8
+
+    def build_data(data_root, *, batch_size=8, seed=0, num_workers=0, cutout=True,
+                   allow_download=False, train_subset=None):
+        seed_all(0)
+        dataset = TensorDataset(torch.randn(n, 6), torch.randint(0, 3, (n,)))
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+        return loader, None, None
+
+    bench = Benchmark(
+        name="synthetic",
+        build_model=lambda: nn.Sequential(nn.Linear(6, 5), nn.Sigmoid(), nn.Linear(5, 3)),
+        build_data=build_data,
+        loss_fn=nn.CrossEntropyLoss(),
+        hparams=HParams(lr=1e-2, tcov=1),
+        epochs=epochs,
+        batch_size=batch,
+        arms=("diag", "adam"),
+    )
+    run_main(bench, argv=["--output-dir", str(tmp_path), "--checkpoints", "0,0.5,1",
+                          "--budget-mode", "wct", "--device", "cpu", "--no-plot",
+                          "--num-workers", "0"])
+
+    nominal = epochs * (n // batch)  # 4 epochs x 8 batches = 32 steps, identical for both arms
+    for arm in ("diag", "adam"):
+        for fraction in (0.0, 0.5, 1.0):
+            payload = torch.load(tmp_path / arm / f"ckpt_{fraction:g}.pt", weights_only=False)
+            assert payload["total_steps"] == nominal, (arm, fraction)
+            if payload["scheduled"]:
+                assert payload["step"] == round(fraction * nominal), (arm, fraction)
+    # The comparability that matters: both arms' 50% point is the same step count.
+    diag_half = torch.load(tmp_path / "diag" / "ckpt_0.5.pt", weights_only=False)
+    adam_half = torch.load(tmp_path / "adam" / "ckpt_0.5.pt", weights_only=False)
+    assert diag_half["step"] == adam_half["step"] == nominal // 2

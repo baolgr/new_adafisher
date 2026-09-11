@@ -44,12 +44,13 @@ from __future__ import annotations
 
 from typing import Dict, Optional, Sequence, Tuple, Union
 
-from torch import Tensor, diag, eye, kron, linalg
+from torch import Tensor, diag, eye, kron
 from torch.nn import Conv2d, Module
 
 from adafisher_modes.ema import update_running_avg
 from adafisher_modes.factors import augment_input, compute_s_full, flatten_output_grad
 
+from ._eigh_utils import eigenbasis
 from ._kron_utils import (
     augment_conv2d_direction_sua,
     augment_direction,
@@ -108,8 +109,8 @@ class EKFACApproximation(FisherApproximation):
     def refresh(self, module: Module, step: int) -> None:
         if step % self.T_eig != 0:
             return
-        _, Q_A = linalg.eigh(self._A[module])
-        _, Q_B = linalg.eigh(self._B[module])
+        Q_A = eigenbasis(self._A[module])
+        Q_B = eigenbasis(self._B[module])
         if module not in self._Q_A:
             # Bootstrap, the direct generalisation of diag's `H.new_ones(...)` (a diagonal of ones
             # is the identity): no s* estimate exists before an eigenbasis does.

@@ -1,0 +1,114 @@
+Les modules suivants n'ont pas été elevés de votre environnement :
+  (Utilisez "module --force purge" pour tous les enlever):
+
+  1) CCconfig        6)  ucx/1.14.1         11) flexiblas/3.3.1
+  2) gentoo/2023     7)  libfabric/1.18.0   12) aocl-blas/5.1
+  3) gcccore/.12.3   8)  pmix/4.2.4         13) aocl-lapack/5.1
+  4) gcc/12.3        9)  ucc/1.2.0          14) StdEnv/2023
+  5) hwloc/2.9.1     10) openmpi/4.1.5
+
+Dû à un changement dans la variable MODULEPATH, les modules suivants ont été rechargés :
+  1) aocl-blas/5.1     2) aocl-lapack/5.1
+
+Les modules suivants ont été rechargés avec un changement de version :
+  1) flexiblas/3.3.1 => flexiblas/3.4.4       6) openmpi/4.1.5 => openmpi/5.0.3
+  2) gcc/12.3 => gcc/13.3                     7) pmix/4.2.4 => pmix/5.0.2
+  3) gcccore/.12.3 => gcccore/.13.3           8) ucc/1.2.0 => ucc/1.3.0
+  4) hwloc/2.9.1 => hwloc/2.10.0              9) ucx/1.14.1 => ucx/1.16.0
+  5) libfabric/1.18.0 => libfabric/1.21.0
+
+created virtual environment CPython3.11.5.final.0-64 in 501ms
+  creator CPython3Posix(dest=/localscratch/blgr.20857559.0/env, clear=False, no_vcs_ignore=False, global=False)
+  seeder FromAppData(download=False, pip=bundle, setuptools=bundle, wheel=bundle, via=copy, app_data_dir=/home/blgr/.local/share/virtualenv)
+    added seed packages: pip==26.1.2+computecanada, setuptools==83.0.0+computecanada, wheel==0.46.3+computecanada
+  activators BashActivator,CShellActivator,FishActivator,NushellActivator,PowerShellActivator,PythonActivator
+Looking in links: /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v4, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic
+Requirement already satisfied: pip in /localscratch/blgr.20857559.0/env/lib/python3.11/site-packages (26.1.2+computecanada)
+Looking in links: /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v4, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3/torch-2.14.0+computecanada-cp311-cp311-linux_x86_64.whl (from -r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic/torchvision-0.29.0+computecanada-cp311-cp311-linux_x86_64.whl (from -r requirements-cluster.txt (line 14))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic/numpy-2.4.2+computecanada-cp311-cp311-linux_x86_64.whl (from -r requirements-cluster.txt (line 15))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3/matplotlib-3.11.1+computecanada-cp311-cp311-linux_x86_64.whl (from -r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/filelock-3.31.1+computecanada-py3-none-any.whl (from torch>=2.0->-r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/typing_extensions-4.16.0+computecanada-py3-none-any.whl (from torch>=2.0->-r requirements-cluster.txt (line 13))
+Requirement already satisfied: setuptools>=77.0.3 in /localscratch/blgr.20857559.0/env/lib/python3.11/site-packages (from torch>=2.0->-r requirements-cluster.txt (line 13)) (83.0.0+computecanada)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/sympy-1.14.0+computecanada-py3-none-any.whl (from torch>=2.0->-r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/networkx-3.6.1+computecanada-py3-none-any.whl (from torch>=2.0->-r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/jinja2-3.1.6+computecanada-py3-none-any.whl (from torch>=2.0->-r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/fsspec-2026.7.0+computecanada-py3-none-any.whl (from torch>=2.0->-r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3/Pillow_SIMD-9.5.0.post2+computecanada-cp311-cp311-linux_x86_64.whl (from torchvision>=0.15->-r requirements-cluster.txt (line 14))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic/contourpy-1.3.3+computecanada-cp311-cp311-linux_x86_64.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/cycler-0.12.1+computecanada-py3-none-any.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/fonttools-4.64.0+computecanada-cp311-cp311-linux_x86_64.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/kiwisolver-1.4.9+computecanada-cp311-cp311-linux_x86_64.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/packaging-26.3+computecanada-py3-none-any.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3/pillow-12.1.0+computecanada-cp311-cp311-linux_x86_64.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/pyparsing-3.3.2+computecanada-py3-none-any.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/python_dateutil-2.9.0.post0+computecanada-py2.py3-none-any.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/six-1.17.0+computecanada-py2.py3-none-any.whl (from python-dateutil>=2.7->matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/mpmath-1.3.0+computecanada-py3-none-any.whl (from sympy>=1.13.3->torch>=2.0->-r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/markupsafe-3.0.3+computecanada-cp311-cp311-linux_x86_64.whl (from jinja2->torch>=2.0->-r requirements-cluster.txt (line 13))
+Installing collected packages: mpmath, typing-extensions, sympy, six, pyparsing, pillow-simd, pillow, packaging, numpy, networkx, MarkupSafe, kiwisolver, fsspec, fonttools, filelock, cycler, python-dateutil, jinja2, contourpy, torch, matplotlib, torchvision
+
+Successfully installed MarkupSafe-3.0.3+computecanada contourpy-1.3.3+computecanada cycler-0.12.1+computecanada filelock-3.31.1+computecanada fonttools-4.64.0+computecanada fsspec-2026.7.0+computecanada jinja2-3.1.6+computecanada kiwisolver-1.4.9+computecanada matplotlib-3.11.1+computecanada mpmath-1.3.0+computecanada networkx-3.6.1+computecanada numpy-2.4.2+computecanada packaging-26.3+computecanada pillow-12.1.0+computecanada pillow-simd-9.5.0.post2+computecanada pyparsing-3.3.2+computecanada python-dateutil-2.9.0.post0+computecanada six-1.17.0+computecanada sympy-1.14.0+computecanada torch-2.14.0+computecanada torchvision-0.29.0+computecanada typing-extensions-4.16.0+computecanada
+/localscratch/blgr.20857559.0/env/lib/python3.11/site-packages/torchvision/datasets/cifar.py:83: VisibleDeprecationWarning: dtype(): align should be passed as Python or NumPy boolean but got `align=0`. Did you mean to pass a tuple to create a subarray type? (Deprecated NumPy 2.4)
+  entry = pickle.load(f, encoding="latin1")
+model=vit_small_cifar arms=['tkfac'] device=cuda hparams=HParams(lr=0.001, baseline_lr=0.0001, weight_decay=0.01, lam=0.003, beta=0.9, gammas=(0.92, 0.008), tcov=100, t_inv=100, t_eig=100, t_re=1, minmax=True, conv_sua=False, fisher_batch_samples=None, decoupled_wd=True)
+[tkfac] budget=987.8s max_epochs=150 device=cuda
+sys:1: UserWarning: Full backward hook is firing when gradients are computed with respect to module outputs since no inputs require gradients. See https://docs.pytorch.org/docs/main/generated/torch.nn.Module.html#torch.nn.Module.register_full_backward_hook for more details.
+  epoch   0 | steps    351 |     21.0s | train 2.0426 | val_acc 27.50% | lr 9.99e-04
+  epoch   1 | steps    702 |     41.6s | train 1.9335 | val_acc 31.46% | lr 9.96e-04
+  epoch   2 | steps   1053 |     62.0s | train 1.7858 | val_acc 35.74% | lr 9.91e-04
+  epoch   3 | steps   1404 |     82.4s | train 1.7095 | val_acc 39.86% | lr 9.84e-04
+  epoch   4 | steps   1755 |    102.7s | train 1.6440 | val_acc 42.18% | lr 9.76e-04
+  epoch   5 | steps   2106 |    123.3s | train 1.5987 | val_acc 40.84% | lr 9.65e-04
+  epoch   6 | steps   2457 |    143.6s | train 1.5578 | val_acc 47.34% | lr 9.52e-04
+  epoch   7 | steps   2808 |    164.1s | train 1.5149 | val_acc 47.18% | lr 9.38e-04
+  epoch   8 | steps   3159 |    184.4s | train 1.4814 | val_acc 47.56% | lr 9.22e-04
+  epoch   9 | steps   3510 |    204.8s | train 1.4485 | val_acc 47.80% | lr 9.05e-04
+  epoch  10 | steps   3861 |    225.2s | train 1.4220 | val_acc 50.30% | lr 8.85e-04
+  epoch  11 | steps   4212 |    245.7s | train 1.3907 | val_acc 51.70% | lr 8.64e-04
+  epoch  12 | steps   4563 |    266.4s | train 1.3673 | val_acc 53.90% | lr 8.42e-04
+  epoch  13 | steps   4914 |    286.8s | train 1.3458 | val_acc 54.68% | lr 8.19e-04
+  epoch  14 | steps   5265 |    307.2s | train 1.3275 | val_acc 54.70% | lr 7.94e-04
+  epoch  15 | steps   5616 |    327.6s | train 1.3019 | val_acc 56.86% | lr 7.68e-04
+  epoch  16 | steps   5967 |    347.9s | train 1.2884 | val_acc 55.26% | lr 7.41e-04
+  epoch  17 | steps   6318 |    368.5s | train 1.2660 | val_acc 56.62% | lr 7.13e-04
+  epoch  18 | steps   6669 |    389.0s | train 1.2537 | val_acc 56.08% | lr 6.84e-04
+  epoch  19 | steps   7020 |    409.6s | train 1.2350 | val_acc 57.08% | lr 6.55e-04
+  epoch  20 | steps   7371 |    430.1s | train 1.2285 | val_acc 59.26% | lr 6.24e-04
+  epoch  21 | steps   7722 |    450.6s | train 1.2118 | val_acc 58.70% | lr 5.94e-04
+  epoch  22 | steps   8073 |    470.9s | train 1.1881 | val_acc 59.24% | lr 5.63e-04
+  epoch  23 | steps   8424 |    491.3s | train 1.1749 | val_acc 60.22% | lr 5.31e-04
+  epoch  24 | steps   8775 |    511.6s | train 1.1655 | val_acc 58.94% | lr 5.00e-04
+  epoch  25 | steps   9126 |    532.1s | train 1.1554 | val_acc 60.66% | lr 4.69e-04
+  epoch  26 | steps   9477 |    552.6s | train 1.1443 | val_acc 61.20% | lr 4.37e-04
+  epoch  27 | steps   9828 |    573.3s | train 1.1280 | val_acc 62.84% | lr 4.06e-04
+  epoch  28 | steps  10179 |    593.6s | train 1.1089 | val_acc 61.28% | lr 3.76e-04
+  epoch  29 | steps  10530 |    614.1s | train 1.1042 | val_acc 63.42% | lr 3.45e-04
+  epoch  30 | steps  10881 |    634.4s | train 1.1007 | val_acc 63.78% | lr 3.16e-04
+  epoch  31 | steps  11232 |    654.8s | train 1.0849 | val_acc 64.06% | lr 2.87e-04
+  epoch  32 | steps  11583 |    675.1s | train 1.0667 | val_acc 64.14% | lr 2.59e-04
+  epoch  33 | steps  11934 |    695.5s | train 1.0577 | val_acc 64.52% | lr 2.32e-04
+  epoch  34 | steps  12285 |    715.8s | train 1.0487 | val_acc 64.62% | lr 2.06e-04
+  epoch  35 | steps  12636 |    736.4s | train 1.0412 | val_acc 65.06% | lr 1.81e-04
+  epoch  36 | steps  12987 |    756.8s | train 1.0311 | val_acc 63.72% | lr 1.58e-04
+  epoch  37 | steps  13338 |    777.3s | train 1.0268 | val_acc 65.92% | lr 1.36e-04
+  epoch  38 | steps  13689 |    797.6s | train 1.0097 | val_acc 64.44% | lr 1.15e-04
+  epoch  39 | steps  14040 |    818.0s | train 1.0104 | val_acc 65.86% | lr 9.55e-05
+  epoch  40 | steps  14391 |    838.3s | train 0.9975 | val_acc 66.46% | lr 7.78e-05
+  epoch  41 | steps  14742 |    858.8s | train 0.9945 | val_acc 66.36% | lr 6.18e-05
+  epoch  42 | steps  15093 |    879.1s | train 0.9814 | val_acc 66.36% | lr 4.76e-05
+  epoch  43 | steps  15444 |    899.5s | train 0.9727 | val_acc 67.06% | lr 3.51e-05
+  epoch  44 | steps  15795 |    919.8s | train 0.9696 | val_acc 66.62% | lr 2.45e-05
+  epoch  45 | steps  16146 |    940.3s | train 0.9696 | val_acc 66.98% | lr 1.57e-05
+  epoch  46 | steps  16497 |    960.6s | train 0.9658 | val_acc 67.28% | lr 8.86e-06
+  epoch  47 | steps  16848 |    981.1s | train 0.9598 | val_acc 67.22% | lr 3.94e-06
+  epoch  48 | steps  16964 |    987.9s | train 0.9633 | val_acc 66.92% | lr 3.94e-06
+[tkfac] done: 16964 steps, 49 epochs, test_acc=67.23%, peak VRAM=1.13 GiB
+
+| arm | steps | epochs | final train loss | best val acc | test acc | median fwd+bwd | median step | step/fwd+bwd | total wall-clock | peak VRAM |
+|---|---|---|---|---|---|---|---|---|---|---|
+| tkfac | 16964 | 49 | 0.9756 | 67.28% | 67.23% | 50.91 ms | 4.89 ms | 0.10x | 987.8s | 1.13 GiB |
+
+plots written to /home/blgr/new_adafisher/benchmarks/outputs/vit_small_cifar/tkfac

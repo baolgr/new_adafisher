@@ -9,7 +9,7 @@
 #SBATCH --gpus=h100_1g.10gb:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
-#SBATCH --time=00:20:00
+#SBATCH --time=00:10:00
 #SBATCH --output=benchmarks/slurm/logs/%x-%j.out
 
 # --time: 2 epochs x 7 arms on a 5000-example subset; dominated by env setup and the first-step hook/eigendecomposition warm-up, not by training. Generous on purpose.

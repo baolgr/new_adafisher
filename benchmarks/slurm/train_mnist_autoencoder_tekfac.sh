@@ -9,10 +9,10 @@
 #SBATCH --gpus=h100_1g.10gb:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
-#SBATCH --time=00:20:00
+#SBATCH --time=00:15:00
 #SBATCH --output=benchmarks/slurm/logs/%x-%j.out
 
-# --time: MEASURED. Worst arm tekfac at 6.91 ms/step (2.17 fwd+bwd + 4.74 step); 110 steps/epoch at batch 500 x 20 epochs = 2 200 steps -> ~15 s of training. Setup-dominated.
+# --time: MEASURED. T_diag = 13.7 s; 7 arms = 95.7 s of training, ~2.5 min of job. Setup-dominated.
 # Dataset: mnist must be staged under $SLURM_SUBMIT_DIR/dataset (compute nodes have no
 # internet; --no-allow-download turns a missing dataset into a clear error, not a timeout).
 
