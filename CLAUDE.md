@@ -160,6 +160,53 @@ root on `v^(t)` — is **identical across the five modes**.
 > `resnet20_cifar`/`cct_2_3x2_cifar` per-arm `diag` reports are `CANCELLED+` at an identical
 > `Elapsed`, i.e. a deliberate `scancel` when the submission strategy changed, not a bug.
 
+> **Campaign-1 audit + the LR-schedule fix: done. Re-runs pending.** All 8 models x 7 arms of the
+> first real campaign were verified mechanically — **0** non-finite losses across ~700 k recorded
+> steps, `elapsed_s` monotone everywhere, the WCT budget respected within its one-batch overshoot
+> bound on all 54 budgeted arms (worst case `+0.22 s`), and `adam` bit-identical to `adamw` on the
+> two models with `wd=0`. The strongest check came free: the `diag` arm ran twice, in two
+> campaigns a day apart under different job layouts, and its per-step losses are **bit-identical**
+> (2200/2200, 8580/8580, 10530/10530, 10530/10530) — the harness's seeding is exact. **Three
+> findings, each measured rather than assumed.** (1) A **protocol defect in the cosine schedule**,
+> biasing both ends of the WCT comparison: `T_max = --epochs` is shared, but a cheap arm overshoots
+> it and `CosineAnnealingLR` is *periodic*, so its LR climbs back up (every overshooting arm was
+> `adam`/`adamw`, 7 models of 8; `resnet20_cifar/adam` hit `lr = 0` at epoch 49 then trained 9 more
+> epochs with the LR rising to `6.2e-5`, best val acc decaying 88.82% -> 88.06%), while an
+> expensive arm stops before the floor (`resnet50_cifar/ekfac` at epoch 38 of 50, `lr` still
+> `1.6e-4`; `corr(epochs completed, best val acc)` over the five Fisher arms was **+0.98 /
+> +0.92 / +0.92** on the three long models, i.e. the ranking of the modes was largely a ranking of
+> schedule position). Fixed by `benchmarks/common/schedules.py` and `--lr-schedule`: `NominalCosine`
+> is clamped past `T_max` and provably identical to torch's inside it (so the bit-exact `diag`
+> trajectories survive), `BudgetCosine` anneals each budgeted arm over its own budget so every arm
+> completes one full cosine. (2) `resnet50_cifar` and `vit_small_cifar` were run **entirely
+> pre-fix**, as per-arm jobs with a hand-copied `--wct-budget`, so their checkpoint fractions are
+> the mislabelled ones (`ckpt_0.01` at 3% of the trajectory, `ckpt_0.5` never written on 6 of 7
+> arms) — being re-run as one grouped job each, which derives the budget in-process. (3) The
+> project's **primary** bench is the only failure, and it is unambiguous: on `mnist_autoencoder`
+> all five Fisher modes freeze at MSE ~= 0.7085 within 2 epochs of a 20-epoch run while `adam`
+> descends monotonically to 0.4836. Measured on the checkpoints, between 10% and 100% of training
+> the parameters move **0.2-0.5%** for the five Fisher arms against **147%** for `adam`, having
+> travelled **~1.0** from initialisation against **25.8** — a collapsed step size on an 8-layer
+> all-sigmoid autoencoder, not a converged optimum. This **reframes lot 7's own conclusion**: "all
+> five modes converge to a statistically indistinguishable final loss (0.25% spread)" was true but
+> read the wrong way, because lot 7 had no `adam` arm to show that the shared point is a bad one.
+> `lam` has since been **measured and exonerated** (`sweep_mnist_autoencoder_lam.sh`, the full WCT
+> protocol at `lam in {1e-5, 1e-3, 1e-1}`): four orders of magnitude of damping move the four
+> Kronecker modes by **under 1%** (0.7038 to 0.7106, against `adam`'s 0.478 in the same budget),
+> and raising `lam` does nothing in any mode. Only `diag` responds, and only at `1e-5`
+> (0.708 -> 0.578, still worse than `adam`) — consistent with `lam` capping the `1/lam`
+> amplification Eq. (4)'s min-max allows, which is a `diag`-only mechanism. So the stall is **not**
+> a damping problem, and the `lam=1e-3`-is-too-large reading this file briefly carried is wrong for
+> the four Kronecker modes. Saturating sigmoids are also disqualified as the sole explanation:
+> `adam` escapes the same point from the same initialisation. The untested candidates are the
+> shared `lr=1e-3` (a `lr` bracket is the natural next sweep) and the geometry of `A (x) B` on this
+> net, which the per-layer ratio `||F~^-1 m_hat|| / ||m_hat||` at the stall point would settle. Two
+> incidental repairs: `main` now rewrites the report after **every** completed arm (a grouped job
+> used to lose every finished arm if a later one crashed, which cost `resnet20_cifar_all` and
+> `mlp_ln_mnist_all` two arms each), which is what makes grouping the two large models safe; and
+> the superseded/duplicated result trees moved to `benchmarks/archives/` so `outputs/<model>/`
+> holds exactly one report plus one checkpoint-only directory per arm.
+
 ## Working language
 
 All code, comments, docstrings, reports and documentation are written in **English**, to the standard
@@ -263,13 +310,20 @@ adafisher /
 │                                  #   mathematical inertness, orthonormality on the exact
 │                                  #   rank-deficient structure that killed two runs, the CPU
 │                                  #   fallback; all offline
+│                                  # campaign 1 audit: test_lr_schedule.py (new) — NominalCosine
+│                                  #   identical to torch's inside T_max and clamped outside it,
+│                                  #   BudgetCosine's shape/monotonicity/floor, both through the
+│                                  #   real loop; all offline
 ├── benchmarks/                   # step 1 (plan_exp_step1.md): a package — one shared harness in
 │   │                             #   common/, one folder per tested model. The five flat modules
 │   │                             #   of lots 1/7/8 are gone; every line of them landed here.
 │   ├── common/
 │   │   ├── data.py               # mnist()/cifar10()/cifar100(), Cutout, seeded_train_val_split
 │   │   ├── loop.py               # train_under_budget() = lot 7's + lot 8's loops merged (D2),
-│   │   │                         #   evaluate(), sync(), prepare_batch/metric_fn conventions
+│   │   │                         #   evaluate(), sync(), prepare_batch/metric_fn conventions;
+│   │   │                         #   + the optional per-batch `lr_schedule` hook
+│   │   ├── schedules.py          # NominalCosine (clamped past T_max) / BudgetCosine (anneals over
+│   │   │                         #   the arm's own WCT budget) — the `--lr-schedule` protocol fix
 │   │   ├── optimizers.py         # HParams, ARMS (5 modes + adam/adamw + reference),
 │   │   │                         #   build_optimizer(arm, model, hp)
 │   │   ├── records.py            # StepRecord/EpochRecord/ArmResult + csv/summary/plot/manifest
@@ -289,8 +343,11 @@ adafisher /
 │   ├── vit_small_cifar/          # model.py bench.py  (migrated verbatim, lot 8: 2 693 578)
 │   ├── outputs/<model>/<arm>/    # results indexed by what they measure, not by lot (D6);
 │   │                             #   the old outputs/lot7_*, outputs/lot8_* are left untouched
-│   └── slurm/                    # 64 generated sbatch jobs (8 models x (1 calibration + 7 arms))
-│                                 #   + README + generate_jobs.py, which enumerates model folders
+│   ├── slurm/                    # 73 generated sbatch jobs (8 models x (1 calibration + 1 grouped
+│   │                             #   + 7 per-arm) + 1 lam sweep) + README + generate_jobs.py,
+│   │                             #   which enumerates model folders
+│   └── archives/                 # gitignored; superseded/duplicated result trees moved aside
+│                                 #   between campaigns, each with its own README saying why
 ├── docs/reports/
 │   ├── plan.md                   # overall design plan (lots 1-8)
 │   ├── plan_lot1.md              # lot-1 implementation plan, with the 3 ABC corrections
@@ -421,7 +478,7 @@ install may "just work" elsewhere — no need to route around it there too.
 ## Running the tests
 
 ```bash
-.venv/bin/pytest tests/ -v                                    # everything (lots 1-8 + step 1: 247 tests,
+.venv/bin/pytest tests/ -v                                    # everything (lots 1-8 + step 1: 258 tests,
                                                                #   + 6 marked slow, run with --runslow)
 .venv/bin/pytest tests/test_diag_bitexact.py -v                # exit criteria 1 & 3 (bit-exactness)
 .venv/bin/pytest tests/test_diag_eq4_semantics.py -v            # exit criterion 2 (Eq. 4 semantics)
@@ -442,6 +499,8 @@ install may "just work" elsewhere — no need to route around it there too.
                                                                  #   samples, both weight-decay rules, budget+eval (lot 8)
 .venv/bin/pytest tests/test_eigh_conditioning.py -v              # the ekfac/tekfac eigh conditioning ridge:
                                                                  #   inertness, rank-deficient factors, CPU fallback
+.venv/bin/pytest tests/test_lr_schedule.py -v                    # the cosine under WCT: clamped nominal
+                                                                 #   vs. budget-annealed, and both in the loop
 .venv/bin/pytest tests/test_benchmark_models.py -v               # every model folder: parameter count,
                                                                  #   hooked-module inventory, "no parameter
                                                                  #   left un-updated", all 5 modes, the
@@ -461,6 +520,15 @@ PYTHONPATH=src .venv/bin/python -m benchmarks.resnet50_cifar.bench --epochs 50  
 # trajectory checkpoints, the input steps 2-5 of plan_exp_draft.md consume
 PYTHONPATH=src .venv/bin/python -m benchmarks.cnn_gn_cifar.bench \
     --epochs 30 --checkpoints 0,0.01,0.1,0.5,1
+# THE CAMPAIGN PROTOCOL: --lr-schedule budget, so every budgeted arm completes one full cosine
+# instead of being cut off mid-anneal (or, if cheap, having its LR climb back up). Every generated
+# SLURM job passes it; the CLI default is still `nominal` (now clamped). See "Things to watch".
+PYTHONPATH=src .venv/bin/python -m benchmarks.cnn_gn_cifar.bench \
+    --epochs 30 --budget-mode wct --lr-schedule budget --checkpoints 0,0.01,0.1,0.5,1
+# the lam bracket on the stalling autoencoder bench (sweep_mnist_autoencoder_lam.sh on the cluster)
+for L in 1e-5 1e-3 1e-1; do PYTHONPATH=src .venv/bin/python -m benchmarks.mnist_autoencoder.bench \
+    --epochs 20 --budget-mode wct --lr-schedule budget --lam "$L" \
+    --output-dir benchmarks/outputs/sweeps/mnist_autoencoder_lam/"$L"; done
 ```
 
 `test_frobenius_dominance.py` now also covers TKFAC's trace preservation and TEKFAC's dominance
@@ -621,6 +689,31 @@ What each existing test guarantees:
   reach the nominal length: `save_final` then pins the largest fraction to the arm's own end and
   marks that payload `scheduled=False`, and every payload carries `step`, `epoch` and the
   `total_steps` denominator so no fraction is ever ambiguous.
+- **The cosine schedule is a protocol choice, and the default is not the campaign's.**
+  `--lr-schedule` defaults to `nominal` (a shared `T_max = --epochs`, now **clamped** so the LR
+  never rises past it); every generated *budgeted* SLURM job passes `--lr-schedule budget`, which
+  anneals each arm over its own wall-clock budget. Use `budget` for anything comparing arms under
+  the WCT protocol — with `nominal`, a cheap arm's LR climbs back up past `T_max` (torch's
+  `CosineAnnealingLR` is periodic) and an expensive arm never reaches the floor, both measured on
+  campaign 1 and quantified in `schedules.py`'s docstring. Two consequences worth remembering:
+  the **reference arm always uses `nominal`** whichever mode is requested (it is unbudgeted — it is
+  what *defines* the budget, so `elapsed / inf` would pin its LR at `base_lr`); and a `budget`-
+  scheduled arm's LR depends on measured elapsed time, so it is **no longer bit-reproducible** —
+  that is the price of the fix, and `nominal` remains available when determinism matters more.
+  Don't "simplify" `NominalCosine` back to `CosineAnnealingLR`: the only difference is the clamp,
+  and `tests/test_lr_schedule.py` asserts both the equality inside `T_max` and the divergence
+  outside it.
+- **The `mnist_autoencoder` stall is a real finding, not a broken run.** All five Fisher modes
+  freeze at MSE `~= 0.7085` within 2 epochs and stay there (parameters move 0.2-0.5% between 10%
+  and 100% of training, having travelled `~1.0` from init) while `adam` descends to `0.4836`
+  (travelling `25.8`). The architecture is 8 `Linear` layers with sigmoids throughout and a 30-dim
+  bottleneck — exactly the saturating net the bench was chosen for — and `lam=1e-3` is the
+  parameter setting the effective step. Before drawing any conclusion about the modes from this
+  bench, read the status block's `lam` paragraph: a `{1e-5, 1e-3, 1e-1}` bracket has already been
+  run and **`lam` is not the lever** — it moves the four Kronecker modes by under 1%, so don't
+  re-run that sweep. And do not restate lot 7's "all five converge to an indistinguishable final
+  loss" as evidence of convergence — lot 7 had no `adam` arm, so it could not see that the shared
+  point is a bad one.
 - SUA's input-factor construction (`augment_conv2d_input_sua`, center-slicing every patch
   `extract_patches` already produces) is deliberately **not** `EKFAC-pytorch`'s own SUA
   construction (pooling the raw, un-unfolded input independently over `(N, H_in, W_in)`) — the two

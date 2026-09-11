@@ -11,3 +11,10 @@ data/
 benchmarks/outputs/
 reference_repos/
 dataset/
+# Job logs: the directory must exist (sbatch writes into it), its contents must not be tracked.
+benchmarks/slurm/logs/*.out
+
+# Archived result trees moved aside between campaigns — gigabytes of checkpoints.
+benchmarks/archives/
+
+.DS_Store

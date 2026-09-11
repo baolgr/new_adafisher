@@ -89,6 +89,7 @@ def train_under_budget(
     max_steps: int = 10**9,
     prepare_batch: PrepareBatch = default_prepare_batch,
     log_fn: Callable[[str], None] = print,
+    lr_schedule: Optional[Callable[[float], None]] = None,
 ) -> Tuple[List[StepRecord], List[EpochRecord]]:
     """Train until ``budget_s`` is spent, ``max_epochs`` epochs complete or ``max_steps`` steps run.
 
@@ -96,6 +97,13 @@ def train_under_budget(
     with ``completed_steps=0`` before the first batch (the ``t=0`` state) and then after every
     optimizer step, with the number of steps completed so far. ``common/checkpoints.py`` is its
     only user today.
+
+    ``lr_schedule(elapsed_s)`` is the wall-clock-driven alternative to ``scheduler``: it fires
+    before each batch's forward pass, so the schedule can be a function of the budget actually
+    consumed rather than of a shared nominal epoch count
+    (``common/schedules.py::BudgetCosine``). The two are mutually exclusive by construction —
+    ``runner.py`` passes one or the other — and ``lr_schedule=None``, the default, leaves this
+    loop bit-identical to its pre-existing behaviour.
     """
     step_records: List[StepRecord] = []
     epoch_records: List[EpochRecord] = []
@@ -120,6 +128,10 @@ def train_under_budget(
             if elapsed() >= budget_s or step >= max_steps:
                 completed = False
                 break
+            if lr_schedule is not None:
+                # Before the forward pass, so this batch is taken with the LR its own position in
+                # the budget prescribes. Excluded from the fwd+bwd and step timings below.
+                lr_schedule(elapsed())
             inputs, targets = prepare_batch(batch)
             inputs, targets = inputs.to(device), targets.to(device)
 

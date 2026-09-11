@@ -63,10 +63,11 @@ WALLTIME = {
                         " itself ran 00:30:22 end to end."),
     "resnet50_cifar": ("01:15:00", "00:15:00",
                        "MEASURED. T_diag = 2822.8 s = 47.0 min per arm; ~50 min of job with"
-                       " validation and setup. One arm per job here, not seven."),
+                       " validation and setup. This is the PER-ARM figure; the grouped job for"
+                       " this model is in GROUPED below and is now the default."),
     "vit_small_cifar": ("00:30:00", "00:10:00",
-                        "MEASURED. T_diag = 987.8 s = 16.5 min per arm; ~18 min of job. One arm"
-                        " per job here, not seven."),
+                        "MEASURED. T_diag = 987.8 s = 16.5 min per arm; ~18 min of job. This is"
+                        " the PER-ARM figure; see GROUPED below for the default."),
 }
 
 # Models whose seven arms are ALSO emitted as a single job (``train_<model>_all.sh``), with the
@@ -75,11 +76,18 @@ WALLTIME = {
 # ~40 s (see WALLTIME above). The real arguments for grouping are therefore fewer jobs to track and
 # no dispatcher or ``--dependency`` to chain, not machine time.
 #
-# ``resnet50_cifar`` and ``vit_small_cifar`` are deliberately absent: serialising ResNet-50's seven
-# 47-minute arms would be a ~6 h job, which backfills far worse than seven concurrent ones, and a
-# grouped job loses every completed arm if a later one crashes — ``main`` writes its report only at
-# the end. That is not hypothetical: ``resnet20_cifar_all`` and ``mlp_ln_mnist_all`` both died in
-# their third arm and lost the two that had finished (cause in ``_eigh_utils.py``'s docstring).
+# ``resnet50_cifar`` and ``vit_small_cifar`` used to be deliberately absent, for two reasons. One
+# still holds and one no longer does:
+#   * STILL TRUE: serialising ResNet-50's seven 47-minute arms is a ~6 h job, which backfills worse
+#     than seven concurrent ones. Accepted here, because the per-arm alternative requires copying
+#     the reference arm's measured ``total_s`` into six ``--wct-budget`` flags by hand, and that is
+#     exactly how the first campaign produced a result set whose checkpoint fractions were wrong
+#     (benchmarks/archives/2026-09-10_prefix_campaign/README.md). A grouped job derives the budget
+#     in-process; there is no number to copy.
+#   * NO LONGER TRUE: "a grouped job loses every completed arm if a later one crashes". It did —
+#     ``resnet20_cifar_all`` and ``mlp_ln_mnist_all`` each died in their third arm and lost the two
+#     that had finished (cause in ``_eigh_utils.py``'s docstring) — because ``main`` wrote its
+#     report only after the last arm. ``main`` now rewrites the whole report after *every* arm.
 GROUPED = {
     "mnist_autoencoder": ("00:15:00", "MEASURED. 7 x T_diag = 7 x 13.7 s = 95.7 s of training."),
     "mlp_ln_mnist": ("00:15:00", "MEASURED. 7 x T_diag = 7 x 21.6 s = 151 s of training."),
@@ -87,6 +95,28 @@ GROUPED = {
     "vit_micro_cifar": ("00:25:00", "MEASURED. 7 x T_diag = 7 x 67.4 s = 472 s of training."),
     "cct_2_3x2_cifar": ("00:45:00", "MEASURED. The job ran 00:30:22 end to end for all 7 arms."),
     "resnet20_cifar": ("01:05:00", "MEASURED. 7 x T_diag = 7 x 360.3 s = 42 min of training."),
+    "resnet50_cifar": ("07:00:00",
+                       "MEASURED. 7 x T_diag = 7 x 2822.8 s = 5.49 h of training; +6% validation"
+                       " and ~40 s setup = ~5.9 h. The longest job of the campaign."),
+    "vit_small_cifar": ("02:45:00",
+                        "MEASURED. 7 x T_diag = 7 x 987.8 s = 1.92 h of training; +6% validation"
+                        " and ~40 s setup = ~2.1 h."),
+}
+
+# Hyperparameter sweeps: one job per swept model, running every arm once per value into
+# ``outputs/sweeps/<model>_<field>/<value>/``. ``{field}`` is any ``HParams`` field, i.e. any
+# generated ``--<field>`` flag (runner.add_hparam_arguments).
+#
+# ``mnist_autoencoder``'s ``lam``: on the first campaign all five Fisher modes froze at
+# MSE ~= 0.7085 within 2 epochs of a 20-epoch run and never moved again, while ``adam`` descended
+# monotonically to 0.4836. Measured on the checkpoints: between 10% and 100% of training the
+# parameters moved by 0.2-0.5% for the five Fisher arms against 147% for ``adam``, having
+# travelled ~1.0 from initialisation against 25.8. That is a stalled step size on an 8-layer
+# all-sigmoid autoencoder, not a converged optimum, and ``lam`` is the parameter that sets it —
+# hence a bracket around the default rather than a one-sided scan: 1e-1 damps the step towards
+# Adam-like magnitudes, 1e-5 removes almost all damping. Cheap: 7 arms x T_diag = 96 s per value.
+SWEEPS = {
+    "mnist_autoencoder": [("lam", ["1e-5", "1e-3", "1e-1"], "00:20:00")],
 }
 
 HEADER = """#!/bin/bash
@@ -159,7 +189,8 @@ BUDGETED_BODY = """# One WCT-budgeted arm (plan_lot8.md §0.7). WCT_BUDGET is th
 # §6.3) equal-epoch comparison — usable, but not this campaign's headline protocol.
 WCT_BUDGET="${{WCT_BUDGET:-}}"
 if [ -n "$WCT_BUDGET" ]; then
-  BUDGET_ARGS=(--budget-mode wct --wct-budget "$WCT_BUDGET" --max-epoch-factor 3)
+  BUDGET_ARGS=(--budget-mode wct --wct-budget "$WCT_BUDGET" --max-epoch-factor 3
+               --lr-schedule budget)
 else
   echo "WCT_BUDGET unset — falling back to --budget-mode epochs (see this script's header)" >&2
   BUDGET_ARGS=(--budget-mode epochs)
@@ -183,18 +214,52 @@ GROUPED_BODY = """# All {n_arms} arms of one model, in ONE job (plan_exp_step1.m
 # WCT_BUDGET to pass, no dispatcher, no --dependency.
 #
 # The per-arm alternative is benchmarks/slurm/train_{model}_<arm>.sh, one job each; use it if you
-# need the arms to run concurrently, or if you want a crash in one arm not to cost the others.
+# need the arms to run concurrently. A crash in one arm no longer costs the others either way:
+# main() rewrites records.csv/epochs.csv/summary.md/manifest.json after every completed arm.
+#
+# --lr-schedule budget: each budgeted arm anneals its cosine over its OWN wall-clock budget, so
+# every arm completes one full cosine and is compared at the same point of its own schedule. With
+# the previous shared T_max=--epochs, a cheap arm overshot the nominal epoch count and its LR
+# climbed back up, while an expensive arm stopped before reaching the floor — both measured, both
+# documented in benchmarks/common/schedules.py. The reference arm is unbudgeted and keeps the
+# nominal schedule; it is what defines the budget.
 python -m benchmarks.{model}.bench \\
   --arms {arms} \\
   --epochs {epochs} \\
   --budget-mode wct \\
   --reference-arm {reference} \\
   --max-epoch-factor 3 \\
+  --lr-schedule budget \\
   --num-workers 8 \\
   --no-allow-download \\
   --data-root "$SLURM_SUBMIT_DIR/dataset" \\
   --checkpoints 0,0.01,0.1,0.5,1 \\
   --output-dir "$SLURM_SUBMIT_DIR/benchmarks/outputs/{model}"
+"""
+
+
+SWEEP_BODY = """# Hyperparameter sweep: the full {n_arms}-arm WCT protocol, once per --{flag} value, each into its
+# own output directory. Every value re-derives its own budget from its own reference arm, so the
+# arms of one value are comparable to each other; values are comparable to each other only in the
+# sense that they share the model, the seed and the nominal epoch count.
+#
+# Why this sweep exists: see SWEEPS in benchmarks/slurm/generate_jobs.py.
+for VALUE in {values}; do
+  echo "=== --{flag} $VALUE ==="
+  python -m benchmarks.{model}.bench \\
+    --arms {arms} \\
+    --epochs {epochs} \\
+    --budget-mode wct \\
+    --reference-arm {reference} \\
+    --max-epoch-factor 3 \\
+    --lr-schedule budget \\
+    --{flag} "$VALUE" \\
+    --num-workers 8 \\
+    --no-allow-download \\
+    --data-root "$SLURM_SUBMIT_DIR/dataset" \\
+    --checkpoints 0,0.01,0.1,0.5,1 \\
+    --output-dir "$SLURM_SUBMIT_DIR/benchmarks/outputs/sweeps/{model}_{flag}/$VALUE"
+done
 """
 
 
@@ -242,6 +307,24 @@ def main() -> None:
                 + GROUPED_BODY.format(model=name, arms=" ".join(bench.arms),
                                       epochs=bench.epochs, reference=REFERENCE_ARM,
                                       n_arms=len(bench.arms)),
+            )
+
+        for flag, values, sweep_time in SWEEPS.get(name, []):
+            filename = f"sweep_{name}_{flag}.sh"
+            write(
+                filename,
+                HEADER.format(
+                    title=(f"{bench.title()}: --{flag} sweep over {values}, all "
+                           f"{len(bench.arms)} arms per value. Writes to "
+                           f"benchmarks/outputs/sweeps/{name}_{flag}/<value>/."),
+                    filename=filename, job_name=f"{name}_{flag}_sweep", time=sweep_time,
+                    time_basis=(f"{len(values)} values x {len(bench.arms)} arms x T_reference; "
+                                f"see SWEEPS in generate_jobs.py for the per-value measurement."),
+                    dataset=dataset,
+                )
+                + SWEEP_BODY.format(model=name, flag=flag, values=" ".join(values),
+                                    arms=" ".join(bench.arms), epochs=bench.epochs,
+                                    reference=REFERENCE_ARM, n_arms=len(bench.arms)),
             )
 
         for arm in bench.arms:

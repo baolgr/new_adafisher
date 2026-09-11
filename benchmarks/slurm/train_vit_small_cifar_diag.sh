@@ -12,7 +12,7 @@
 #SBATCH --time=00:30:00
 #SBATCH --output=benchmarks/slurm/logs/%x-%j.out
 
-# --time: MEASURED. T_diag = 987.8 s = 16.5 min per arm; ~18 min of job. One arm per job here, not seven.
+# --time: MEASURED. T_diag = 987.8 s = 16.5 min per arm; ~18 min of job. This is the PER-ARM figure; see GROUPED below for the default.
 # Dataset: cifar10 must be staged under $SLURM_SUBMIT_DIR/dataset (compute nodes have no
 # internet; --no-allow-download turns a missing dataset into a clear error, not a timeout).
 

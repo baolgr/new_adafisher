@@ -12,7 +12,7 @@
 #SBATCH --time=00:30:00
 #SBATCH --output=benchmarks/slurm/logs/%x-%j.out
 
-# --time: MEASURED. T_diag = 987.8 s = 16.5 min per arm; ~18 min of job. One arm per job here, not seven.
+# --time: MEASURED. T_diag = 987.8 s = 16.5 min per arm; ~18 min of job. This is the PER-ARM figure; see GROUPED below for the default.
 # Dataset: cifar10 must be staged under $SLURM_SUBMIT_DIR/dataset (compute nodes have no
 # internet; --no-allow-download turns a missing dataset into a clear error, not a timeout).
 
@@ -36,7 +36,8 @@ export PYTHONPATH="$SLURM_SUBMIT_DIR/src:$SLURM_SUBMIT_DIR"
 # §6.3) equal-epoch comparison — usable, but not this campaign's headline protocol.
 WCT_BUDGET="${WCT_BUDGET:-}"
 if [ -n "$WCT_BUDGET" ]; then
-  BUDGET_ARGS=(--budget-mode wct --wct-budget "$WCT_BUDGET" --max-epoch-factor 3)
+  BUDGET_ARGS=(--budget-mode wct --wct-budget "$WCT_BUDGET" --max-epoch-factor 3
+               --lr-schedule budget)
 else
   echo "WCT_BUDGET unset — falling back to --budget-mode epochs (see this script's header)" >&2
   BUDGET_ARGS=(--budget-mode epochs)

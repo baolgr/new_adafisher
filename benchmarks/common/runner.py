@@ -53,6 +53,7 @@ from .records import (
     write_step_csv,
     write_summary,
 )
+from .schedules import BudgetCosine, NominalCosine
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARKS_DIR = REPO_ROOT / "benchmarks"
@@ -145,6 +146,13 @@ def build_parser(bench: Benchmark) -> argparse.ArgumentParser:
     parser.add_argument("--wct-budget", dest="wct_budget", type=float, default=None,
                         help="pre-measured reference elapsed time (s); skips running the "
                              "reference arm, so one arm can be one independent SLURM job")
+    parser.add_argument("--lr-schedule", dest="lr_schedule", choices=["nominal", "budget"],
+                        default="nominal",
+                        help="what the cosine anneals over. 'nominal': --epochs, shared by every "
+                             "arm, clamped at the floor past it. 'budget': each budgeted arm's own "
+                             "wall-clock budget, so every arm completes one full cosine "
+                             "(common/schedules.py). The reference arm is unbudgeted and always "
+                             "uses 'nominal'.")
     parser.add_argument("--max-epoch-factor", dest="max_epoch_factor", type=float, default=3.0)
     parser.add_argument("--max-steps", dest="max_steps", type=int, default=10**9)
     add_hparam_arguments(parser)
@@ -173,6 +181,10 @@ def build_parser(bench: Benchmark) -> argparse.ArgumentParser:
 # ----------------------------------------------------------------------------------------------
 
 
+def total_s_of(steps: Sequence[Any]) -> float:
+    return float(steps[-1].elapsed_s) if steps else 0.0
+
+
 def run_arm(
     bench: Benchmark, arm: str, args: argparse.Namespace, hp: HParams,
     device: torch.device, budget_s: float, output_dir: Path,
@@ -187,10 +199,22 @@ def run_arm(
         allow_download=args.allow_download, train_subset=args.train_subset,
     )
     # AdaFisher Appendix D: "A cosine annealing learning rate decay strategy was employed, aligning
-    # with the number of training epochs specified for each optimizer" — T_max is the *nominal*
-    # epoch count (--epochs), shared by every arm, so the schedule's shape is shared even though
-    # the arms complete different numbers of epochs within the same wall-clock budget.
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    # with the number of training epochs specified for each optimizer". Under the WCT protocol the
+    # arms complete different epoch counts inside one budget, so that sentence has two readings and
+    # --lr-schedule picks between them; common/schedules.py derives both, and documents the two
+    # measured biases the first campaign's single shared T_max introduced.
+    #
+    # The reference arm is unbudgeted by construction — it is what *defines* the budget — so it
+    # always anneals over the nominal epoch count, whichever mode is requested.
+    scheduler: Any = None
+    lr_hook: Optional[BudgetCosine] = None
+    if args.lr_schedule == "budget" and budget_s != float("inf"):
+        lr_hook = BudgetCosine(optimizer, budget_s=budget_s)
+    else:
+        # Clamped past T_max, unlike torch's CosineAnnealingLR, whose periodicity made every
+        # overshooting arm's LR climb back towards base_lr (schedules.py's docstring). Identical to
+        # CosineAnnealingLR for every epoch within T_max.
+        scheduler = NominalCosine(optimizer, t_max=args.epochs)
     # --max-epoch-factor bounds how far a *budgeted* arm may run when the reference arm's budget
     # turns out generous (plan_lot8.md §0.7 step 3). The reference arm itself is unbudgeted and
     # must run exactly the nominal epoch count — it is what defines the budget (AdaFisher §5's WCT
@@ -223,23 +247,37 @@ def run_arm(
         )
 
     budget_label = "unbounded" if budget_s == float("inf") else f"{budget_s:.1f}s"
-    print(f"[{arm}] budget={budget_label} max_epochs={max_epochs} device={device}")
+    schedule_label = "budget-cosine" if lr_hook is not None else f"nominal-cosine/{args.epochs}ep"
+    print(f"[{arm}] budget={budget_label} max_epochs={max_epochs} lr={schedule_label} "
+          f"device={device}")
     reset_peak_memory(device)  # the arm's peak covers training *and* evaluation
     steps, epochs = train_under_budget(
         model, optimizer, train_loader, bench.loss_fn,
         budget_s=budget_s, max_epochs=max_epochs, device=device, scheduler=scheduler,
         eval_fn=eval_fn, on_step=writer, max_steps=args.max_steps,
-        prepare_batch=bench.prepare_batch, log_fn=print,
+        prepare_batch=bench.prepare_batch, log_fn=print, lr_schedule=lr_hook,
     )
     if writer is not None:
         writer.save_final(len(steps), epochs[-1].epoch if epochs else 0, model)
+
+    # An arm capped by --max-epoch-factor stops part-way up its own cosine and is NOT annealed —
+    # the very thing --lr-schedule budget exists to prevent. Only worth warning about when the cap
+    # bound *early*: hitting it with the budget essentially spent is the benign case. No arm of the
+    # first campaign came close (the cheapest, resnet20_cifar/adam, used 59 of its 150 allowed
+    # epochs), so this guards against a mis-set budget rather than an expected condition.
+    unspent = budget_s - total_s_of(steps)
+    if lr_hook is not None and len(epochs) >= max_epochs and unspent > 0.01 * budget_s:
+        print(f"[{arm}] WARNING: stopped at the --max-epoch-factor cap ({max_epochs} epochs) with "
+              f"{unspent:.1f}s of {budget_s:.1f}s budget unspent, so its cosine did not reach the "
+              f"floor (lr={float(optimizer.param_groups[0]['lr']):.3e}). Raise "
+              f"--max-epoch-factor, or treat this arm's final metrics as under-annealed.")
 
     test_loss, test_acc = (float("nan"), float("nan"))
     if test_loader is not None:
         test_loss, test_acc = evaluate(model, test_loader, bench.loss_fn, device,
                                        prepare_batch=bench.prepare_batch,
                                        metric_fn=bench.metric_fn)
-    total_s = steps[-1].elapsed_s if steps else 0.0
+    total_s = total_s_of(steps)
     peak_vram = peak_memory_bytes(device)
     print(f"[{arm}] done: {len(steps)} steps, {len(epochs)} epochs, "
           f"test_acc={test_acc * 100:.2f}%, peak VRAM={format_bytes(peak_vram)}")
@@ -273,16 +311,30 @@ def main(bench: Benchmark, argv: Sequence[str] | None = None) -> None:
         print(f"[wct] reference arm {args.reference_arm!r} took {budget:.1f}s — "
               f"that is every other arm's budget")
 
+    def report() -> str:
+        """Rewrite the whole report from the arms finished so far.
+
+        Called after *every* arm, not once at the end: a grouped job's report used to be written
+        only after the last arm, so a crash in a later arm lost every arm that had completed
+        (it cost `resnet20_cifar_all` and `mlp_ln_mnist_all` two finished arms each — the cause is
+        in `_eigh_utils.py`'s docstring). Rewriting is cheap next to training and idempotent.
+        """
+        root.mkdir(parents=True, exist_ok=True)
+        write_step_csv(results, root / "records.csv")
+        write_epoch_csv(results, root / "epochs.csv")
+        text = write_summary(results, root / "summary.md")
+        write_manifest(results, vars(args) | {"hparams": asdict(hp)}, root / "manifest.json")
+        return text
+
+    if results:
+        report()  # the reference arm, before the budgeted ones start
     for arm in args.arms:
         if any(r.arm == arm for r in results):
             continue
         results.append(run_arm(bench, arm, args, hp, device, budget, root / arm))
+        report()
 
-    root.mkdir(parents=True, exist_ok=True)
-    write_step_csv(results, root / "records.csv")
-    write_epoch_csv(results, root / "epochs.csv")
-    summary = write_summary(results, root / "summary.md")
-    write_manifest(results, vars(args) | {"hparams": asdict(hp)}, root / "manifest.json")
+    summary = report()
     print("\n" + summary)
     if not args.no_plot and write_plots(results, root, bench.title()):
         print(f"plots written to {root}")

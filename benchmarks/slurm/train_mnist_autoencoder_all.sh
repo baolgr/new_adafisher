@@ -35,13 +35,22 @@ export PYTHONPATH="$SLURM_SUBMIT_DIR/src:$SLURM_SUBMIT_DIR"
 # WCT_BUDGET to pass, no dispatcher, no --dependency.
 #
 # The per-arm alternative is benchmarks/slurm/train_mnist_autoencoder_<arm>.sh, one job each; use it if you
-# need the arms to run concurrently, or if you want a crash in one arm not to cost the others.
+# need the arms to run concurrently. A crash in one arm no longer costs the others either way:
+# main() rewrites records.csv/epochs.csv/summary.md/manifest.json after every completed arm.
+#
+# --lr-schedule budget: each budgeted arm anneals its cosine over its OWN wall-clock budget, so
+# every arm completes one full cosine and is compared at the same point of its own schedule. With
+# the previous shared T_max=--epochs, a cheap arm overshot the nominal epoch count and its LR
+# climbed back up, while an expensive arm stopped before reaching the floor — both measured, both
+# documented in benchmarks/common/schedules.py. The reference arm is unbudgeted and keeps the
+# nominal schedule; it is what defines the budget.
 python -m benchmarks.mnist_autoencoder.bench \
   --arms diag kfac ekfac tkfac tekfac adam adamw \
   --epochs 20 \
   --budget-mode wct \
   --reference-arm diag \
   --max-epoch-factor 3 \
+  --lr-schedule budget \
   --num-workers 8 \
   --no-allow-download \
   --data-root "$SLURM_SUBMIT_DIR/dataset" \
