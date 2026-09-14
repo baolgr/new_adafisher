@@ -134,9 +134,11 @@ def write_summary(results: Sequence[ArmResult], path: Path, skip_first: int = 5)
 def write_plots(
     results: Sequence[ArmResult], output_dir: Path, title: str, window: int = 50
 ) -> bool:
-    """Training loss against epoch and wall-clock time, plus — when the task has an accuracy —
-    validation error against both. Returns ``False`` (skipping plots, never failing) if matplotlib
-    is missing: plotting is an optional bench dependency (``plan_lot7.md`` §0.9).
+    """Training loss against epoch and wall-clock time; validation loss against epoch; test vs.
+    validation per arm (error when the task has an accuracy, loss otherwise); plus, when the task
+    has an accuracy, validation error against both epoch and wall-clock time. Returns ``False``
+    (skipping plots, never failing) if matplotlib is missing: plotting is an optional bench
+    dependency (``plan_lot7.md`` §0.9).
     """
     try:
         import matplotlib
@@ -173,25 +175,67 @@ def write_plots(
         fig.savefig(output_dir / filename, dpi=150)
         plt.close(fig)
 
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+    for result in results:
+        if not result.epochs:
+            continue
+        ax.plot([e.epoch for e in result.epochs], [e.val_loss for e in result.epochs],
+                marker="o", markersize=3, label=result.arm)
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("validation loss")
+    ax.set_title(f"{title}: validation loss vs. epoch", fontsize=11)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_dir / "valloss_vs_epoch.png", dpi=150)
+    plt.close(fig)
+
     has_accuracy = any(e.val_acc == e.val_acc for r in results for e in r.epochs)
-    if not has_accuracy:
-        return True
-    for x_attr, xlabel, filename in [("epoch", "epoch", "valerr_vs_epoch.png"),
-                                     ("elapsed_s", "wall-clock time (s)", "valerr_vs_time.png")]:
+    if has_accuracy:
+        for x_attr, xlabel, filename in [("epoch", "epoch", "valerr_vs_epoch.png"),
+                                         ("elapsed_s", "wall-clock time (s)", "valerr_vs_time.png")]:
+            fig, ax = plt.subplots(figsize=(8, 5.5))
+            for result in results:
+                if not result.epochs:
+                    continue
+                ax.plot([getattr(e, x_attr) for e in result.epochs],
+                        [100.0 * (1.0 - e.val_acc) for e in result.epochs],
+                        marker="o", markersize=3, label=result.arm)
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel("validation error (%)")
+            ax.set_title(f"{title}: validation error vs. {xlabel}", fontsize=11)
+            ax.legend()
+            fig.tight_layout()
+            fig.savefig(output_dir / filename, dpi=150)
+            plt.close(fig)
+
+    arms_with_epochs = [r for r in results if r.epochs]
+    if arms_with_epochs:
         fig, ax = plt.subplots(figsize=(8, 5.5))
-        for result in results:
-            if not result.epochs:
-                continue
-            ax.plot([getattr(e, x_attr) for e in result.epochs],
-                    [100.0 * (1.0 - e.val_acc) for e in result.epochs],
-                    marker="o", markersize=3, label=result.arm)
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel("validation error (%)")
-        ax.set_title(f"{title}: validation error vs. {xlabel}", fontsize=11)
+        x = range(len(arms_with_epochs))
+        width = 0.35
+        if has_accuracy:
+            val_vals = [100.0 * (1.0 - max((e.val_acc for e in r.epochs), default=float("nan")))
+                        for r in arms_with_epochs]
+            test_vals = [100.0 * (1.0 - r.test_acc) for r in arms_with_epochs]
+            ylabel, metric, fmt = "error (%)", "error", "%.1f"
+        else:
+            val_vals = [r.epochs[-1].val_loss for r in arms_with_epochs]
+            test_vals = [r.test_loss for r in arms_with_epochs]
+            ylabel, metric, fmt = "loss", "loss", "%.3f"
+        bars_val = ax.bar([i - width / 2 for i in x], val_vals, width, label="validation")
+        bars_test = ax.bar([i + width / 2 for i in x], test_vals, width, label="test")
+        for bars in (bars_val, bars_test):
+            ax.bar_label(bars, fmt=fmt, fontsize=7, padding=2)
+        ax.set_xticks(list(x))
+        ax.set_xticklabels([r.arm for r in arms_with_epochs])
+        ax.set_xlabel("arm")
+        ax.set_ylabel(ylabel)
+        ax.set_title(f"{title}: test vs. validation {metric}", fontsize=11)
         ax.legend()
         fig.tight_layout()
-        fig.savefig(output_dir / filename, dpi=150)
+        fig.savefig(output_dir / "test_vs_val.png", dpi=150)
         plt.close(fig)
+
     return True
 
 

@@ -268,6 +268,39 @@ root on `v^(t)` — is **identical across the five modes**.
 > by 3-6 orders. Do not shorten a P2 re-warm below `10·TCov`, and lengthen it when sweeping `lam`
 > downwards. `--checkpoint-optimizer-state` (opt-in, OFF by default) exists for the *next* campaign
 > that runs anyway, not for a re-run.
+>
+> **Lot 1 of the campaign: code done, the A1 cluster run pending** (`docs/reports/plan_exp_lot1.md`).
+> The first curvature matrices: `fisher_ref/sources.py` (the three output-space roots, CE and MSE),
+> `fisher_ref/capture.py` (per-example `(a, g)` and the recomputed `x_hat`, per-sample gradients for
+> `Linear` shared and unshared, `Conv2d`, `BatchNorm2d`-eval, `LayerNorm`, `GroupNorm`) and
+> `fisher_ref/reference/dense.py` (regime A: `F = U^T U`, `E_hat`, `B_l` in fp64, `U` streamed), plus
+> `tests/test_fisher_ref_lot1.py` (44 tests, **297 -> 341** passing, no pre-existing test modified;
+> `ruff`/`mypy` clean). T1 `3.8e-16` against an independent `jvp -> Λ -> vjp` oracle (T1 asks
+> `1e-10`), T2's `O(K^{-1/2})` over 5 seeds and `K` to `1e4`, T6 to `1e-6` against central finite
+> differences on all three norm types. **Three findings, each measured.** (1) A **silent** 94%-of-`P`
+> hole in the obvious design: `register_full_backward_hook` fires from the module's *input*-side
+> node, so `autograd.grad(out, params, ...)` with a `requires_grad` input **prunes the first module
+> out** and its hook never fires — on `mlp_ln_mnist` that is the first `Linear`, 25 120 of 26 634
+> parameters, whose `U` columns would simply be zero with `F` still symmetric, PSD and every
+> exactness test still green. `capture.py` therefore uses a *tensor* hook on the module output and
+> the driver backpropagates with `inputs=[batch]`; both halves are locked by a regression test.
+> (2) The type-2 `F` of a classification **head** is rank-deficient at *any* `N`, by exactly
+> `d_in + 1`: adding a constant to every logit leaves the softmax unchanged, so `W += 1_C v^T`,
+> `b += c·1_C` is in `ker F` — verified at `9.1e-18` against `9.1e-2` for a random direction, and
+> measured as 297/330 on the real A1 head. Unlike regime B's `m < P` deficiency this one does not go
+> away, so every damped-inverse metric on a head block reads `λI` there. (3) `curvlinops` is
+> **not adopted** (`plan_exp_draft.md` §2.4 is updated): absent from the venv and from the cluster's
+> `--no-index` list, and unnecessary, since T1's own oracle shares no code with the build it checks.
+> On the real `mlp_ln_mnist/diag/ckpt_0.5` with 256 train probes, `||E_hat - F||_F / ||F||_F = 1.42`
+> on the head + LayerNorm blocks — the source error is not a correction term. **Phase 5 is written
+> but not submitted**: `fisher_ref/experiments/dense_reference_a1.py` + `fisher_ref/slurm/
+> dense_reference_a1.sh`, `N = 4000`. Sizing it produced a fourth measured finding — `plan_exp_draft.md`
+> §2.2's `P_max = sqrt(B/24)` counts **three** `P x P` buffers, which is what the obvious spellings
+> (`M += rows.T @ rows`, `M = 0.5*(M + M.T)`) allocate and what the lot's first draft had. With
+> `addmm_` and a block-wise in-place `symmetrize_` the build needs **one**, measured at `1.27 x P^2`
+> against `+1.16 x P^2` for that symmetrisation alone — so A1 fits the **same `h100_1g.10gb` slice
+> the training jobs use** (~6 GB of 10), and §12's "an analysis job cannot allocate `F`" risk
+> becomes a rule instead: hold one `P x P` on the device, put everything needing two on the host.
 
 ## Working language
 
@@ -419,6 +452,9 @@ adafisher /
 │   ├── plan_exp_lot0.md          # lot-0 implementation plan: why v0's lot-0 exit criterion was
 │   │                             #   unsatisfiable, the probe/registry/bridge design, the
 │   │                             #   measured sample-independence tolerance
+│   ├── plan_exp_lot1.md          # lot-1 implementation plan: the backward-hook pruning finding,
+│   │                             #   the named_parameters() column layout, the curvlinops
+│   │                             #   decision, and §4's smoke on the real A1 checkpoint
 │   └── archives/                 # the optimizer-implementation lots, moved aside once done. Still
 │                                 #   the authoritative record of every design decision cited
 │                                 #   throughout this file and in the code — plan.md (overall,
@@ -426,15 +462,31 @@ adafisher /
 │                                 #   elsewhere name them by bare filename: they live here.
 ├── fisher_ref/                   # the Fisher-drift campaign's own package (plan_exp_draft.md §7).
 │   │                             #   A *reader*: trains nothing, changes nothing in benchmarks/
-│   │                             #   or src/. Lot 0 (done) ships four modules:
+│   │                             #   or src/. Lots 0 and 1 (done) ship:
 │   ├── conventions.py            #   fp64 policy, TF32 off + what was actually set, rvec/kron
 │   │                             #   convention, reference_mode, assert_sample_independent
 │   ├── probes.py                 #   fixed, augmentation-free, content-hashed probe sets on the
 │   │                             #   run's own seeded train/val split
 │   ├── registry.py               #   parameter block -> layer type, weight sharing read from one
 │   │                             #   forward pass; partitions every parameter of every model
-│   └── checkpoints.py            #   benchmarks/outputs/ -> theta: both layouts (seed 0 and
-│                                 #   outputs/seeds/<model>/seed<n>/), rejects pre-fix payloads
+│   ├── checkpoints.py            #   benchmarks/outputs/ -> theta: both layouts (seed 0 and
+│   │                             #   outputs/seeds/<model>/seed<n>/), rejects pre-fix payloads
+│   ├── sources.py                #   lot 1: the backprop vectors — type-2 (closed-form softmax
+│   │                             #   root), MC_K (with its K^{-1/2}), empirical; CE and MSE
+│   ├── capture.py                #   lot 1: per-example (a, g) and the recomputed x_hat of a norm
+│   │                             #   layer; per_sample_gradients per layer kind. Uses a *tensor*
+│   │                             #   hook on the module output, not register_full_backward_hook
+│   │                             #   — see "Things to watch" (plan_exp_lot1.md §0.1)
+│   ├── reference/dense.py        #   lot 1: regime A — F = U^T U, E_hat, B_l in fp64, U streamed;
+│   │                             #   columns in named_parameters() order (plan_exp_lot1.md §0.5).
+│   │                             #   ONE P x P buffer on the device: addmm_ + symmetrize_ (§0.9)
+│   ├── experiments/              #   measurement drivers, not tests; env-var constants, no CLI.
+│   │                             #   rewarm_fidelity.py, identity_seed_residual.py,
+│   │                             #   dense_reference_a1.py (lot 1 phase 5: F/E_hat/blocks, the
+│   │                             #   source gap, the train/val gap, the §3.4 noise floor)
+│   └── slurm/                    #   the campaign's ANALYSIS jobs — hand-written, separate from
+│                                 #   benchmarks/slurm/ (read-only, and its generator enumerates
+│                                 #   training benchmarks). Every job states its own memory.
 ├── requirements-cluster.txt      # lot 8: --no-index install list for the cluster's wheelhouse
 └── CLAUDE.md
 ```
@@ -567,8 +619,8 @@ Run these from the repository root on the laptop (the local checkout lives at
 
 ```bash
 .venv/bin/pytest tests/ -v                                    # everything (lots 1-8 + step 1 + campaign
-                                                               #   lot 0: 288 tests, + 8 marked slow, run
-                                                               #   with --runslow)
+                                                               #   lots 0-1: 341 tests, + 10 marked slow and
+                                                               #   1 needing curvlinops, run with --runslow)
 .venv/bin/pytest tests/test_diag_bitexact.py -v                # exit criteria 1 & 3 (bit-exactness)
 .venv/bin/pytest tests/test_diag_eq4_semantics.py -v            # exit criterion 2 (Eq. 4 semantics)
 .venv/bin/pytest tests/test_minmax_matches_official.py -v      # MinMaxNormalization vs. official repo
@@ -600,6 +652,11 @@ Run these from the repository root on the laptop (the local checkout lives at
                                                                  #   sample independence, probe sets, the
                                                                  #   layer-type registry over every model,
                                                                  #   the checkpoint bridge; all offline
+.venv/bin/pytest tests/test_fisher_ref_lot1.py -v                # the campaign's lot 1 (T1, T2, T6): the three
+                                                                 #   output-space roots, per-sample gradients vs.
+                                                                 #   torch.func and vs. finite differences, the
+                                                                 #   backward-hook pruning regression, the dense
+                                                                 #   F/E_hat/B_l and their layout; all offline
 
 # Every bench takes the same CLI; `python -m benchmarks.<model>.bench` and
 # `python benchmarks/<model>/bench.py` are equivalent. The models are:
@@ -885,6 +942,20 @@ scale, and independently at each of the `k_h·k_w` kernel offsets (`plan_lot6.md
   choice, EKFAC's (§4), and TKFAC/TEKFAC's. Limitations documented in
   `papers/empirical_fisher_limits_1905.12558.pdf`; test cases distinguishing type-I/II/empirical in
   `papers/kfac_from_scratch_2507.05127.pdf` (cheat sheet §6). Do not open this line of work unasked.
+- **`fisher_ref/capture.py` deliberately does *not* use `register_full_backward_hook`.** It is the
+  hook `adafisher_modes/optimizer.py` uses and the obvious one to copy, and copying it puts a
+  **silent** hole in the campaign's references. That hook fires from the module's *input*-side node,
+  so a module whose `grad_input` is not needed by the `inputs=` requested of `torch.autograd.grad`
+  is pruned out of the backward graph and never fires. Measured on `Linear -> LayerNorm -> ReLU ->
+  Linear` in fp64: `grad(out, params, grad_outputs=V)` fires all three modules when nothing requires
+  grad (with a `UserWarning` — that fallback is what makes the bug look absent), and only the last
+  two as soon as the input requires grad. On `mlp_ln_mnist` the missing module is the first
+  `Linear`, **25 120 of 26 634 parameters**; the symptom is not a crash but zero columns in `U`,
+  leaving `F` symmetric, PSD and wrong. `capture.py` takes `g` from a *tensor* hook on the module
+  output (`output.register_hook`, checked to survive `ReLU(inplace=True)` on that output and a
+  residual reuse of it) and the dense driver backpropagates with `inputs=[batch]`, never
+  `inputs=params`. `test_backward_hook_pruning_regression` pins both halves. The two packages'
+  hooks are not meant to converge — see `plan_exp_lot1.md` §0.1.
 - **Parameters outside the four hooked module types (lot 8: fixed).** `optimizer.py`'s `step()` no
   longer walks parameters and modules by position and shape (the reference's `adafisher.py:275-307`
   bookkeeping, plus `_check_dim`, both removed): it uses an identity-keyed `(id(param) -> module)`

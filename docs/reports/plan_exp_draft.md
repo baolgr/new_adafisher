@@ -130,7 +130,10 @@ Three structural facts about these models that the campaign must respect, all in
 - Closed-form root for softmax, no decomposition needed: `S_n[:, c] = sqrt(p_c)(e_c − p_n)`
   satisfies `S_n S_n^T = diag(p_n) − p_n p_n^T` (the same choice as *KFAC from scratch*,
   arXiv:2507.05127, cheat sheet §6) `[ESTABLISHED]`. It gives `C` columns for a rank of `C−1`:
-  +11 % rows at `C = 10`.
+  +11 % rows at `C = 10`. **So `m = N(C−1)` below is a rank, not a row count**: `U` has `N·C` rows
+  (the null vector is `sqrt(p_n)`), and §2.2/§2.3's tables size memory at the rank. Lot 1 fixes the
+  convention — `DenseReference.n_rows` is `N·C` — and asserts the null vector numerically
+  (`plan_exp_lot1.md` §0.2).
 - Each row of `U` costs **one** backward pass of one output vector, and the `N` probes of a batch
   share it (independent samples: BN in eval mode, dropout off). Building `U` costs `C` backward
   passes per probe batch.
@@ -201,11 +204,17 @@ second effect.
 `curvlinops`' `GGNLinearOperator` / `EFLinearOperator` on the probes: exact `Fv` in one JVP + one
 VJP whatever `C` is. Accessible: spectral norm of `F − cK` (Lanczos), traces (Hutch++/XTrace),
 `ρ(K)` through conjugate gradients, spectra (SLQ). Not accessible cleanly: the KL (log-determinant
-by SLQ is possible but stochastic; optional). `curvlinops` is **not** currently installed in
-`.venv` and is **not** in `requirements-cluster.txt` — adding it is a lot-1 decision, and if the
-cluster wheelhouse does not carry it, regime C's oracle role falls back to a hand-written
-`Fv` (double backward), which T1 then has nothing independent to check against. Say so rather than
-discover it.
+by SLQ is possible but stochastic; optional).
+
+**Decided at lot 1: `curvlinops` is not adopted** (`plan_exp_lot1.md` §0.4). It is absent from
+`.venv`, from `pyproject.toml` and from `requirements-cluster.txt` (an `--no-index` install against
+the Alliance wheelhouse), and the reason this section feared the decision — "regime C's oracle role
+falls back to a hand-written `Fv`, which T1 then has nothing independent to check against" — does
+not apply: T1's oracle is `Jv` by `torch.func.jvp`, `Λ_n u = diag(p)u − p(pᵀu)` in closed form, then
+one VJP, which shares no code with the root-based build (it never forms a root of `Λ`) and agrees
+with it to `3.8e-16` over 20 random vectors. Regime C (lot 6) extends that operator. An optional
+`importorskip` cross-check against `GGNLinearOperator` is in the lot-1 test file for anyone who
+installs the package locally.
 
 ### 2.5 Hardware and numerical traps (lot 0's business)
 
@@ -581,10 +590,10 @@ fisher_ref/
   probes.py           # versioned, hashed, augmentation-free probe sets from benchmarks.common.data
   registry.py         # module/parameter -> layer type, over any benchmarks/<model> network
   checkpoints.py      # the bridge to benchmarks/outputs/: discover runs, load theta at a fraction
-  capture.py          # hooks: inputs a, x_hat for norms, output grads g per column c     [lot 1]
-  sources.py          # backprop vectors: type-2 (closed-form root), MC_K (with K^{-1/2}), empirical [lot 1]
+  capture.py          # hooks: inputs a, x_hat for norms, output grads g per column c     [lot 1: done]
+  sources.py          # backprop vectors: type-2 (closed-form root), MC_K (with K^{-1/2}), empirical [lot 1: done]
   reference/
-    dense.py          # regime A: F, E_hat, B_exp, dense fp64                              [lot 1]
+    dense.py          # regime A: F, E_hat, B_l, dense fp64                                [lot 1: done]
     factor.py         # regime B: per-layer U_l or ghost Grams, streamed                   [lot 4]
     matfree.py        # regime C: curvlinops operators (or a hand-written Fv)              [lot 6]
   approx/
@@ -641,7 +650,7 @@ into one measured statement instead of two implementations nobody compared.
 | `benchmarks/` (this repo) | models, the probe data pipeline, the trajectories, the checkpoints | **read-only for this campaign**; `fisher_ref` imports it, never edits it |
 | `src/adafisher_modes/` (this repo) | P2's operational state; the degenerate-setting cross-checks | read-only; a campaign finding may later motivate a change, through its own lot |
 | `reference_repos/AdaFisher`, `.../FisherAdapTune` | re-confirming T12, hyperparameters | **read-only**, as `CLAUDE.md` requires |
-| `curvlinops` | regime C's oracle, and the K-FAC-reduce normalisation constants | **not installed**, not in `requirements-cluster.txt`; adding it is a lot-1 decision (§2.4) |
+| `curvlinops` | regime C's oracle, and the K-FAC-reduce normalisation constants | **not adopted** (decided at lot 1, §2.4 / `plan_exp_lot1.md` §0.4): not installed, not in `requirements-cluster.txt`, and T1's own `jvp → Λ → vjp` oracle removes the need. Optional `importorskip` cross-check only |
 | `reference_repos/EKFAC-pytorch` | second EKFAC implementation (cross-check) | read-only |
 
 **Invariants** (changing one invalidates earlier comparisons): the upstream code; the probe sets
@@ -663,7 +672,7 @@ non-curvature half carved out, for the reason `plan_exp_lot0.md` §0.1 gives.
 | Lot | Content | Deliverable | Exit criterion |
 |---|---|---|---|
 | **0** | `conventions.py`, TF32 flags, `probes.py`, `registry.py`, **`checkpoints.py` (the bridge)** | `fisher_ref/` importable, green CI | **T0.1-T0.8** (§10.1) pass; the pre-existing test suite is untouched and still green |
-| **1** | A1 end to end: `capture.py`, `sources.py`, `reference/dense.py`; `F`, `Ê`, `B_ℓ` in fp64 at one checkpoint | the first exact references | T1, T2, T6 pass; `curvlinops` decided (§2.4) |
+| **1** *(done, bar the cluster run)* | A1 end to end: `capture.py`, `sources.py`, `reference/dense.py`; `F`, `Ê`, `B_ℓ` in fp64 at one checkpoint | the first exact references | T1, T2, T6 pass; `curvlinops` decided (§2.4) — all met (`plan_exp_lot1.md` §3). The full `N = 4000` A1 run is its phase 5 |
 | **2** | the zoo (`approx/`) + the metrics (`metrics/`) + `p1_structural.py`, on A1: 5 checkpoints × the available seeds, noise floor | the first figure set, `metrics.csv` | T3-T5, T7-T9 pass; the noise floor is plotted; HF3, HF4 decided on A1 |
 | **3** | A2 (conv, GN and BN-eval), A3 (fused `qkv`, mean pooling); sharing/independence decomposition | the complete regime-A map | HF2 decided; every Q4 conclusion holds on ≥ 2 models |
 | **4** | regime B: `factor.py`, per-layer Grams, ghost, Woodbury — **validated against A1-A3's dense first**, then B1, B2 and **B0 (`mnist_autoencoder`, §3.6)** | the regime-B map + the stall diagnosis | T10, T11 pass; §3.6's `ρ` / `‖F̃^{-1}m̂‖` measurement produced |
