@@ -37,7 +37,7 @@ from fisher_ref import conventions, probes, registry  # noqa: E402
 from fisher_ref.checkpoints import available_seeds, discover_runs, load_theta  # noqa: E402
 
 BENCHES: Dict[str, Benchmark] = discover_benchmarks()
-SLOW = {"resnet50_cifar"}
+SLOW = {"resnet50_cifar", "resnet50_cifar100", "resnet50_imagenet", "vit_small_imagenet"}
 
 
 # ----------------------------------------------------------------------------------------------
@@ -205,7 +205,27 @@ def test_t0_5_probe_sets_are_deterministic_disjoint_and_augmentation_free() -> N
     with pytest.raises(ValueError):
         _synthetic_probes("val", 5)  # only 4 val examples exist
     with pytest.raises(ValueError):
-        probes.build_probe_set(BENCHES["cnn_gn_cifar"], split="test", n=1, spec=SYNTHETIC_SPEC)
+        _synthetic_probes("nonexistent", 1)
+
+
+def test_t0_5_test_probes_are_a_third_out_of_sample_source() -> None:
+    """``split="test"`` reads the dataset's own held-out set instead of partitioning the training
+    one — added at lot 1 because ``val`` holds 5 000 images and the HF1 null gap is dominated by
+    the out-of-sample side (``plan_exp_lot1.md`` §6.4). It is a *separate* split, never silently
+    pooled with ``val``: the digest distinguishes them, and whether they may be pooled is a
+    measured question (``probes.build_probe_set``'s docstring).
+    """
+    test = _synthetic_probes("test", 6)
+    assert test.split == "test" and len(test) == 6
+    assert list(test.indices) == list(range(6))          # natural order, hence head()'s prefix
+    assert test.head(3).digest == _synthetic_probes("test", 3).digest
+    assert test.digest != _synthetic_probes("train", 6).digest
+    assert torch.equal(test.inputs, _synthetic_probes("test", 6).inputs)
+
+    # The synthetic dataset ignores train=/False, so this asserts the *plumbing*, not disjointness:
+    # on a real dataset the test set is a different file entirely.
+    assert probes.build_probe_set(BENCHES["cnn_gn_cifar"], split="test", n=2,
+                                  spec=SYNTHETIC_SPEC).split == "test"
 
 
 def test_t0_5_probe_sets_round_trip_through_disk(tmp_path: Path) -> None:
@@ -235,6 +255,12 @@ def test_t0_5_real_probe_sets_match_the_training_split() -> None:
     inputs, targets = train.as_model_batch(bench)
     assert inputs.shape == (4, 3, 32, 32) and targets.shape == (4,)
 
+    # The real test set is a different file, so it is genuinely 10 000 further held-out images —
+    # the point of the lot-1 addition. Its probes differ from the val ones at the same size.
+    test = probes.build_probe_set(bench, split="test", n=4)
+    assert test.inputs.shape == (4, 3, 32, 32) and test.split == "test"
+    assert not torch.equal(test.inputs, val.inputs)
+
     autoencoder = BENCHES["mnist_autoencoder"]
     ae_probes = probes.build_probe_set(autoencoder, split="train", n=3)
     ae_inputs, ae_targets = ae_probes.as_model_batch(autoencoder)
@@ -255,6 +281,23 @@ EXPECTED_LAYER_TYPES: Dict[str, Dict[str, int]] = {
     "cct_2_3x2_cifar": {"conv": 2, "linear_shared": 9, "norm": 5, "embed": 1, "head": 1},
     "vit_small_cifar": {"conv": 1, "linear_shared": 24, "norm": 13, "embed": 2, "head": 1},
     "resnet50_cifar": {"conv": 53, "norm": 53, "head": 1},
+    # CIFAR-100 and ImageNet32: the same architectures with a wider head, so the layer-type
+    # inventory is by construction identical to the CIFAR-10 row above it. Only the two ImageNet
+    # 224 px benches are genuinely different networks — ResNet-50's ImageNet stem keeps the 53/53
+    # count (a 7x7 conv is still one conv), and ViT-S/16 is depth 12 against ViT-S/4's depth 6,
+    # hence 48 shared Linears and 25 norms rather than 24 and 13.
+    "cnn_gn_cifar100": {"conv": 3, "norm": 3, "head": 1},
+    "vit_micro_cifar100": {"conv": 1, "linear_shared": 8, "norm": 5, "embed": 1, "head": 1},
+    "resnet20_cifar100": {"conv": 19, "norm": 19, "head": 1},
+    "cct_2_3x2_cifar100": {"conv": 2, "linear_shared": 9, "norm": 5, "embed": 1, "head": 1},
+    "vit_small_cifar100": {"conv": 1, "linear_shared": 24, "norm": 13, "embed": 2, "head": 1},
+    "resnet50_cifar100": {"conv": 53, "norm": 53, "head": 1},
+    "cnn_gn_imagenet": {"conv": 3, "norm": 3, "head": 1},
+    "vit_micro_imagenet": {"conv": 1, "linear_shared": 8, "norm": 5, "embed": 1, "head": 1},
+    "resnet20_imagenet": {"conv": 19, "norm": 19, "head": 1},
+    "cct_2_3x2_imagenet": {"conv": 2, "linear_shared": 9, "norm": 5, "embed": 1, "head": 1},
+    "resnet50_imagenet": {"conv": 53, "norm": 53, "head": 1},
+    "vit_small_imagenet": {"conv": 1, "linear_shared": 48, "norm": 25, "embed": 2, "head": 1},
 }
 
 

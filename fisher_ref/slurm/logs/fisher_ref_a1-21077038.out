@@ -1,0 +1,76 @@
+Les modules suivants n'ont pas été elevés de votre environnement :
+  (Utilisez "module --force purge" pour tous les enlever):
+
+  1) CCconfig        6)  ucx/1.14.1         11) flexiblas/3.3.1
+  2) gentoo/2023     7)  libfabric/1.18.0   12) aocl-blas/5.1
+  3) gcccore/.12.3   8)  pmix/4.2.4         13) aocl-lapack/5.1
+  4) gcc/12.3        9)  ucc/1.2.0          14) StdEnv/2023
+  5) hwloc/2.9.1     10) openmpi/4.1.5
+
+Dû à un changement dans la variable MODULEPATH, les modules suivants ont été rechargés :
+  1) aocl-blas/5.1     2) aocl-lapack/5.1
+
+Les modules suivants ont été rechargés avec un changement de version :
+  1) flexiblas/3.3.1 => flexiblas/3.4.4       6) openmpi/4.1.5 => openmpi/5.0.3
+  2) gcc/12.3 => gcc/13.3                     7) pmix/4.2.4 => pmix/5.0.2
+  3) gcccore/.12.3 => gcccore/.13.3           8) ucc/1.2.0 => ucc/1.3.0
+  4) hwloc/2.9.1 => hwloc/2.10.0              9) ucx/1.14.1 => ucx/1.16.0
+  5) libfabric/1.18.0 => libfabric/1.21.0
+
+created virtual environment CPython3.11.5.final.0-64 in 671ms
+  creator CPython3Posix(dest=/localscratch/blgr.21077038.0/env, clear=False, no_vcs_ignore=False, global=False)
+  seeder FromAppData(download=False, pip=bundle, setuptools=bundle, wheel=bundle, via=copy, app_data_dir=/home/blgr/.local/share/virtualenv)
+    added seed packages: pip==26.1.2+computecanada, setuptools==83.0.0+computecanada, wheel==0.46.3+computecanada
+  activators BashActivator,CShellActivator,FishActivator,NushellActivator,PowerShellActivator,PythonActivator
+Looking in links: /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v4, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic
+Requirement already satisfied: pip in /localscratch/blgr.21077038.0/env/lib/python3.11/site-packages (26.1.2+computecanada)
+Looking in links: /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v4, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic, /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3/torch-2.14.0+computecanada-cp311-cp311-linux_x86_64.whl (from -r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic/torchvision-0.29.0+computecanada-cp311-cp311-linux_x86_64.whl (from -r requirements-cluster.txt (line 14))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic/numpy-2.4.2+computecanada-cp311-cp311-linux_x86_64.whl (from -r requirements-cluster.txt (line 15))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3/matplotlib-3.11.1+computecanada-cp311-cp311-linux_x86_64.whl (from -r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/filelock-3.31.1+computecanada-py3-none-any.whl (from torch>=2.0->-r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/typing_extensions-4.16.0+computecanada-py3-none-any.whl (from torch>=2.0->-r requirements-cluster.txt (line 13))
+Requirement already satisfied: setuptools>=77.0.3 in /localscratch/blgr.21077038.0/env/lib/python3.11/site-packages (from torch>=2.0->-r requirements-cluster.txt (line 13)) (83.0.0+computecanada)
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/sympy-1.14.0+computecanada-py3-none-any.whl (from torch>=2.0->-r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/networkx-3.6.1+computecanada-py3-none-any.whl (from torch>=2.0->-r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/jinja2-3.1.6+computecanada-py3-none-any.whl (from torch>=2.0->-r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/fsspec-2026.7.0+computecanada-py3-none-any.whl (from torch>=2.0->-r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3/Pillow_SIMD-9.5.0.post2+computecanada-cp311-cp311-linux_x86_64.whl (from torchvision>=0.15->-r requirements-cluster.txt (line 14))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/generic/contourpy-1.3.3+computecanada-cp311-cp311-linux_x86_64.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/cycler-0.12.1+computecanada-py3-none-any.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/fonttools-4.64.0+computecanada-cp311-cp311-linux_x86_64.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/kiwisolver-1.4.9+computecanada-cp311-cp311-linux_x86_64.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/packaging-26.3+computecanada-py3-none-any.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/gentoo2023/x86-64-v3/pillow-12.1.0+computecanada-cp311-cp311-linux_x86_64.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/pyparsing-3.3.2+computecanada-py3-none-any.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/python_dateutil-2.9.0.post0+computecanada-py2.py3-none-any.whl (from matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/six-1.17.0+computecanada-py2.py3-none-any.whl (from python-dateutil>=2.7->matplotlib>=3.7->-r requirements-cluster.txt (line 16))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/mpmath-1.3.0+computecanada-py3-none-any.whl (from sympy>=1.13.3->torch>=2.0->-r requirements-cluster.txt (line 13))
+Processing /cvmfs/soft.computecanada.ca/custom/python/wheelhouse/generic/markupsafe-3.0.3+computecanada-cp311-cp311-linux_x86_64.whl (from jinja2->torch>=2.0->-r requirements-cluster.txt (line 13))
+Installing collected packages: mpmath, typing-extensions, sympy, six, pyparsing, pillow-simd, pillow, packaging, numpy, networkx, MarkupSafe, kiwisolver, fsspec, fonttools, filelock, cycler, python-dateutil, jinja2, contourpy, torch, matplotlib, torchvision
+
+Successfully installed MarkupSafe-3.0.3+computecanada contourpy-1.3.3+computecanada cycler-0.12.1+computecanada filelock-3.31.1+computecanada fonttools-4.64.0+computecanada fsspec-2026.7.0+computecanada jinja2-3.1.6+computecanada kiwisolver-1.4.9+computecanada matplotlib-3.11.1+computecanada mpmath-1.3.0+computecanada networkx-3.6.1+computecanada numpy-2.4.2+computecanada packaging-26.3+computecanada pillow-12.1.0+computecanada pillow-simd-9.5.0.post2+computecanada pyparsing-3.3.2+computecanada python-dateutil-2.9.0.post0+computecanada six-1.17.0+computecanada sympy-1.14.0+computecanada torch-2.14.0+computecanada torchvision-0.29.0+computecanada typing-extensions-4.16.0+computecanada
+device=cuda  TF32 off=True  metrics_version=fisher_ref/0.1
+theta: mlp_ln_mnist/diag ckpt 0.5  step=4290 epoch=9 progress=0.500  seed=0
+probes: 4000 train / 4000 val, digests adc65fc01dd2 / 070bec712377
+
+builds:
+/localscratch/blgr.21077038.0/env/lib/python3.11/site-packages/torch/autograd/graph.py:1072: UserWarning: Attempting to run cuBLAS, but there was no current CUDA context! Attempting to set the primary context... (Triggered internally at /tmp/build_wheels_tmp.74569/python-3.11/torch/aten/src/ATen/cuda/CublasHandlePool.cpp:410.)
+  return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+  type2      adc65fc01dd2 P=26634  rows=40000      11.2s   5.67 GB  peak device  6.10 GB
+  empirical  adc65fc01dd2 P=26634  rows=4000        1.2s   5.67 GB  peak device  6.10 GB
+
+source gap  ||E_hat - F||_F / ||F||_F = 0.7597
+  type2      070bec712377 P=26634  rows=40000      10.9s   5.67 GB  peak device  6.10 GB
+train/val   ||F_val - F_train||_F / ||F_train||_F = 0.8215
+  type2      half1        P=26634  rows=20000       5.5s   5.67 GB  peak device  6.11 GB
+  type2      half2        P=26634  rows=20000       5.5s   5.67 GB  peak device  6.11 GB
+noise floor ||F^(1) - F^(2)||_F / ||F^(2)||_F = 0.8721 (at N/2 = 2000); any later difference below it is not interpretable
+
+spectra (fp64, host):
+  F      lambda_max=9.1613e-01  lambda_min=-2.61e-15  rank(1e-12)=18564/26634  1155.6s
+  E_hat  lambda_max=1.1169e+00  lambda_min=-5.53e-15  rank(1e-12)=3511/26634  1155.7s
+
+per-block (type-2 F):
+[2026-09-14T19:31:23.022] error: *** JOB 21077038 ON rg12503 CANCELLED AT 2026-09-14T19:31:23 DUE TO TIME LIMIT ***

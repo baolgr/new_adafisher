@@ -11,7 +11,10 @@ earlier comparison is void. Hence three properties, each of them the reason for 
 * **The run's own split.** The train/val partition is re-derived with the same
   ``seeded_train_val_split(n_total, val_size, seed)`` the training run used, so a "train probe" is a
   point that run actually trained on and a "val probe" is one it never saw — which is the whole
-  content of HF1.
+  content of HF1. A third split, ``test``, draws on the dataset's own held-out set: ``val`` holds
+  only 5 000 images and the HF1 noise floor is dominated by the out-of-sample side. Read
+  :func:`build_probe_set`'s docstring before pooling the two — it is justified only if a measured
+  check says so.
 * **Hashed over its content.** The digest covers the tensor bytes, not just the recipe: a
   torchvision transform change or a different copy of the dataset on the cluster would otherwise
   pass unnoticed (``plan_exp_lot0.md`` §0.4).
@@ -40,7 +43,11 @@ from benchmarks.common.runner import BENCHMARKS_DIR, Benchmark
 
 PROBE_VERSION = "probes/1"
 DEFAULT_DATA_ROOT = BENCHMARKS_DIR / "data"
-SPLITS = ("train", "val")
+#: ``train`` and ``val`` are the two halves of the run's own seeded partition of the official
+#: *training* set. ``test`` is the dataset's own held-out set, which no run ever loads for training
+#: — see :func:`build_probe_set` for why it is a legitimate second out-of-sample source and what
+#: must be checked before treating it as interchangeable with ``val``.
+SPLITS = ("train", "val", "test")
 
 
 def dataset_spec_of(bench: Benchmark) -> DatasetSpec:
@@ -157,7 +164,29 @@ def build_probe_set(
     allow_download: bool = False,
     spec: Optional[DatasetSpec] = None,
 ) -> ProbeSet:
-    """``n`` probes from ``split`` of the run's own seeded partition, eval transform only.
+    """``n`` probes from ``split``, eval transform only.
+
+    ``train`` and ``val`` are the two halves of the run's own seeded partition of the official
+    *training* set, so a train probe is a point that run trained on and a val probe is one it never
+    saw — the whole content of HF1.
+
+    ``test`` is the dataset's **own** held-out set (``train=False``), which the training harness
+    loads only to report a final number. It exists here because ``val`` is small — 5 000 images on
+    MNIST and CIFAR — and the HF1 null gap is dominated by the out-of-sample side: with the train
+    side at 55 000 it is 0.41 against a 5 000-image ``val`` and 0.25 against a 15 000-image
+    ``val + test`` (``plan_exp_lot1.md`` §6.4). Two things make it legitimate, and both are
+    conditions rather than assumptions:
+
+    * **Epistemically, ``val`` and ``test`` are in the same position here.** The harness uses the
+      validation split for *reporting only* — no early stopping, no best-checkpoint selection, no
+      ``ReduceLROnPlateau`` — and the hyperparameters are fixed a priori from the AdaFisher paper
+      rather than tuned. So neither split influenced the weights. If that ever changes, ``val``
+      must go back to being its own category.
+    * **Distributionally, they may not be.** ``val`` is a random slice of the training set;
+      MNIST's test set is a separate collection (disjoint writers, in the original NIST split). So
+      the two are *not* to be pooled on the strength of the argument above: build ``F_val`` and
+      ``F_test`` separately first and check that their gap sits inside their combined noise floor.
+      Merging before that check would turn a distribution shift into what looks like HF1 signal.
 
     ``allow_download`` is off by default, as everywhere in ``benchmarks/`` (compute nodes have no
     internet, and a missing dataset must be a clear error rather than a network timeout).
@@ -167,10 +196,17 @@ def build_probe_set(
         raise ValueError(f"split must be one of {SPLITS}; got {split!r}")
     spec = spec or dataset_spec_of(bench)
     _, eval_transform = build_transforms(spec, cutout=False, cutout_length=16)
-    dataset = spec.dataset_cls(root=str(Path(data_root).expanduser()), train=True,
+    dataset = spec.dataset_cls(root=str(Path(data_root).expanduser()), train=(split != "test"),
                                download=allow_download, transform=eval_transform)
-    train_idx, val_idx = seeded_train_val_split(len(dataset), spec.val_size, seed)
-    pool = train_idx if split == "train" else val_idx
+    if split == "test":
+        # No partition to re-derive: the whole set is held out, so the pool is the set itself, in
+        # its natural order — which keeps the prefix property head() relies on. ``seed`` therefore
+        # selects nothing here; it stays in the digest as provenance (which run's analysis this
+        # probe set belongs to), so two seeds give the same tensors under different digests.
+        pool = list(range(len(dataset)))
+    else:
+        train_idx, val_idx = seeded_train_val_split(len(dataset), spec.val_size, seed)
+        pool = train_idx if split == "train" else val_idx
     if n > len(pool):
         raise ValueError(f"asked for {n} probes but the {split} split holds {len(pool)}")
     indices = pool[:n]

@@ -35,7 +35,7 @@ from fisher_ref import capture, conventions, registry, sources  # noqa: E402
 from fisher_ref.reference import ParamLayout, build_dense_reference, symmetrize_  # noqa: E402
 
 BENCHES: Dict[str, Benchmark] = discover_benchmarks()
-SLOW = {"resnet50_cifar"}
+SLOW = {"resnet50_cifar", "resnet50_cifar100", "resnet50_imagenet", "vit_small_imagenet"}
 DTYPE = torch.float64
 
 #: Parameters belonging to no capturable module, per model — the raw ``nn.Parameter`` of the
@@ -51,6 +51,19 @@ EXPECTED_UNCOVERED: Dict[str, Tuple[str, ...]] = {
     "cct_2_3x2_cifar": ("pos_embed",),
     "vit_small_cifar": ("cls_token", "pos_embed"),
     "resnet50_cifar": (),
+    # CIFAR-100 / ImageNet: same architectures, so the same raw Parameters (or none).
+    "cnn_gn_cifar100": (),
+    "vit_micro_cifar100": ("pos_embed",),
+    "resnet20_cifar100": (),
+    "cct_2_3x2_cifar100": ("pos_embed",),
+    "vit_small_cifar100": ("cls_token", "pos_embed"),
+    "resnet50_cifar100": (),
+    "cnn_gn_imagenet": (),
+    "vit_micro_imagenet": ("pos_embed",),
+    "resnet20_imagenet": (),
+    "cct_2_3x2_imagenet": ("pos_embed",),
+    "resnet50_imagenet": (),
+    "vit_small_imagenet": ("cls_token", "pos_embed"),
 }
 
 

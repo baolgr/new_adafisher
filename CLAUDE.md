@@ -207,6 +207,56 @@ root on `v^(t)` — is **identical across the five modes**.
 > the superseded/duplicated result trees moved to `benchmarks/archives/` so `outputs/<model>/`
 > holds exactly one report plus one checkpoint-only directory per arm.
 
+> **CIFAR-100 and ImageNet-1K: code done, datasets partially staged, no run yet.** The six
+> image-classification architectures (`cnn_gn`, `vit_micro`, `resnet20`, `cct_2_3x2`, `resnet50`,
+> `vit_small`) now exist on three datasets instead of one: **12 new `benchmarks/<model>/` folders**
+> (`*_cifar100`, `*_imagenet`), each with all 7 arms under the same WCT protocol, plus **107 new
+> SLURM jobs** under `benchmarks/slurm/{cifar100,imagenet}/` and results under
+> `benchmarks/outputs/{cifar100,imagenet}/`. `mnist_autoencoder` and `mlp_ln_mnist` are
+> deliberately **not** extended: their input dimensionality is part of the architecture (`784-...`,
+> and the auto-encoder has no label head at all), and an A1 with a 3072-dim input would be 98 k
+> parameters — past `plan_exp_draft.md` §2.2's `P_max` for regime A, i.e. it would stop being the
+> model whose exact Fisher is affordable, which is the only reason A1 exists.
+>
+> **Four decisions, each with a reason.** (1) **CIFAR-100 is free**: `CIFAR100_SPEC` has been in
+> `common/data.py` since step 1, the images are the same 50 000 32x32x3 under the same 45k/5k
+> split and the same augmentation, so each bench is its CIFAR-10 counterpart with `num_classes=100`
+> and the `--time` values are its counterpart's *measured* figures, transferred rather than
+> re-derived (+2.2% parameters at worst, `resnet20`: 275 572 against 269 722). (2) **ImageNet-1K
+> runs at two resolutions**, because this repository has two families of model: `resnet50_imagenet`
+> (the paper's own 7x7/s2 + max-pool stem, `resnet_1512.03385.pdf` Table 1, **25 557 032**
+> parameters) and `vit_small_imagenet` (ViT-S/16, **22 050 664**) at the native 224 px; the four
+> 32x32-native architectures on **downsampled ImageNet** (Chrabaszcz et al. 2017, arXiv:1707.08819
+> §2 — the whole image squashed to 32x32), structurally unmodified apart from the head. For
+> `cct_2_3x2` that is not a convenience: at 224 px its tokenizer emits a 3136-token sequence whose
+> attention map is ~10 TB at batch 256. **Report those four as "ImageNet32", never as ImageNet-1K.**
+> (3) The transforms are **AdaFisher's own**, not re-derived
+> (`reference_repos/AdaFisher/Image_Classification/src/utils/data.py:157-194`): `RandomResizedCrop`
+> + flip + `Normalize(0.485/0.456/0.406, 0.229/0.224/0.225)` + Cutout at the same `cutout_length:
+> 16` its CIFAR configs use, `Resize(256)` + `CenterCrop(224)` on eval. (4) `Benchmark.output_group`
+> is a **new, optional, empty-by-default** field routing both the results and the jobs into a
+> one-level dataset subdirectory; the eight existing benches leave it empty and keep the flat
+> `outputs/<model>/` layout, because that is the path `fisher_ref/checkpoints.py` discovers runs at.
+>
+> **What is measured and what is not.** Every new model builds, forwards, and runs all five Fisher
+> modes for two real `AdaFisherMulti` steps with no parameter left un-updated — including ResNet-50
+> and ViT-S/16 at 224 px (`tests/test_benchmark_models.py`, which picked the folders up the moment
+> they existed; **341 -> 524** tests passing in the default run, **565** with `--runslow`, none
+> pre-existing modified except the three model-folder registries that exist to fail on a new
+> folder). `tests/test_dataset_benches.py` (54
+> tests, new) covers the half that is genuinely new: the `ImageFolder` pipeline on a synthetic
+> 2-class tree, both transform regimes, the seeded split, the train/val/test wiring, and the
+> class-mapping check that catches the realistic staging mistake (ILSVRC's val tar is *flat*).
+> **Nothing has trained.** The `imagenet/` `--time` values are **ESTIMATED**, flagged as such in
+> every header, which is why each of those six models also has a calibration job; and **ImageNet-1K
+> itself is not staged** — it requires an accepted image-net.org agreement and 155 GB, so
+> `benchmarks/slurm/imagenet/stage_imagenet.sh` builds the trees from the two official tars and
+> `benchmarks/slurm/imagenet/README.md` is the file to read before submitting anything there.
+> CIFAR-100 *is* downloaded, into `benchmarks/data/cifar-100-python/`, and the pipeline is
+> verified end to end on it (`cnn_gn_cifar100`, 3 arms, 1 epoch: loss starts at `ln(100) = 4.605`,
+> accuracy at chance, checkpoints written to `outputs/cifar100/<model>/<arm>/` with a `(100, 64)`
+> head). Those smoke outputs were then deleted, so `outputs/{cifar100,imagenet}/` are empty.
+
 > **Fisher-drift campaign, plan v1 + lot 0: done.** `docs/reports/plan_exp_draft.md` is now **the**
 > campaign plan: `plan_exp_draft_v0.md` (the original French draft, kept verbatim) adapted to what
 > this repository actually produces, with every change listed in its own §0. It also supersedes
@@ -301,6 +351,28 @@ root on `v^(t)` — is **identical across the five modes**.
 > against `+1.16 x P^2` for that symmetrisation alone — so A1 fits the **same `h100_1g.10gb` slice
 > the training jobs use** (~6 GB of 10), and §12's "an analysis job cannot allocate `F`" risk
 > becomes a rule instead: hold one `P x P` on the device, put everything needing two on the host.
+>
+> **The A1 run happened (job 21077038) and its headline is a problem with `N`, not with the code**
+> (`plan_exp_lot1.md` §6). Peak device **6.10 GB** against 6.0 predicted, so the 10 GB decision is
+> confirmed on the real thing. A full type-2 `F` at `N=4000`, `P=26 634` costs **11 s**; one
+> `26 634^2` `eigvalsh` costs **1156 s** and does **not** thread (19.8 GFLOP/s at 1 thread, 18.6 at
+> 8, 21.6 on the cluster's 16) — so budget these jobs from `(4/3)P^3/2e10` per spectrum and never
+> ask for cores to speed one up. The job was cancelled at its 00:50:00 limit inside the *per-block*
+> loop (the widest block is `25 120^2`, 83% of a full-`P` decomposition on its own) having produced
+> everything else, and **wrote nothing**, since its only write was at the end — now incremental,
+> cheapest-block-first, with `A1_BLOCK_SPECTRA=0` to skip. **The finding:** source gap
+> `||E_hat - F||/||F|| = 0.760`, train/val `0.822`, and the §3.4 noise floor `0.872` on halves of
+> `N/2 = 2000`, i.e. `sigma_N = 0.436` for one `N=4000` estimate and `0.617` for two independent
+> ones under the null. Q1 sits at `1.74 sigma_N` and HF1 at `1.33x` its null: **at this `N` the
+> campaign's two headline quantities are the same order as the estimator's own noise.** `N` was
+> chosen in §2.2 for *rank* (`N(C-1) >= P`), which is far weaker than accuracy; `sigma_N = 0.1`
+> needs `N ~ 76 000`, which at 11 s a build is ~3.5 min of GPU. **Set `N` from the noise floor, not
+> from the rank condition, and report every gap with its floor.** Also measured: `rank(E_hat) =
+> 3511/26 634` — bounded by `N` by construction, so a damped inverse of `E_hat` reads `lambda I` on
+> 23 123 directions (Kunstner et al. arXiv:1905.12558, in this repository's own numbers); and
+> `rank(F) = 18 564/26 634`, whose deficiency is roughly half explained by MNIST's 130 identically-
+> zero pixels (the same fact that crashed cuSOLVER in campaign 1, `_eigh_utils.py`) and otherwise
+> open.
 
 ## Working language
 
@@ -405,6 +477,10 @@ adafisher /
 │                                  #   mathematical inertness, orthonormality on the exact
 │                                  #   rank-deficient structure that killed two runs, the CPU
 │                                  #   fallback; all offline
+│                                  # cifar100 + imagenet: test_dataset_benches.py (new) — the
+│                                  #   ImageFolder pipeline on a synthetic tree, both transform
+│                                  #   regimes, the seeded split, output_group routing, and that
+│                                  #   every bench has generated jobs in its own subdirectory
 │                                  # campaign 1 audit: test_lr_schedule.py (new) — NominalCosine
 │                                  #   identical to torch's inside T_max and clamped outside it,
 │                                  #   BudgetCosine's shape/monotonicity/floor, both through the
@@ -413,7 +489,9 @@ adafisher /
 │   │                             #   common/, one folder per tested model. The five flat modules
 │   │                             #   of lots 1/7/8 are gone; every line of them landed here.
 │   ├── common/
-│   │   ├── data.py               # mnist()/cifar10()/cifar100(), Cutout, seeded_train_val_split
+│   │   ├── data.py               # mnist()/cifar10()/cifar100(), imagenet()/imagenet32() (an
+│   │   │                         #   ImageFolder tree, staged by hand), Cutout,
+│   │   │                         #   seeded_train_val_split
 │   │   ├── loop.py               # train_under_budget() = lot 7's + lot 8's loops merged (D2),
 │   │   │                         #   evaluate(), sync(), prepare_batch/metric_fn conventions;
 │   │   │                         #   + the optional per-batch `lr_schedule` hook
@@ -436,11 +514,23 @@ adafisher /
 │   ├── cct_2_3x2_cifar/          # model.py bench.py  (B1, new: 283 723, AdaFisher's own model)
 │   ├── resnet50_cifar/           # model.py bench.py  (migrated verbatim, lot 8: 23 520 842)
 │   ├── vit_small_cifar/          # model.py bench.py  (migrated verbatim, lot 8: 2 693 578)
+│   ├── <arch>_cifar100/          # 6 folders: the six architectures above with num_classes=100.
+│   │                             #   bench.py only — the model is imported from <arch>_cifar/
+│   ├── <arch>_imagenet/          # 6 folders, num_classes=1000. Four read ImageNet downsampled to
+│   │                             #   32x32 (imagenet32) and reuse the CIFAR model unchanged;
+│   │                             #   resnet50_imagenet has its OWN model.py (the paper's ImageNet
+│   │                             #   7x7/s2+maxpool stem, 25 557 032) and vit_small_imagenet is
+│   │                             #   ViTCIFAR configured as ViT-S/16 @224 (22 050 664)
 │   ├── outputs/<model>/<arm>/    # results indexed by what they measure, not by lot (D6);
-│   │                             #   the old outputs/lot7_*, outputs/lot8_* are left untouched
-│   ├── slurm/                    # 73 generated sbatch jobs (8 models x (1 calibration + 1 grouped
-│   │                             #   + 7 per-arm) + 1 lam sweep) + README + generate_jobs.py,
-│   │                             #   which enumerates model folders
+│   │                             #   the old outputs/lot7_*, outputs/lot8_* are left untouched.
+│   │                             #   outputs/{cifar100,imagenet}/<model>/<arm>/ for the new
+│   │                             #   datasets (Benchmark.output_group); the 8 original models
+│   │                             #   deliberately stay flat — fisher_ref/checkpoints.py reads that
+│   ├── slurm/                    # 181 generated sbatch jobs (20 models x (1 calibration + 7
+│   │   ├── cifar100/             #   per-arm) + 18 grouped + 1 lam sweep + 1 seeds job) + READMEs
+│   │   └── imagenet/             #   + generate_jobs.py, which enumerates model folders. One
+│   │                             #   subdirectory per dataset, matching outputs/; imagenet/ also
+│   │                             #   holds the hand-written stage_imagenet.sh
 │   └── archives/                 # gitignored; superseded/duplicated result trees moved aside
 │                                 #   between campaigns, each with its own README saying why
 ├── docs/reports/
@@ -642,6 +732,11 @@ Run these from the repository root on the laptop (the local checkout lives at
                                                                  #   inertness, rank-deficient factors, CPU fallback
 .venv/bin/pytest tests/test_lr_schedule.py -v                    # the cosine under WCT: clamped nominal
                                                                  #   vs. budget-annealed, and both in the loop
+.venv/bin/pytest tests/test_dataset_benches.py -v                 # CIFAR-100 + ImageNet-1K: the
+                                                                 #   ImageFolder pipeline on a synthetic
+                                                                 #   tree, both transform regimes, the
+                                                                 #   seeded split, output_group routing,
+                                                                 #   generated jobs per dataset; offline
 .venv/bin/pytest tests/test_benchmark_models.py -v               # every model folder: parameter count,
                                                                  #   hooked-module inventory, "no parameter
                                                                  #   left un-updated", all 5 modes, the
@@ -669,6 +764,11 @@ PYTHONPATH=src .venv/bin/python -m benchmarks.mnist_autoencoder.bench --epochs 2
 PYTHONPATH=src .venv/bin/python -m benchmarks.vit_small_cifar.bench \
     --arms diag adam --epochs 2 --budget-mode epochs --train-subset 1024
 PYTHONPATH=src .venv/bin/python -m benchmarks.resnet50_cifar.bench --epochs 50      # the real thing
+# CIFAR-100 and ImageNet-1K: identical CLI, results under outputs/<dataset>/<model>/. CIFAR-100 is
+# downloaded; ImageNet-1K must be staged by hand first (benchmarks/slurm/imagenet/README.md).
+PYTHONPATH=src .venv/bin/python -m benchmarks.resnet20_cifar100.bench --epochs 50
+PYTHONPATH=src .venv/bin/python -m benchmarks.cnn_gn_imagenet.bench \
+    --arms diag adam --epochs 1 --budget-mode epochs --train-subset 2048 --no-allow-download
 # trajectory checkpoints, the input steps 2-5 of plan_exp_draft.md consume; add
 # --checkpoint-optimizer-state (opt-in, OFF by default) to also dump the optimizer's own state —
 # its state_dict plus AdaFisherMulti's EMA'd Fisher factors keyed by module name (~1.8 GB for a
@@ -979,6 +1079,41 @@ scale, and independently at each of the `k_h·k_w` kernel offsets (`plan_lot6.md
   per-step projection from 288 to 107 GFLOP. Consequence for any CNN result: the four non-diagonal
   arms measure those modes **under SUA**, including `plan_lot6.md` §0.1's documented, uncorrected
   cross-offset gap — a ResNet result is not a statement about full-patch EKFAC.
+- **The four `*_imagenet` benches at 32 px measure ImageNet32, not ImageNet-1K.** `cnn_gn`,
+  `vit_micro`, `resnet20` and `cct_2_3x2` are 32x32-native architectures; they run on ImageNet
+  downsampled to 32x32 (Chrabaszcz, Loshchilov & Hutter 2017, arXiv:1707.08819 §2 — the *whole*
+  image squashed, aspect ratio not preserved, no crop), which is what lets them stay structurally
+  identical to their CIFAR counterparts and therefore comparable with them arm by arm. It is a
+  cited benchmark, not a shortcut, but it is **not** the 224 px task, and published ImageNet
+  numbers are not a reference for it. Only `resnet50_imagenet` and `vit_small_imagenet` run at
+  224 px. The pad-4-crop + flip this project applies on top of the squash is its own choice, not
+  that paper's.
+- **ImageNet-1K cannot be downloaded, and the pre-resized tree is not optional in practice.**
+  ILSVRC-2012 needs an accepted image-net.org agreement; `allow_download` is structurally inert in
+  `build_imagenet_loaders` and a missing tree is a `FileNotFoundError` naming the expected layout.
+  `benchmarks/slurm/imagenet/stage_imagenet.sh` builds both trees (`imagenet/` and `imagenet32/`)
+  from the two official tars. The 32 px benches *work* without `imagenet32/` — `imagenet_root`
+  falls back and `Resize((32,32))` is in the pipeline either way, the two being numerically
+  identical — but then every epoch decodes 1.28 M full-resolution JPEGs to feed a model whose
+  forward pass takes microseconds. Build it.
+- **The CIFAR-100 and ImageNet checkpoints are invisible to `fisher_ref/checkpoints.py`.** The
+  bridge walks `outputs/<model>/<arm>/` and was left unchanged: a dataset group directory is inert
+  there — not mistaken for a model, no crash, no runs returned (asserted in
+  `tests/test_dataset_benches.py`). The Fisher-drift campaign is defined over the eight original
+  models (`plan_exp_draft.md` §4); pointing it at another dataset is a deliberate change to that
+  bridge, not a side effect of adding a bench.
+- **`Benchmark.output_group` must stay empty for the eight original models.** It routes results to
+  `outputs/<group>/<model>/` and jobs to `slurm/<group>/`; `fisher_ref/checkpoints.py` discovers
+  runs at `outputs/<model>/<arm>/` and several campaign reports cite that path, so moving MNIST and
+  CIFAR-10 under `mnist/` + `cifar10/` would break the bridge for no gain. New datasets get
+  subdirectories; the existing eight stay flat. `tests/test_dataset_benches.py` asserts both halves.
+- **A new `benchmarks/<model>/` folder must be added to four registries, not one.** The folder list
+  is the registry for *discovery*, but four tests exist precisely to fail when a folder appears
+  without its contract: `tests/test_benchmark_models.py::EXPECTED`,
+  `tests/test_fisher_ref_lot0.py::EXPECTED_LAYER_TYPES`,
+  `tests/test_fisher_ref_lot1.py::EXPECTED_UNCOVERED`, and
+  `benchmarks/slurm/generate_jobs.py::WALLTIME` (whose absence makes the generator raise `KeyError`
+  *after* overwriting half the directory — `tests/test_dataset_benches.py` checks it up front).
 - **`ViT-S/4` is an adaptation, not a paper variant.** `vit_2010.11929.pdf` Table 1 defines only
   Base/Large/Huge, all 224px/patch-16. `benchmarks/vit_small_cifar/model.py`'s 32x32 configuration
   (`patch 4`, `D=192`, `depth 6`, `heads 3`) keeps that table's `MLP = 4D` and `D/heads = 64` and
@@ -994,6 +1129,9 @@ scale, and independently at each of the `k_h·k_w` kernel offsets (`plan_lot6.md
 | primary | 8-layer MNIST auto-encoder, `784-1000-500-250-30` + untied symmetric decoder | historical K-FAC / EKFAC bench (`ekfac_1806.03884.pdf` §4.1); small enough for all five modes |
 | secondary (lot 8) | CIFAR-10 from scratch: **ResNet-50** (CIFAR stem, 23 520 842) and **ViT-S/4** (2 693 578), 7 arms — the five modes + `Adam` + `AdamW` | `plan.md` §8's formerly-deferred row. Code and SLURM jobs done (`benchmarks/{resnet50,vit_small}_cifar/`, `benchmarks/slurm/`); the runs themselves are **not done** — no lot-8 convergence number exists yet |
 | Fisher-drift campaign (step 1) | `mlp_ln_mnist` (A1, 26 634), `cnn_gn_cifar` (A2, 24 458), `vit_micro_cifar` (A3, 21 098), `resnet20_cifar` (B2, 269 722), `cct_2_3x2_cifar` (B1, 283 723) | `plan_exp_draft.md` §4's five new models, each on the shared harness with all 7 arms and `--checkpoints`. Implemented and smoke-tested; **no convergence run yet** |
+
+| CIFAR-100 (new) | the six image-classification architectures with `num_classes=100`: `cnn_gn_cifar100` (30 308), `vit_micro_cifar100` (24 068), `resnet20_cifar100` (275 572), `cct_2_3x2_cifar100` (295 333), `resnet50_cifar100` (23 705 252), `vit_small_cifar100` (2 710 948) | same protocol, same hyperparameters, same 7 arms as CIFAR-10. Implemented and tested offline; **no convergence run yet** |
+| ImageNet-1K (new) | `resnet50_imagenet` (25 557 032) and `vit_small_imagenet` (22 050 664) at the native **224 px**; `cnn_gn_imagenet` (88 808), `vit_micro_imagenet` (53 768), `resnet20_imagenet` (334 072), `cct_2_3x2_imagenet` (411 433) on **downsampled ImageNet32** | AdaFisher's own ImageNet transforms; 7 arms each. Code and SLURM jobs done; **the dataset is not staged and nothing has run** — `--time` values are ESTIMATED |
 
 The workspace contains no pre-existing classification bench: `FisherAdapTune` only ships crack
 segmentation (SAM2 / SegFormer) and a synthetic example.

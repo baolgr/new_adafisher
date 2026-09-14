@@ -34,7 +34,21 @@ everything that needs two on the host**, where `--mem` is cheap.
 
 | Job | What it produces | Shape | `--time` |
 |---|---|---|---|
-| `dense_reference_a1.sh` | A1's dense `F`, `Ê` and per-layer blocks at `mlp_ln_mnist/diag/ckpt_0.5`, `N = 4000`; the source gap, the train/val gap, the noise floor, both spectra | `h100_1g.10gb:1`, 64G, 16 cpus | `00:50:00` **(estimate — replace after the first run)** |
+| `dense_reference_a1.sh` | A1's dense `F`, `Ê` and per-layer blocks at `mlp_ln_mnist/diag/ckpt_0.5`, `N = 4000`; the source gap, the train/val gap, the noise floor, both spectra | `h100_1g.10gb:1`, 64G, 4 cpus | `01:30:00` (measured from job 21077038) |
+
+### What the first run taught, before you write the second
+
+- **Peak device memory 6.10 GB** against ~6.0 GB predicted: the 10 GB slice is right, and the
+  plan's "an analysis job cannot allocate `F`" is a property of a three-buffer implementation, not
+  of the matrix.
+- **The references are cheap and the spectra are not.** A full `F` at `N = 4000`, `P = 26 634`
+  takes **11 s** on the slice; one `26 634²` `eigvalsh` takes **1156 s**. Budget the job from
+  `(4/3)P³ / 2·10¹⁰` seconds per decomposition and ignore the builds.
+- **`torch.linalg.eigvalsh` does not thread**: 19.8 GFLOP/s at 1 thread, 18.6 at 8, and 21.6 on the
+  cluster's 16. Do **not** ask for cores to speed up a spectrum — ask for time, or move the
+  decomposition to a GPU big enough to hold two `P × P` (which the 10 GB slice is not).
+- **Write results as you go.** Job 21077038 produced every gap and both spectra and saved nothing,
+  because its only write was after the per-block loop it timed out in.
 
 ## Submit
 

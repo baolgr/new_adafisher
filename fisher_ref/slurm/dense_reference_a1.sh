@@ -9,9 +9,9 @@
 #SBATCH --account=def-msh-ab
 #SBATCH --job-name=fisher_ref_a1
 #SBATCH --gpus=h100_1g.10gb:1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
-#SBATCH --time=00:50:00
+#SBATCH --time=01:30:00
 #SBATCH --output=fisher_ref/slurm/logs/%x-%j.out
 
 # ---------------------------------------------------------------------------------------------
@@ -33,13 +33,20 @@
 #                          four references during the noise-floor split (4 x 5.68 = 22.7 GB) and the
 #                          two eigvalsh calls (F + a copy). Peak expected ~25 GB; 64G is headroom
 #                          for a first run, to be lowered once the log reports the real MaxRSS.
-#   --cpus-per-task=16     The long pole is host-side and threaded: two 26 634^2 fp64 eigvalsh calls,
-#                          ~2.5e13 flop each. 16 is Rorqual's documented per-GPU maximum.
-#   --time=00:50:00        ESTIMATE, not a measurement — this job has never run. Basis: ~40 s setup
-#                          (measured, benchmarks/slurm/README.md), ~40 s for the five GPU builds
-#                          (1.8e14 fp64 flop total on a 1/7 slice), 8-17 min for the two eigvalsh.
-#                          Replace with the measured Elapsed + headroom after the first COMPLETED
-#                          run, as benchmarks/slurm/README.md requires of every --time.
+#   --cpus-per-task=4      NOT 16, and this is measured, not tidied: torch's eigvalsh does not
+#                          thread. 19.8 GFLOP/s at 1 thread, 18.6 at 8 (LAPACK dsyevd, laptop), and
+#                          job 21077038 ran at 21.6 GFLOP/s on 16 cores — the same regime. Extra
+#                          cores buy nothing here and only make the job harder to schedule; 4 is
+#                          for the data loading and the GPU builds.
+#   --time=01:30:00        MEASURED from job 21077038 (CANCELLED at the 00:50:00 limit, inside the
+#                          per-block loop, after producing everything else):
+#                            setup + probes                       ~120 s
+#                            5 GPU builds                           34 s  (11.2 + 1.2 + 10.9 + 2x5.5)
+#                            eigvalsh(F), eigvalsh(E_hat)         2311 s  (1155.6 + 1155.7)
+#                            eigvalsh(features.0), 25 120^2        ~970 s  ((25120/26634)^3 x 1156)
+#                            the other four blocks                  ~0 s
+#                                                            total ~57 min
+#                          Set A1_BLOCK_SPECTRA=0 to drop the last 970 s and keep the trace shares.
 #
 # Prerequisites, both verified present on rorqual:/home/blgr/new_adafisher —
 #   dataset/MNIST                                    (compute nodes have no internet)
@@ -58,18 +65,22 @@ pip install --no-index --upgrade pip
 pip install --no-index -r requirements-cluster.txt
 
 export PYTHONPATH="$SLURM_SUBMIT_DIR/src:$SLURM_SUBMIT_DIR"
-export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-16}"
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
 
 # N = 4000 type-2 probes: N(C-1) = 36 000 >= P = 26 634, so F is not rank-limited by the probe
 # count (plan_exp_draft.md §2.2). The script's knobs are environment variables by design — the
 # fisher_ref/experiments/ convention is one question per script, no CLI.
-export A1_MODEL=mlp_ln_mnist
-export A1_ARM=diag
-export A1_FRACTION=0.5
-export A1_PROBES=4000
-export A1_BATCH=512
-export A1_SEED=0
-export A1_DEVICE=cuda
+# Every one is "${VAR:-default}" so `sbatch --export=ALL,A1_PROBES=55000 ...` actually takes
+# effect. A plain `export A1_PROBES=4000` would silently overwrite it — the same trap as the
+# hand-copied --wct-budget that produced campaign 1's mislabelled checkpoints.
+export A1_MODEL="${A1_MODEL:-mlp_ln_mnist}"
+export A1_ARM="${A1_ARM:-diag}"
+export A1_FRACTION="${A1_FRACTION:-0.5}"
+export A1_PROBES="${A1_PROBES:-4000}"
+export A1_BATCH="${A1_BATCH:-512}"
+export A1_SEED="${A1_SEED:-0}"
+export A1_DEVICE="${A1_DEVICE:-cuda}"
+export A1_BLOCK_SPECTRA="${A1_BLOCK_SPECTRA:-1}"
 export A1_DATA_ROOT="$SLURM_SUBMIT_DIR/dataset"
 export A1_OUTPUTS_ROOT="$SLURM_SUBMIT_DIR/benchmarks/outputs"
 export A1_OUT_DIR="$SLURM_SUBMIT_DIR/fisher_ref/outputs"

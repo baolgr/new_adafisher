@@ -408,6 +408,130 @@ untested.
 Its numbers become §6 below and turn `plan_exp_draft.md` §13's
 `[ESTIMATE, to be measured at lot 1]` into `[MEASURED]`.
 
-## 6. The A1 reference (pending — phase 5)
+## 6. The A1 reference — first run (job 21077038, 2026-09-14)
 
-*Empty by design: no lot-1 convergence-scale number is claimed until the cluster run exists.*
+`h100_1g.10gb`, `N = 4000`, `mlp_ln_mnist/diag/ckpt_0.5`, `P = 26 634`. The job was **CANCELLED at
+its 00:50:00 limit inside the per-block loop**, having produced everything else; the per-block
+ranks are the only missing row and the re-run at `--time=01:30:00` fills them. Nothing was written
+to disk, because the single write was at the end — fixed (§6.4).
+
+### 6.1 What it cost, and the memory decision
+
+```
+type2      P=26634  rows=40000   11.2s   5.67 GB   peak device 6.10 GB
+empirical  P=26634  rows=4000     1.2s   5.67 GB   peak device 6.10 GB
+type2 val  P=26634  rows=40000   10.9s             peak device 6.10 GB
+type2 half P=26634  rows=20000    5.5s  (x2)       peak device 6.11 GB
+eigvalsh(F) 1155.6s     eigvalsh(E_hat) 1155.7s
+```
+
+**§0.9's decision is confirmed on the real thing: peak device 6.10 GB against the ~6.0 GB
+predicted, on a 10 GB slice.** `plan_exp_draft.md` §2.2's "an analysis job that inherits the
+training job's `--gpus` line cannot form A1's `F` at all" is now measured to be false — it was a
+property of the three-buffer implementation, not of the matrix.
+
+**The references are cheap; the spectra are not.** A full type-2 `F` at `N = 4000` takes **11 s**,
+while one `26 634²` `eigvalsh` takes **1156 s** — and that is not a misconfiguration: torch's
+`eigvalsh` does not thread (measured 19.8 GFLOP/s at 1 thread, 18.6 at 8 on a laptop; the cluster
+ran at 21.6 GFLOP/s on 16 cores). `--cpus-per-task` was therefore dropped from 16 to 4, and the
+job's `--time` is set by `(4/3)P³ / 2·10¹⁰` seconds per decomposition.
+
+### 6.2 The headline: at `N = 4000` this reference is noise-dominated
+
+| quantity | measured |
+|---|---|
+| source gap `‖Ê − F‖_F / ‖F‖_F` (Q1) | **0.7597** |
+| train/val gap `‖F_val − F_train‖_F / ‖F_train‖_F` (HF1) | **0.8215** |
+| noise floor `‖F^(1) − F^(2)‖_F / ‖F^(2)‖_F`, halves of `N/2 = 2000` (§3.4) | **0.8721** |
+
+The floor is not directly comparable to the other two and must be rescaled. `F^(1) − F^(2)` is the
+difference of two *independent* `N/2` estimates, so it is `√2·σ_{N/2} = 2·σ_N`, giving
+
+* `σ_N ≈ **0.436**` — the error of a single `N = 4000` estimate against `F_∞`;
+* `√2·σ_N ≈ **0.617**` — what two independent `N = 4000` estimates differ by **under the null**.
+
+So the source gap sits at `1.74 σ_N` and the train/val gap at `1.33 ×` its own null. **Both headline
+quantities of the campaign are the same order as the estimator's own noise at this `N`.** §3.4's
+reading rule ("any difference below the floor is not interpretable") bites on the very first run,
+and it bites on Q1 and HF1 themselves, not on some downstream comparison of approximations.
+
+The fix is cheap and the run itself shows why: `N` was chosen in §2.2 for **rank**
+(`N(C−1) = 36 000 ≥ P`), which is a far weaker requirement than accuracy. Since `σ_N ∝ N^{-1/2}`,
+reaching `σ_N = 0.1` needs `N ≈ 76 000` — and a build is 11 s, so that is ~3.5 min of GPU per
+reference, not a new regime. **The campaign's `N` should be set by the noise floor, not by the rank
+condition**, and every gap must be reported with its floor.
+
+Two caveats to carry with these numbers. This is **one** split, where §3.4 asks for 20 random
+partitions and a 95 % interval — that is lot 2's `metrics/noise_floor.py`, and the point estimate
+above may move. And a *relative Frobenius* error of 0.44 does not mean the leading structure is
+noise: the Frobenius norm weights the bulk, so the top eigenspace may well be far better determined
+than this single number suggests (M6 is the metric that would say).
+
+### 6.3 Spectra
+
+| | `λ_max` | `λ_min` | `rank(1e-12)` |
+|---|---|---|---|
+| `F` (type-2) | `9.1613e-01` | `-2.61e-15` | **18 564 / 26 634** |
+| `Ê` (empirical) | `1.1169e+00` | `-5.53e-15` | **3 511 / 26 634** |
+
+* **`Ê` is rank-limited by construction**: it is a sum of `N = 4000` outer products, so its rank
+  cannot exceed 4 000 — here 3 511. Any metric through a damped inverse of `Ê` therefore reads `λI`
+  on **23 123 of 26 634 directions**. That is Kunstner, Balles & Hennig's (arXiv:1905.12558) point
+  in this repository's own numbers, and it is a reason to prefer `F` as the reference wherever the
+  campaign has a choice.
+* **`F`'s deficiency of 8 070 is larger than the head's 33** (§4's logit-shift kernel). Part of it
+  is already documented elsewhere in this repository: `mlp_ln_mnist`'s first `Linear` has an input
+  factor of rank 646/785 with 136 exactly-zero eigenvalues, because 130 of MNIST's 784 pixels are
+  identically zero (`_eigh_utils.py`'s docstring — the fact that crashed cuSOLVER in campaign 1).
+  A dead input coordinate kills one column of that layer's block per output unit, i.e. `32 × 136`
+  ≈ 4 352 directions, plus the head's 33. That accounts for roughly half; the rest is **not
+  explained here** and is a question for lot 2, not a claim.
+
+### 6.4 A third probe split, and why it is a *check* before it is a sample size
+
+§6.2's floor is dominated by the **out-of-sample side**: the HF1 null is
+`sqrt(σ_train² + σ_held²)`, so with the train side raised to 55 000 (`σ = 0.118`) and `val` stuck at
+5 000 (`σ = 0.390`) the null only falls from 0.617 to **0.407**. `val` is the binding constraint,
+and it cannot be widened: `val_size = 5000` is what the *training* runs partitioned on, so changing
+it would retroactively redefine which images those weights saw — the same "it would replace
+campaign 1 rather than augment it" argument as `--checkpoint-optimizer-state`.
+
+What *is* available is the dataset's own test set — 10 000 further MNIST images that
+`build_probe_set` never touched (lot 0 used `train=True` unconditionally), and which the training
+harness loads only to report a final number. Two facts decide whether it may be used:
+
+* **Epistemically, `val` and `test` are in the same position here.** Checked in the harness: the
+  validation split drives **nothing** — no early stopping, no best-checkpoint selection, no
+  `ReduceLROnPlateau`; `best_val_acc` appears only in the report writer. And the hyperparameters
+  are fixed a priori from the AdaFisher paper rather than tuned. Neither split influenced the
+  weights. (If that ever changes, `val` must go back to being its own category.)
+* **Distributionally, they may not be.** `val` is a random slice of the training set; MNIST's test
+  set is a separate collection, with disjoint writers in the original NIST split.
+
+So `split="test"` is added to `fisher_ref/probes.py` — a reader change, nothing in `benchmarks/` —
+but the two are **not pooled**. The A1 job now builds `F_val` and `F_test` at the *same* `n` and
+reports `‖F_test − F_val‖ / ‖F_val‖`. If that sits inside their combined floor, they are
+interchangeable and a later lot may pool them, taking the HF1 null from 0.407 to **0.254** (a
+factor 1.6, and 2.4 against the present 0.617). If it does not, pooling would have turned a
+distribution shift into what reads as HF1 signal — and the check is what says which, at the cost of
+one extra 11 s build.
+
+| out-of-sample side | `n` | `σ` | HF1 null with train at 55 000 |
+|---|---:|---:|---:|
+| `val` (today) | 5 000 | 0.390 | 0.407 |
+| `test` | 10 000 | 0.276 | 0.301 |
+| `val + test`, **only if the check passes** | 15 000 | 0.225 | 0.254 |
+
+These `σ` extrapolate one measured point (`σ_4000 = 0.436`) as `N^{-1/2}`; §3.4's `d(F_{N'}, F_N)`
+curve is what would verify the exponent.
+
+### 6.5 What the run changed in the code
+
+1. **The summary is now written incrementally** (`checkpoint_summary()` after every stage). The run
+   computed all three gaps and both spectra and saved **none** of them, because the single write
+   was at the end — the same failure `benchmarks/common/runner.py` already fixed for a grouped
+   training job ("rewrite the report after every completed arm").
+2. **The per-block loop runs cheapest block first**, and `A1_BLOCK_SPECTRA=0` skips it. On A1 the
+   widest block is `25 120²`, i.e. 83 % of a full-`P` decomposition on its own — it is what the
+   time limit actually hit, and the four cheap blocks behind it were lost for nothing.
+3. `--cpus-per-task` 16 → 4 (§6.1), `--time` 00:50:00 → 01:30:00 on the measured basis.
