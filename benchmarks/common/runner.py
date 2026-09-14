@@ -169,6 +169,13 @@ def build_parser(bench: Benchmark) -> argparse.ArgumentParser:
     parser.add_argument("--checkpoints", type=str, default=None,
                         help="comma-separated fractions of the run's steps at which to dump "
                              "theta, e.g. '0,0.01,0.1,0.5,1' (plan_exp_step1.md D5)")
+    parser.add_argument("--checkpoint-optimizer-state", dest="checkpoint_optimizer_state",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="also dump the optimizer's own state in each checkpoint (its "
+                             "state_dict, plus AdaFisherMulti's EMA'd Fisher factors keyed by "
+                             "module name). Off by default: it is what protocol P2 of "
+                             "plan_exp_draft.md would otherwise re-warm from theta, and it costs "
+                             "~1.8 GB over a 6-model x 7-arm x 5-checkpoint campaign")
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-dir", dest="output_dir", type=Path, default=None)
@@ -237,6 +244,8 @@ def run_arm(
             fractions=parse_fractions(args.checkpoints),
             total_steps=min(args.max_steps, args.epochs * len(train_loader)),
             seed=args.seed,
+            optimizer=optimizer,
+            save_optimizer_state=args.checkpoint_optimizer_state,
         )
 
     eval_fn = None

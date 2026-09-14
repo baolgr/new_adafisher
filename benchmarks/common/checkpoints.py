@@ -12,6 +12,15 @@ times the batches per epoch), which under the WCT protocol is shared by every ar
 across them. ``t=0`` is the initialization (the loop calls ``on_step`` once with ``0`` before the
 first batch).
 
+``--checkpoint-optimizer-state`` (opt-in, **off by default**, so today's payloads are unchanged
+byte for byte) adds the optimizer's own state next to ``theta``: ``torch.optim``'s ``state_dict()``
+for any optimizer, plus — for ``AdaFisherMulti`` — its EMA'd per-module Fisher factors re-keyed by
+**module name** (the live dicts are keyed by ``nn.Module`` objects, which do not survive a reload).
+This is what protocol P2 of ``plan_exp_draft.md`` §3.2 would otherwise have to re-warm from
+``theta``. The transient ``_cached_*`` entries are excluded: they are one batch's layer inputs, not
+state — 3.37 GB across ResNet-50 at batch 128 (``plan_lot8.md`` §0.4) — and they are rebuilt by the
+next ``TCov`` step anyway.
+
 A wall-clock-budgeted arm need not reach the nominal length: an expensive mode stops short, a cheap
 one overshoots it. ``save_final`` therefore pins the largest requested fraction to wherever the arm
 actually ended, *if* it never fired on schedule — and marks that payload ``scheduled=False``, so a
@@ -24,10 +33,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
+from torch import Tensor
 
 DEFAULT_FRACTIONS: Tuple[float, ...] = (0.0, 0.01, 0.1, 0.5, 1.0)
 
@@ -44,6 +54,45 @@ def label(fraction: float) -> str:
     return f"{fraction:g}"
 
 
+#: Live per-module dicts whose name starts with one of these hold a *batch*, not state.
+TRANSIENT_PREFIXES: Tuple[str, ...] = ("_cached",)
+
+
+def optimizer_state_payload(optimizer: Any, model: nn.Module) -> Dict[str, Any]:
+    """The optimizer's own state, serialisable and re-keyed by module name.
+
+    Duck-typed on purpose: ``adam``/``adamw`` have no ``approx`` and contribute their
+    ``state_dict()`` alone, so this module needs no import from ``adafisher_modes`` and no branch
+    per arm. For ``AdaFisherMulti`` the Fisher factors are read generically out of
+    ``vars(optimizer.approx)`` — every mode stores its state as ``{nn.Module: Tensor}`` dicts, so
+    ``diag``'s ``_H``/``_S`` and ``tekfac``'s ``_Phi_raw``/``_Theta``/... are all covered without
+    naming any of them here.
+    """
+    payload: Dict[str, Any] = {
+        "optimizer_class": type(optimizer).__name__,
+        "optimizer_state_dict": optimizer.state_dict(),
+    }
+    approx = getattr(optimizer, "approx", None)
+    if approx is None:
+        return payload
+
+    names = {id(module): name for name, module in model.named_modules()}
+    fisher: Dict[str, Dict[str, Tensor]] = {}
+    for family, mapping in vars(approx).items():
+        if not isinstance(mapping, dict) or family.startswith(TRANSIENT_PREFIXES):
+            continue
+        by_name = {names[id(key)]: value.detach().to("cpu").clone()
+                   for key, value in mapping.items()
+                   if isinstance(key, nn.Module) and id(key) in names
+                   and isinstance(value, Tensor)}
+        if by_name:
+            fisher[family] = by_name
+    payload["fisher_state"] = fisher
+    payload["fisher_approximation"] = type(approx).__name__
+    payload["optimizer_steps"] = getattr(optimizer, "steps", None)
+    return payload
+
+
 @dataclass
 class CheckpointWriter:
     """``on_step`` callback writing the scheduled checkpoints of one arm."""
@@ -53,6 +102,10 @@ class CheckpointWriter:
     total_steps: int
     seed: int
     written: Dict[str, str] = field(default_factory=dict)
+    #: Opt-in (``--checkpoint-optimizer-state``). Both must be set for the optimizer's state to be
+    #: written; leaving them alone reproduces the previous payload exactly.
+    optimizer: Optional[Any] = None
+    save_optimizer_state: bool = False
 
     def _due_at(self, completed_steps: int) -> List[float]:
         return [f for f in self.fractions
@@ -77,18 +130,18 @@ class CheckpointWriter:
              scheduled: bool = True) -> None:
         path = self.output_dir / f"ckpt_{label(fraction)}.pt"
         path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "model_state_dict": model.state_dict(),
-                "fraction": fraction,
-                "step": completed_steps,
-                "epoch": epoch,
-                "seed": self.seed,
-                # The denominator the fraction is relative to, and whether this payload landed on
-                # the scheduled step or was pinned to the arm's own end by ``save_final``.
-                "total_steps": self.total_steps,
-                "scheduled": scheduled,
-            },
-            path,
-        )
+        payload: Dict[str, Any] = {
+            "model_state_dict": model.state_dict(),
+            "fraction": fraction,
+            "step": completed_steps,
+            "epoch": epoch,
+            "seed": self.seed,
+            # The denominator the fraction is relative to, and whether this payload landed on the
+            # scheduled step or was pinned to the arm's own end by ``save_final``.
+            "total_steps": self.total_steps,
+            "scheduled": scheduled,
+        }
+        if self.save_optimizer_state and self.optimizer is not None:
+            payload["optimizer_state"] = optimizer_state_payload(self.optimizer, model)
+        torch.save(payload, path)
         self.written[label(fraction)] = str(path)

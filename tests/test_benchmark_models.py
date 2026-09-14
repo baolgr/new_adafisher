@@ -354,3 +354,123 @@ def test_checkpoint_fractions_share_one_denominator_across_arms(tmp_path: Path) 
     diag_half = torch.load(tmp_path / "diag" / "ckpt_0.5.pt", weights_only=False)
     adam_half = torch.load(tmp_path / "adam" / "ckpt_0.5.pt", weights_only=False)
     assert diag_half["step"] == adam_half["step"] == nominal // 2
+
+
+# ----------------------------------------------------------------------------------------------
+# --checkpoint-optimizer-state (opt-in; plan_exp_draft.md §3.2, the P2 re-warm alternative)
+# ----------------------------------------------------------------------------------------------
+
+
+DEFAULT_PAYLOAD_KEYS = {"model_state_dict", "fraction", "step", "epoch", "seed", "total_steps",
+                        "scheduled"}
+
+
+def _write_one(tmp_path: Path, arm: str, *, save_state: bool, model_name: str = "mlp_ln_mnist"):
+    """One checkpoint of one arm, through the real writer, after 2 real steps."""
+    from benchmarks.common.checkpoints import CheckpointWriter
+    from benchmarks.common.optimizers import HParams, build_optimizer
+
+    bench = BENCHES[model_name]
+    seed_all(0)
+    model = _build(model_name)
+    optimizer = build_optimizer(arm, model, HParams(tcov=1, t_inv=1, t_eig=1))
+    batch = _synthetic_batch(model_name)
+    for _ in range(2):
+        inputs, targets = bench.prepare_batch(batch)
+        optimizer.zero_grad()
+        bench.loss_fn(model(inputs), targets).backward()
+        optimizer.step()
+    writer = CheckpointWriter(tmp_path / arm, (1.0,), total_steps=2, seed=0,
+                              optimizer=optimizer, save_optimizer_state=save_state)
+    writer.save(1.0, 2, 0, model)
+    return model, optimizer, torch.load(tmp_path / arm / "ckpt_1.pt", weights_only=False)
+
+
+def test_checkpoint_optimizer_state_is_off_by_default(tmp_path: Path) -> None:
+    """The default payload must be exactly what it was before the flag existed: a run in flight
+    picks up this code from ``$SLURM_SUBMIT_DIR``, so "off" has to mean *byte-for-byte unchanged*.
+    """
+    _model, _opt, payload = _write_one(tmp_path, "ekfac", save_state=False)
+    assert set(payload) == DEFAULT_PAYLOAD_KEYS
+    from benchmarks.common.checkpoints import CheckpointWriter
+    writer = CheckpointWriter(tmp_path / "plain", (1.0,), total_steps=2, seed=0)
+    assert writer.optimizer is None and writer.save_optimizer_state is False
+
+
+@pytest.mark.parametrize("arm", ["diag", "kfac", "ekfac", "tkfac", "tekfac"])
+def test_checkpoint_optimizer_state_round_trips_by_module_name(tmp_path: Path, arm: str) -> None:
+    """The live Fisher state is keyed by ``nn.Module`` objects, which do not survive a reload, so
+    it is re-keyed by module name — and every hooked module must be present, for every mode.
+    """
+    model, optimizer, payload = _write_one(tmp_path, arm, save_state=True)
+    state = payload["optimizer_state"]
+    assert state["optimizer_class"] == "AdaFisherMulti"
+    assert state["optimizer_steps"] == 2
+    assert "exp_avg" in next(iter(state["optimizer_state_dict"]["state"].values()))
+
+    hooked = {name for name, module in model.named_modules() if module in optimizer.modules}
+    assert hooked, "the test model must have hooked modules"
+    fisher = state["fisher_state"]
+    assert fisher, f"{arm}: no Fisher factor was dumped"
+    for family, by_name in fisher.items():
+        assert not family.startswith("_cached"), f"{family} is a batch, not state"
+        assert set(by_name) <= hooked
+        assert all(torch.is_tensor(t) for t in by_name.values())
+    # Every hooked module appears in at least one family, and the values are the live ones.
+    assert set().union(*fisher.values()) == hooked
+    live = vars(optimizer.approx)
+    for family, by_name in fisher.items():
+        for name, tensor in by_name.items():
+            module = dict(model.named_modules())[name]
+            assert torch.equal(tensor, live[family][module].cpu())
+
+
+def test_checkpoint_optimizer_state_for_the_baselines(tmp_path: Path) -> None:
+    """``adam``/``adamw`` have no ``approx``: they contribute their ``state_dict`` alone, with no
+    branch per arm in the writer (it is duck-typed).
+    """
+    _model, _opt, payload = _write_one(tmp_path, "adam", save_state=True)
+    state = payload["optimizer_state"]
+    assert state["optimizer_class"] == "Adam" and "fisher_state" not in state
+    assert "exp_avg_sq" in next(iter(state["optimizer_state_dict"]["state"].values()))
+
+
+def test_checkpoint_optimizer_state_excludes_the_transient_batch_cache(tmp_path: Path) -> None:
+    """``ekfac``/``tekfac`` cache every layer's input batch between the forward and the backward
+    hook (3.37 GB across ResNet-50 at batch 128, ``plan_lot8.md`` §0.4). It is a batch, not state.
+
+    Between two completed steps the cache happens to be empty — the backward hook ``pop``s it — so
+    the filter is checked on an entry injected deliberately, not on that timing.
+    """
+    from benchmarks.common.checkpoints import TRANSIENT_PREFIXES, optimizer_state_payload
+
+    model, optimizer, payload = _write_one(tmp_path, "ekfac", save_state=True)
+    assert not any(k.startswith(TRANSIENT_PREFIXES) for k in payload["optimizer_state"]
+                   ["fisher_state"])
+
+    hooked = optimizer.modules[0]
+    optimizer.approx._cached_h_bar[hooked] = torch.zeros(4096, 4096)  # one live cached batch
+    assert any(v for k, v in vars(optimizer.approx).items() if k.startswith(TRANSIENT_PREFIXES))
+    fisher = optimizer_state_payload(optimizer, model)["fisher_state"]
+    assert not any(k.startswith(TRANSIENT_PREFIXES) for k in fisher)
+
+
+def test_checkpoint_optimizer_state_reaches_the_fisher_ref_bridge(tmp_path: Path) -> None:
+    """The campaign's own reader exposes it, and still reads a checkpoint written without it."""
+    import json
+
+    from fisher_ref.checkpoints import discover_runs, load_theta
+
+    outputs = tmp_path / "outputs" / "mlp_ln_mnist"
+    _write_one(outputs, "tekfac", save_state=True)
+    _write_one(outputs, "diag", save_state=False)
+    (outputs / "manifest.json").write_text(json.dumps({"config": {"seed": 0}}))
+
+    loaded = {run.arm: load_theta(run, 1.0) for run in discover_runs(tmp_path / "outputs")}
+    assert loaded["diag"].optimizer_state is None
+    assert loaded["diag"].metadata()["has_optimizer_state"] is False
+    assert loaded["tekfac"].optimizer_state is not None
+    assert loaded["tekfac"].metadata()["has_optimizer_state"] is True
+    assert set(loaded["tekfac"].optimizer_state["fisher_state"]["_Theta"]) == {
+        "features.0", "features.1", "features.3", "features.4", "head"
+    }

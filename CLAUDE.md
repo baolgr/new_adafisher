@@ -207,6 +207,68 @@ root on `v^(t)` — is **identical across the five modes**.
 > the superseded/duplicated result trees moved to `benchmarks/archives/` so `outputs/<model>/`
 > holds exactly one report plus one checkpoint-only directory per arm.
 
+> **Fisher-drift campaign, plan v1 + lot 0: done.** `docs/reports/plan_exp_draft.md` is now **the**
+> campaign plan: `plan_exp_draft_v0.md` (the original French draft, kept verbatim) adapted to what
+> this repository actually produces, with every change listed in its own §0. It also supersedes
+> the simplified rewrite that used to sit at the repository **root** as `plan_exp_draft.md`
+> (added by `6dd981c`, absent from the working tree since 2026-09-11, recoverable with
+> `git show 6dd981c:plan_exp_draft.md`): that file's **scope cuts** (regimes A/B first, metrics
+> M1/M5/M7/M8 first, sources type-2 + empirical first, four hypotheses) are kept as v1's §0.11
+> priority order, its "reuse `adafisher_modes`, do not rebuild" rule as §0.12, and — because
+> comments in `benchmarks/` and `tests/` cite *its* section numbers — §0.13 maps them (its §4
+> Models -> v1 §1, its §7 Checkpoints -> v1 §3.5, its §8 Steps -> v1 §9), so no code comment
+> needs rewriting. The substantive changes from v0:
+> the campaign's models are the **eight `benchmarks/<model>/` folders** with their measured
+> parameter counts, not plan-internal definitions (A4/B3 stay deferred, and v0's B4 "realistic
+> width d=192" role is already filled by `vit_small_cifar`); its θ axis is the **checkpoints the
+> harness already writes** (`{0, 1%, 10%, 50%, 100%} x {diag, adamw} x the seeds that exist`, plus
+> five more arms at seed 0), which buys a question v0 could not ask — *does the drift at a given θ
+> depend on which optimizer produced that θ?*; **P2 reads `AdaFisherMulti`'s own state for all five
+> modes** rather than an upstream adapter for `diag` only, because the port's fidelity (the open
+> question v0 made P2 wait on) is settled by `test_diag_bitexact.py`; and, since the checkpoints
+> hold **θ only**, P2 must re-warm the EMA — bounded, and that is why it is acceptable: the update
+> multiplies the existing state by `1-gamma_0 = 0.08` at every `TCov`, so after `k` factor updates
+> the pre-checkpoint history contributes `0.08^k` (`5.1e-4` at `k=3`, i.e. ~300 steps re-warm the
+> operational state to better than `1e-3` **whatever the trajectory before it was**). Two
+> corrections to v0 worth keeping: its lot-0 exit criterion ("T1-T6 pass") was **unsatisfiable** —
+> T1 needs a dense `F`, T3-T5 need K-FAC, none of which lot 0 builds — so lot 0 gained its own
+> T0.1-T0.8 and T1-T6 moved to the lots that build their prerequisites; and the campaign's analysis
+> jobs must **not** inherit the training jobs' `h100_1g.10gb` line, because regime A is
+> `P_max = sqrt(B/24)` and at 10 GB that is 20 412, below `mlp_ln_mnist`'s own `P = 26 634`.
+>
+> **Lot 0 is implemented** (`docs/reports/plan_exp_lot0.md`): the new top-level `fisher_ref/`
+> package — a *reader*, which trains nothing and changed **no** file in `benchmarks/` or `src/` —
+> with `conventions.py`, `probes.py`, `registry.py` and the `checkpoints.py` bridge, plus
+> `tests/test_fisher_ref_lot0.py` (27 tests, 261 -> 288 passing, no pre-existing test modified).
+> Two findings, both measured: (1) an **absolute** tolerance for the per-sample-independence check
+> is wrong — `cnn_gn_cifar` (GroupNorm, eval, reloaded from its own 50% checkpoint) differs by
+> `6.3e-6` between a batch of 256 and a batch of 4 purely from fp32 reduction order, so the check
+> is relative with a dtype-keyed default, and the margin it lives in is five orders of magnitude
+> wide (`5e-7` eval vs `3.6e-2` for `resnet20_cifar` with BN in **train** mode — the case that
+> makes `F` and `E_hat` undefined at all); (2) the bridge discovers **42 runs** today (6 models x 7
+> arms, seed 0), all post-denominator-fix, and `available_seeds()` returns `[0]` everywhere — the
+> honest answer while `train_v0_seeds.sh` is in flight, which is exactly what every consumer must
+> report rather than assume the plan's 3-5 seeds.
+>
+> **Re-warm fidelity, measured — and the answer to "should we re-run to save the optimizer state?"
+> is no.** P2 needs the optimizer's internal state at a checkpoint's θ, but the checkpoints hold θ
+> only. Measured on `cnn_gn_cifar`, all five modes (`fisher_ref/experiments/rewarm_fidelity.py`,
+> numbers in `plan_exp_draft.md` §3.2): a re-warm of **10·TCov steps** reproduces the *applied*
+> preconditioner to within **1.3-4.5× the estimator's own batch-draw noise floor**, and `ekfac`'s
+> `s*` lands *below* its floor. Re-running the 6 models x 7 arms would cost only 87 min of training
+> and 1.8 GB — but it would **replace** campaign 1 rather than augment it (under WCT only the
+> reference arm is bit-reproducible; the others' step counts follow a *measured* budget), to
+> preserve a state that is 92 % one minibatch's factor. **One correction to the plan's own
+> arithmetic came out of it**: the re-warm length is set by `0.08^k << lambda`, **not** by
+> `0.08^k << 1`. Every mode seeds its EMA with the **identity** at step 0 (`kfac.py:77` and
+> analogues), so a fresh optimizer carries `0.08^k I` — a *spurious extra damping*. At `k=3`
+> (the 300 steps the `0.08^k` arithmetic alone suggested) that is `5.1e-4`, half of `lam=1e-3`, and
+> the applied preconditioner is **12-87 % wrong** on the four Kronecker modes (`tkfac`/`tekfac`'s
+> un-normalized numerators are off by **six orders of magnitude**); by `k=10` the gap has collapsed
+> by 3-6 orders. Do not shorten a P2 re-warm below `10·TCov`, and lengthen it when sweeping `lam`
+> downwards. `--checkpoint-optimizer-state` (opt-in, OFF by default) exists for the *next* campaign
+> that runs anyway, not for a re-run.
+
 ## Working language
 
 All code, comments, docstrings, reports and documentation are written in **English**, to the standard
@@ -349,35 +411,30 @@ adafisher /
 │   └── archives/                 # gitignored; superseded/duplicated result trees moved aside
 │                                 #   between campaigns, each with its own README saying why
 ├── docs/reports/
-│   ├── plan.md                   # overall design plan (lots 1-8)
-│   ├── plan_lot1.md              # lot-1 implementation plan, with the 3 ABC corrections
-│   ├── plan_lot2.md              # lot-2 implementation plan: full factors, s* estimator, rvec
-│   │                             #   derivation, shared weight/bias plumbing
-│   ├── plan_lot3.md              # lot-3 implementation plan: un-normalized-numerator EMA,
-│   │                             #   damping derivation, TEKFAC's reuse of TKFAC's factors
-│   ├── plan_lot4.md              # lot-4 implementation plan: Conv2d (KFC) for the four
-│   │                             #   non-diagonal modes, the _h_conv2d scale-quirk finding,
-│   │                             #   groups=1/dilation=(1,1) scope, the toy-conv oracle design
-│   ├── plan_lot5.md              # lot-5 implementation plan: Proposition 3.1's Hadamard (not
-│   │                             #   Kronecker) FIM structure for normalisation layers, the
-│   │                             #   Frobenius-optimal scalar surrogate for H|_nu, why zero
-│   │                             #   approximations/*.py changes were needed
-│   ├── plan_lot6.md              # lot-6 implementation plan: the SUA approximation (IAD+SH+SUA,
-│   │                             #   not Theorem 4's IAD+SH+SUA+WD), the center-slice-of-patch
-│   │                             #   input-factor construction and why it row-aligns with the
-│   │                             #   output factor for any stride/padding, the block-diagonal-
-│   │                             #   across-kernel-offsets precondition application and its bias
-│   │                             #   convention
-│   ├── plan_lot7.md              # lot-7 implementation plan: equal-wall-clock-budget semantics
-│                                 #   (checked per-batch, overshoot bound not undershoot — an
-│                                 #   empirically-corrected design point, §5.5), the dataset-agnostic
-│                                 #   harness enabling an offline test, the fwd+bwd/step timing split
-│                                 #   giving §6.3's "≈2.1x" claim its first empirical measurement
-│   └── plan_lot8.md              # lot-8 implementation plan: the two networks read off their own
-│                                 #   papers and why neither is a torchvision/timm import, the
-│                                 #   measured ViT parameter-pairing bug, the measured hook-memory
-│                                 #   footprint at CIFAR scale, AdaFisher's WCT budget protocol,
-│                                 #   the Alliance Canada SLURM path
+│   ├── plan_exp_step1.md         # the Fisher-drift campaign's step 1: the benchmarks/ package
+│   ├── plan_exp_draft_v0.md      # the campaign's original draft (French), kept verbatim
+│   ├── plan_exp_draft.md         # THE campaign plan (v1): plan_exp_draft_v0 adapted to the
+│   │                             #   benchmark models, runs, seeds and checkpoints this repo
+│   │                             #   actually produces; its §0 lists every change from v0
+│   ├── plan_exp_lot0.md          # lot-0 implementation plan: why v0's lot-0 exit criterion was
+│   │                             #   unsatisfiable, the probe/registry/bridge design, the
+│   │                             #   measured sample-independence tolerance
+│   └── archives/                 # the optimizer-implementation lots, moved aside once done. Still
+│                                 #   the authoritative record of every design decision cited
+│                                 #   throughout this file and in the code — plan.md (overall,
+│                                 #   lots 1-8) and plan_lot1.md ... plan_lot8.md. Citations
+│                                 #   elsewhere name them by bare filename: they live here.
+├── fisher_ref/                   # the Fisher-drift campaign's own package (plan_exp_draft.md §7).
+│   │                             #   A *reader*: trains nothing, changes nothing in benchmarks/
+│   │                             #   or src/. Lot 0 (done) ships four modules:
+│   ├── conventions.py            #   fp64 policy, TF32 off + what was actually set, rvec/kron
+│   │                             #   convention, reference_mode, assert_sample_independent
+│   ├── probes.py                 #   fixed, augmentation-free, content-hashed probe sets on the
+│   │                             #   run's own seeded train/val split
+│   ├── registry.py               #   parameter block -> layer type, weight sharing read from one
+│   │                             #   forward pass; partitions every parameter of every model
+│   └── checkpoints.py            #   benchmarks/outputs/ -> theta: both layouts (seed 0 and
+│                                 #   outputs/seeds/<model>/seed<n>/), rejects pre-fix payloads
 ├── requirements-cluster.txt      # lot 8: --no-index install list for the cluster's wheelhouse
 └── CLAUDE.md
 ```
@@ -475,11 +532,43 @@ the lot-1 completion notes). Two consequences, both already wired up:
 If this turns out to be specific to this sandbox rather than the host machine in general, the editable
 install may "just work" elsewhere — no need to route around it there too.
 
+### Cluster sync — the real path (overrides `benchmarks/slurm/README.md`'s generic example)
+
+`benchmarks/slurm/README.md` documents a generic
+`<username>@fir.alliancecan.ca:~/projects/def-msh-ab/<username>/adafisher/` layout for any first-time
+Alliance Canada setup. **The actual remote checkout for this project is elsewhere** — reachable via
+the `rorqual` SSH config alias (host `rorqual3` at submission time, per `sacct`), at
+`/home/blgr/new_adafisher/` (not `~/projects/def-msh-ab/blgr/adafisher/`, and the directory is named
+`new_adafisher`, not `adafisher`). Use these paths, not the README's, when pulling results:
+
+```bash
+# SLURM logs (benchmarks/slurm/logs/*.out) — the fastest way to identify what a given JobID ran
+rsync -av rorqual:/home/blgr/new_adafisher/benchmarks/slurm/logs/ \
+      "benchmarks/slurm/logs/"
+
+# results (csv/md/json/png only, no multi-GB checkpoints)
+rsync -av --include='*/' --include='*.csv' --include='*.md' --include='*.json' \
+      --include='*.png' --exclude='*' \
+      rorqual:/home/blgr/new_adafisher/benchmarks/outputs/ \
+      benchmarks/outputs/
+
+# checkpoints for one model only (large — pull selectively)
+rsync -av rorqual:/home/blgr/new_adafisher/benchmarks/outputs/<model>/ \
+      benchmarks/outputs/<model>/
+
+# check a specific JobID's name/state directly on the cluster instead of guessing from local logs
+ssh rorqual "sacct -j <jobid> --format=JobID,JobName%30,Start,End,Elapsed,State,ExitCode"
+```
+
+Run these from the repository root on the laptop (the local checkout lives at
+`/Users/baolgr/Documents/Projets/adafisher ` — note the trailing space in the directory name).
+
 ## Running the tests
 
 ```bash
-.venv/bin/pytest tests/ -v                                    # everything (lots 1-8 + step 1: 258 tests,
-                                                               #   + 6 marked slow, run with --runslow)
+.venv/bin/pytest tests/ -v                                    # everything (lots 1-8 + step 1 + campaign
+                                                               #   lot 0: 288 tests, + 8 marked slow, run
+                                                               #   with --runslow)
 .venv/bin/pytest tests/test_diag_bitexact.py -v                # exit criteria 1 & 3 (bit-exactness)
 .venv/bin/pytest tests/test_diag_eq4_semantics.py -v            # exit criterion 2 (Eq. 4 semantics)
 .venv/bin/pytest tests/test_minmax_matches_official.py -v      # MinMaxNormalization vs. official repo
@@ -505,6 +594,12 @@ install may "just work" elsewhere — no need to route around it there too.
                                                                  #   hooked-module inventory, "no parameter
                                                                  #   left un-updated", all 5 modes, the
                                                                  #   bench spec, checkpoints (step 1)
+.venv/bin/pytest tests/test_fisher_ref_lot0.py -v                # the Fisher-drift campaign's lot 0
+                                                                 #   (T0.1-T0.8): TF32/precision policy, the
+                                                                 #   rvec/kron convention, reference mode and
+                                                                 #   sample independence, probe sets, the
+                                                                 #   layer-type registry over every model,
+                                                                 #   the checkpoint bridge; all offline
 
 # Every bench takes the same CLI; `python -m benchmarks.<model>.bench` and
 # `python benchmarks/<model>/bench.py` are equivalent. The models are:
@@ -517,7 +612,11 @@ PYTHONPATH=src .venv/bin/python -m benchmarks.mnist_autoencoder.bench --epochs 2
 PYTHONPATH=src .venv/bin/python -m benchmarks.vit_small_cifar.bench \
     --arms diag adam --epochs 2 --budget-mode epochs --train-subset 1024
 PYTHONPATH=src .venv/bin/python -m benchmarks.resnet50_cifar.bench --epochs 50      # the real thing
-# trajectory checkpoints, the input steps 2-5 of plan_exp_draft.md consume
+# trajectory checkpoints, the input steps 2-5 of plan_exp_draft.md consume; add
+# --checkpoint-optimizer-state (opt-in, OFF by default) to also dump the optimizer's own state —
+# its state_dict plus AdaFisherMulti's EMA'd Fisher factors keyed by module name (~1.8 GB for a
+# full 6-model x 7-arm x 5-checkpoint campaign). Off means the payload is byte-for-byte what it
+# was, which matters while cluster jobs run from $SLURM_SUBMIT_DIR.
 PYTHONPATH=src .venv/bin/python -m benchmarks.cnn_gn_cifar.bench \
     --epochs 30 --checkpoints 0,0.01,0.1,0.5,1
 # THE CAMPAIGN PROTOCOL: --lr-schedule budget, so every budgeted arm completes one full cosine
