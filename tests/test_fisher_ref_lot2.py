@@ -825,3 +825,57 @@ def test_p1_runner_writes_the_declared_schema(tmp_path: Path) -> None:
     assert meta["metrics_version"] == conventions.METRICS_VERSION
     assert meta["protocol"] == "P1" and meta["precision"]["cudnn_allow_tf32"] is not True
     assert "noise_floor" in meta
+
+
+# ----------------------------------------------------------------------------------------------
+# Device plumbing — the class of bug that killed cluster job 21125955
+# ----------------------------------------------------------------------------------------------
+
+
+def test_layer_factors_to_covers_every_tensor_field() -> None:
+    """``LayerFactors.to`` moves a **hardcoded list** of fields, so the real risk is a new tensor
+    field added to the dataclass and forgotten there — it would stay on the accumulation device and
+    blow up inside a metric's einsum minutes later, which is exactly how the first P1 cluster job
+    died (and it died on the *other* instance of the same bug, a host-side example input against a
+    GPU-resident model).
+
+    Checked without a second device by comparing the moved set against the fields that actually
+    hold tensors on a fully populated instance: a missed field fails here, on CPU, in CI.
+    """
+    import dataclasses
+
+    from fisher_ref.approx.factors import LayerFactors
+
+    seed_all(31)
+    populated = LayerFactors(name="l", kind="norm", d_in=3, d_out=3, positions=1, n_probes=4,
+                             a_rows=4, g_rows=4, tkfac_count=4, norm_h_rows=4)
+    for field in dataclasses.fields(populated):
+        if field.name in ("A_raw", "G_raw", "tkfac_phi", "tkfac_psi", "norm_h", "norm_s"):
+            setattr(populated, field.name, torch.randn(3, 3, dtype=DTYPE))
+    populated.tkfac_delta = torch.tensor(2.0, dtype=DTYPE)
+
+    tensor_fields = {field.name for field in dataclasses.fields(populated)
+                     if isinstance(getattr(populated, field.name), torch.Tensor)}
+    moved = populated.to("cpu")
+    moved_fields = {field.name for field in dataclasses.fields(moved)
+                    if isinstance(getattr(moved, field.name), torch.Tensor)}
+    assert moved_fields == tensor_fields, (
+        f"LayerFactors.to() dropped {sorted(tensor_fields - moved_fields)}: a tensor field it does "
+        "not list stays on the accumulation device"
+    )
+    for name in tensor_fields:
+        assert torch.equal(getattr(moved, name), getattr(populated, name)), name
+    # The scalar bookkeeping must survive the move too, or every normalisation silently changes.
+    assert (moved.a_rows, moved.g_rows, moved.tkfac_count, moved.norm_h_rows) == (4, 4, 4, 4)
+    assert (moved.n_probes, moved.positions, moved.d_in, moved.d_out) == (4, 1, 3, 3)
+
+
+def test_ekfac_to_moves_its_three_tensors() -> None:
+    seed_all(32)
+    model, inputs, targets = _unshared_net()
+    _, ekfacs, _ = _zoo(model, inputs, targets)
+    block = ekfacs["2"]
+    moved = block.to("cpu")
+    assert torch.equal(moved.QA, block.QA) and torch.equal(moved.QG, block.QG)
+    assert torch.equal(moved.s, block.s)
+    assert moved.P == block.P

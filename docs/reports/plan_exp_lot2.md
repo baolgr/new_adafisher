@@ -449,7 +449,61 @@ The noise floor is measured at **one** fraction (`--noise-at 1`): twenty random 
 half-size reference builds, ~49 min at this `N`, and it is a property of the estimator at that `θ`.
 Total: `5 × (441 + 45 + 180) + 2944 ≈ 1.9 h`, requested as `03:00:00`.
 
-### 5.8 One unreproducible test failure, investigated and left open
+### 5.8 The first P1 cluster job failed on a device crossing, and the local path could not have caught it
+
+Job **21125955, `FAILED` after 36 s**, exit code 1. Not the sizing, not the guards:
+
+```
+RuntimeError: Expected all tensors to be on the same device,
+but got mat1 is on cpu, different from other tensors on cuda:0
+```
+
+`run_fraction` cast the example input for `registry.classify` to the reference **dtype** but not to
+the **device**. `prepare_model` had moved the network to the GPU; the example stayed on the host.
+
+This is the same class of bug as §5.6's — fixed there for dtype, left half-fixed for device — and
+**the local validation path could not have found it**: with no CUDA on the laptop every smoke run
+has `device=cpu`, where the mismatch is invisible by construction. That is the lesson, not the
+missing `.to()`.
+
+**A second instance was waiting further along.** `accumulate_factors` and `accumulate_ekfac`
+accumulate where the traversal runs — the GPU — while the dense reference is moved to the host
+(5.68 GB; a 10 GB slice cannot hold several). Every metric would therefore have contracted a
+`cuda` factor against a `cpu` block and died inside an einsum several minutes in. Both are fixed by
+explicit `LayerFactors.to()` / `EKFAC.to()`, applied once at the boundary.
+
+**The test that closes it does not need a GPU.** `LayerFactors.to()` moves a *hardcoded list* of
+fields, so the real hazard is a new tensor field added to the dataclass and forgotten there.
+`test_layer_factors_to_covers_every_tensor_field` compares the moved set against the fields that
+actually hold tensors on a fully populated instance — a missed field fails on CPU, in CI, instead
+of on the cluster thirty-six seconds into a three-hour job.
+
+**And it exposed an omission.** Re-reading the runner for this showed that **M5 (`ρ`) was never
+wired in** — implemented in `metrics/ngd.py`, tested, never called. It is one of §0.11's four core
+metrics and the one `plan_exp_lot1.md` §3.6 names as the cheapest decisive measurement on the
+`mnist_autoencoder` stall. Now computed per layer, structure and `λ`, under the same size guard as
+M3 (it also needs a Cholesky of the block).
+
+Its first numbers already justify §3.3's sweep being a rule rather than a detail — on A1's head,
+type-2, `N = 512`:
+
+| structure | `ρ` at `α = 1e-3` | `ρ` at `α = 1` |
+|---|---:|---:|
+| `af_raw` | **0.031** | 0.636 |
+| `exact_diag` | 0.064 | 0.730 |
+| `best_kron` | 0.348 | 0.855 |
+| `kfac` | 0.389 | 0.748 |
+| `ekfac` | 0.397 | 0.774 |
+| `tkfac` | 0.469 | 0.867 |
+
+Two readings, both of which a single-`λ` report would have hidden: AdaFisher's raw estimator
+recovers **3 %** of the optimal quadratic decrease at light damping and 64 % at heavy damping — the
+damping is doing the work, not the structure. And `best_kron`, which is *Frobenius*-optimal among
+Kronecker products by construction (§0.4), is **not** the best on `ρ` at light damping — it sits
+below `kfac` and `ekfac`. Frobenius-optimal is not step-optimal, which is precisely the M1-vs-M5
+distinction §5.5 derived from the damping argument, now visible in data.
+
+### 5.9 One unreproducible test failure, investigated and left open
 
 A single full-suite run reported `1 failed, 565 passed` and was never reproduced. Recorded here so
 the investigation is not repeated:

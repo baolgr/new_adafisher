@@ -67,7 +67,8 @@ def _layer_types(model: torch.nn.Module, example: torch.Tensor) -> Dict[str, str
 
 def analyse_layer(name: str, exact: torch.Tensor, entry, ekfac, kinds: Dict[str, str],
                   alphas: Sequence[float], source: str, defaults: Dict[str, Any],
-                  stein_max_p: int = 4096) -> List[Dict[str, Any]]:
+                  stein_max_p: int = 4096,
+                  gradient: Optional[torch.Tensor] = None) -> List[Dict[str, Any]]:
     """Every structure available for one layer, at every damping — M1 always, M3/M5 per ``lambda``."""
     rows: List[Dict[str, Any]] = []
     common = {**defaults, "layer": name, "layer_type": kinds.get(name, "other"), "source": source}
@@ -111,6 +112,9 @@ def analyse_layer(name: str, exact: torch.Tensor, entry, ekfac, kinds: Dict[str,
         for alpha, lam in metrics.lambda_grid(exact, alphas).items():
             rows += _rows(metrics.stein_kl(exact, block, lam).as_rows(), **common,
                           structure=structure_name, lambda_alpha=alpha)
+            if gradient is not None:
+                rows += _rows(metrics.rho(exact, block, gradient, lam).as_rows(), **common,
+                              structure=structure_name, lambda_alpha=alpha)
     return rows
 
 
@@ -125,7 +129,10 @@ def run_fraction(bench, run, fraction: float, args, meta: Dict[str, Any]) -> Lis
     modules = capturable_modules(model)
     if args.modules:
         modules = {name: modules[name] for name in args.modules}
-    kinds = _layer_types(model, inputs[:2].to(conventions.REFERENCE_DTYPE))
+    # device *and* dtype: casting only the dtype left the example on the host while the model
+    # had moved to the GPU, which is what killed cluster job 21125955 after 36 s.
+    kinds = _layer_types(model, inputs[:2].to(device=args.device,
+                                             dtype=conventions.REFERENCE_DTYPE))
 
     defaults = {"N": len(train), "probe_split": "train", "seed": run.seed, "protocol": "P1",
                 "metrics_version": conventions.METRICS_VERSION, "reference": "F"}
@@ -139,15 +146,30 @@ def run_fraction(bench, run, fraction: float, args, meta: Dict[str, Any]) -> Lis
                                      batch_size=args.batch, device=args.device)
         ekfacs = accumulate_ekfac(model, inputs, targets, source=source, modules=modules,
                                   factors=factors, batch_size=args.batch, device=args.device)
+        # The traversal accumulates where it runs (the GPU); every metric below works against the
+        # host-resident reference. Bring them together here, once, rather than discovering the
+        # mismatch inside a metric's einsum several minutes in.
+        factors = {name: entry.to("cpu") for name, entry in factors.items()}
+        ekfacs = {name: block.to("cpu") for name, block in ekfacs.items()}
         reference_name = "E_hat" if source == "empirical" else "F"
+
+        # M5 needs the true gradient at this theta, in the same layout as the reference.
+        gradient = metrics.probe_gradient(model, inputs.to(device=args.device,
+                                                           dtype=conventions.REFERENCE_DTYPE),
+                                          targets.to(args.device), bench.loss_fn).to("cpu")
 
         for name, entry in factors.items():
             block = reference.block(name)
             if entry.kind != "norm":
                 block = to_augmented(block, reference.layout.augmented_permutation(name))
+            columns = reference.layout.block_slice(name)
+            layer_gradient = gradient[columns]
+            if entry.kind != "norm":
+                perm = reference.layout.augmented_permutation(name)
+                layer_gradient = layer_gradient[perm]
             rows += analyse_layer(name, block, entry, ekfacs.get(name), kinds, args.alphas,
                                   source, {**defaults, "reference": reference_name},
-                                  stein_max_p=args.stein_max_p)
+                                  stein_max_p=args.stein_max_p, gradient=layer_gradient)
 
         ranges = [(name, reference.layout.block_slice(name)) for name in factors]
         names, coupling = metrics.coupling_matrix(reference.matrix, ranges)

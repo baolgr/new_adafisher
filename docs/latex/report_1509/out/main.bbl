@@ -1,0 +1,43 @@
+\begin{thebibliography}{8}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Dangel et~al.(2025)Dangel, Mucs{\'a}nyi, Weber, and Eschenhagen]{dangel2025kfacscratch}
+Felix Dangel, B{\'a}lint Mucs{\'a}nyi, Tobias Weber, and Runa Eschenhagen.
+\newblock {K}ronecker-factored approximate curvature ({KFAC}) from scratch, 2025.
+
+\bibitem[Gao et~al.(2020{\natexlab{a}})Gao, Liu, Huang, Wang, Wang, Wang, Xu, and Yu]{gao2020tekfac}
+Kai-Xin Gao, Xiao-Lei Liu, Zheng-Hai Huang, Min Wang, Shuangling Wang, Zidong Wang, Dachuan Xu, and Fan Yu.
+\newblock Eigenvalue-corrected natural gradient based on a new approximation, 2020{\natexlab{a}}.
+
+\bibitem[Gao et~al.(2020{\natexlab{b}})Gao, Liu, Huang, Wang, Wang, Xu, and Yu]{gao2020tkfac}
+Kai-Xin Gao, Xiao-Lei Liu, Zheng-Hai Huang, Min Wang, Zidong Wang, Dachuan Xu, and Fan Yu.
+\newblock A trace-restricted {K}ronecker-factored approximation to natural gradient, 2020{\natexlab{b}}.
+
+\bibitem[George et~al.(2018)George, Laurent, Bouthillier, Ballas, and Vincent]{george2018ekfac}
+Thomas George, C{\'e}sar Laurent, Xavier Bouthillier, Nicolas Ballas, and Pascal Vincent.
+\newblock Fast approximate natural gradient descent in a {K}ronecker-factored eigenbasis.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2018.
+
+\bibitem[Grosse and Martens(2016)]{grosse2016kfacconv}
+Roger Grosse and James Martens.
+\newblock A {K}ronecker-factored approximate fisher matrix for convolution layers, 2016.
+
+\bibitem[Kunstner et~al.(2019)Kunstner, Balles, and Hennig]{kunstner2019empiricalfisher}
+Frederik Kunstner, Lukas Balles, and Philipp Hennig.
+\newblock Limitations of the empirical fisher approximation for natural gradient descent, 2019.
+
+\bibitem[Martens and Grosse(2015)]{martens2015kfac}
+James Martens and Roger Grosse.
+\newblock Optimizing neural networks with {K}ronecker-factored approximate curvature.
+\newblock In \emph{Proceedings of the 32nd International Conference on Machine Learning (ICML)}, 2015.
+
+\bibitem[Martins~Gomes et~al.(2025)Martins~Gomes, Zhang, Belilovsky, Wolf, and Hosseini]{martinsgomes2025adafisher}
+Damien Martins~Gomes, Yanlei Zhang, Eugene Belilovsky, Guy Wolf, and Mahdi~S. Hosseini.
+\newblock Ada{F}isher: Adaptive second order optimization via fisher information.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2025.
+
+\end{thebibliography}

@@ -88,6 +88,9 @@ class EKFAC(BlockOps):
         projected = torch.einsum("ilp,lj,pj->ij", partial, self.QA, self.QA)
         return (self.s * projected).sum()
 
+    def to(self, device: object) -> "EKFAC":
+        return EKFAC(QA=self.QA.to(device), QG=self.QG.to(device), s=self.s.to(device))
+
     def _dtype(self) -> torch.dtype:
         return self.QA.dtype
 

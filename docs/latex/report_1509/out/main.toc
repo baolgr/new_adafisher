@@ -1,0 +1,38 @@
+\contentsline {chapter}{\numberline {1}Fisher matrix}{2}{chapter.1}%
+\contentsline {section}{\numberline {1.1}Overview and main findings}{2}{section.1.1}%
+\contentsline {section}{\numberline {1.2}Neural networks as a probabilistic model}{2}{section.1.2}%
+\contentsline {section}{\numberline {1.3}The Fisher information matrix, the Hessian, and the Gauss--Newton matrix}{2}{section.1.3}%
+\contentsline {section}{\numberline {1.4}Natural gradient descent}{2}{section.1.4}%
+\contentsline {section}{\numberline {1.5}The empirical Fisher : definition and limitations}{2}{section.1.5}%
+\contentsline {section}{\numberline {1.6}Kronecker products and the rvec/cvec convention}{2}{section.1.6}%
+\contentsline {chapter}{\numberline {2}Approximation of the Empirical Fisher}{3}{chapter.2}%
+\contentsline {section}{\numberline {2.1}KFAC : a block-diagonal approximation}{3}{section.2.1}%
+\contentsline {subsection}{\numberline {2.1.1}The Kronecker-factored approximation to a layer's Fisher block}{3}{subsection.2.1.1}%
+\contentsline {subsection}{\numberline {2.1.2}Independence assumptions}{3}{subsection.2.1.2}%
+\contentsline {subsection}{\numberline {2.1.3}Structured inverses and damping}{3}{subsection.2.1.3}%
+\contentsline {subsection}{\numberline {2.1.4}Estimating the factors, and momentum}{3}{subsection.2.1.4}%
+\contentsline {subsection}{\numberline {2.1.5}Extension to convolutional layers}{3}{subsection.2.1.5}%
+\contentsline {section}{\numberline {2.2}EKFAC : an eigenvalue-corrected Kronecker factorization}{3}{section.2.2}%
+\contentsline {subsection}{\numberline {2.2.1}Motivation : sub-optimality of KFAC's implicit diagonal}{4}{subsection.2.2.1}%
+\contentsline {subsection}{\numberline {2.2.2}The Kronecker-factored eigenbasis}{4}{subsection.2.2.2}%
+\contentsline {subsection}{\numberline {2.2.3}Optimal diagonal rescaling in the eigenbasis}{4}{subsection.2.2.3}%
+\contentsline {subsection}{\numberline {2.2.4}Estimating the corrected eigenvalues}{4}{subsection.2.2.4}%
+\contentsline {section}{\numberline {2.3}TKFAC : a trace-restricted Kronecker-factored approximation}{4}{section.2.3}%
+\contentsline {subsection}{\numberline {2.3.1}The quadratic form estimator}{4}{subsection.2.3.1}%
+\contentsline {subsection}{\numberline {2.3.2}TKFAC for fully-connected layers}{4}{subsection.2.3.2}%
+\contentsline {subsection}{\numberline {2.3.3}TKFAC for convolutional layers}{4}{subsection.2.3.3}%
+\contentsline {subsection}{\numberline {2.3.4}Approximation error and trace preservation}{4}{subsection.2.3.4}%
+\contentsline {section}{\numberline {2.4}TEKFAC : eigenvalue correction of TKFAC}{4}{section.2.4}%
+\contentsline {subsection}{\numberline {2.4.1}Construction}{4}{subsection.2.4.1}%
+\contentsline {subsection}{\numberline {2.4.2}Damping and the exponential moving averages}{5}{subsection.2.4.2}%
+\contentsline {subsection}{\numberline {2.4.3}Discussion : relation to KFAC, EKFAC and TKFAC}{5}{subsection.2.4.3}%
+\contentsline {section}{\numberline {2.5}Adafisher : a diagonal Fisher approximation}{5}{section.2.5}%
+\contentsline {subsection}{\numberline {2.5.1}Diagonal concentration of the Kronecker factors}{5}{subsection.2.5.1}%
+\contentsline {subsection}{\numberline {2.5.2}Efficient computation of the Fisher information matrix}{5}{subsection.2.5.2}%
+\contentsline {subsection}{\numberline {2.5.3}Min-max normalization and the exponential moving average}{5}{subsection.2.5.3}%
+\contentsline {subsection}{\numberline {2.5.4}Integration into an adaptive optimization framework}{5}{subsection.2.5.4}%
+\contentsline {subsection}{\numberline {2.5.5}Convergence analysis}{5}{subsection.2.5.5}%
+\contentsline {chapter}{\numberline {3}Unified view}{6}{chapter.3}%
+\contentsline {section}{\numberline {3.1}A common template : the Kronecker-factored second moment}{6}{section.3.1}%
+\contentsline {section}{\numberline {3.2}Comparison of the five rescalings}{6}{section.3.2}%
+\contentsline {section}{\numberline {3.3}Notation conventions used throughout these notes}{6}{section.3.3}%

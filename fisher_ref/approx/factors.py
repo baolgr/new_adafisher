@@ -93,6 +93,24 @@ class LayerFactors:
         return TkfacStats(delta=self.tkfac_delta, phi_raw=self.tkfac_phi, psi_raw=self.tkfac_psi,
                           count=self.tkfac_count).build()
 
+    def to(self, device: object) -> "LayerFactors":
+        """Every accumulated tensor on ``device``.
+
+        The accumulation runs where the traversal runs (the GPU), while the metrics run against the
+        host-resident dense reference — so the two must be brought together explicitly. Leaving
+        them apart is not a crash at the boundary but a crash *later*, deep inside a metric's
+        einsum, which is how the first P1 cluster job died.
+        """
+        moved = LayerFactors(name=self.name, kind=self.kind, d_in=self.d_in, d_out=self.d_out,
+                             positions=self.positions, n_probes=self.n_probes,
+                             a_rows=self.a_rows, g_rows=self.g_rows,
+                             tkfac_count=self.tkfac_count, norm_h_rows=self.norm_h_rows)
+        for field_name in ("A_raw", "G_raw", "tkfac_delta", "tkfac_phi", "tkfac_psi",
+                           "norm_h", "norm_s"):
+            value = getattr(self, field_name)
+            setattr(moved, field_name, None if value is None else value.to(device))
+        return moved
+
     def norm_stats(self) -> NormStats:
         assert self.norm_h is not None and self.norm_s is not None
         return NormStats(H=self.norm_h / self.norm_h_rows, S=self.norm_s / self.n_probes,
