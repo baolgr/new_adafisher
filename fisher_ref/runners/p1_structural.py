@@ -32,8 +32,8 @@ if str(ROOT) not in sys.path:
 from benchmarks.common.runner import discover_benchmarks  # noqa: E402
 from fisher_ref import conventions, metrics, probes, registry  # noqa: E402
 from fisher_ref.approx import (  # noqa: E402
-    Dense,
     Diag,
+    Kron,
     accumulate_ekfac,
     accumulate_factors,
     af_raw_from_factors,
@@ -67,7 +67,7 @@ def _layer_types(model: torch.nn.Module, example: torch.Tensor) -> Dict[str, str
 
 def analyse_layer(name: str, exact: torch.Tensor, entry, ekfac, kinds: Dict[str, str],
                   alphas: Sequence[float], source: str, defaults: Dict[str, Any],
-                  ) -> List[Dict[str, Any]]:
+                  stein_max_p: int = 4096) -> List[Dict[str, Any]]:
     """Every structure available for one layer, at every damping — M1 always, M3/M5 per ``lambda``."""
     rows: List[Dict[str, Any]] = []
     common = {**defaults, "layer": name, "layer_type": kinds.get(name, "other"), "source": source}
@@ -79,8 +79,11 @@ def analyse_layer(name: str, exact: torch.Tensor, entry, ekfac, kinds: Dict[str,
         structures["af_raw"] = af_raw_from_factors(entry.A, entry.G)
         if ekfac is not None:
             structures["ekfac"] = ekfac
+        # The optimal Kronecker fit *is* Kronecker: representing it as Kron rather than
+        # Dense(kron(G, A)) avoids a 5.05 GB materialisation at A1's first layer and gives it the
+        # closed-form logdet (an eigh of 785 and of 32, not of 25 120).
         A, G = metrics.best_kronecker_fit(exact, entry.d_out, entry.d_in)
-        structures["best_kron"] = Dense(torch.kron(G, A))
+        structures["best_kron"] = Kron(A=A, G=G)
         report = metrics.kronecker_structure(exact, entry.d_out, entry.d_in,
                                              af_raw=structures["af_raw"])
         rows += _rows(report.as_rows(structure="exact_block"), **common)
@@ -98,6 +101,13 @@ def analyse_layer(name: str, exact: torch.Tensor, entry, ekfac, kinds: Dict[str,
     for structure_name, block in structures.items():
         rows += _rows(metrics.frobenius(exact, block).as_rows(), **common,
                       structure=structure_name)
+        # M3 costs a Cholesky of the block per (structure, lambda), plus a dense K: at A1's first
+        # layer that is 25 120^3/3 flops and 5 GB, thirty times over, which would dominate the whole
+        # job. Guarded by size and recorded as skipped rather than silently absent.
+        if exact.shape[0] > stein_max_p:
+            rows += _rows([{"metric": "stein_kl_skipped_P", "value": float(exact.shape[0])}],
+                          **common, structure=structure_name)
+            continue
         for alpha, lam in metrics.lambda_grid(exact, alphas).items():
             rows += _rows(metrics.stein_kl(exact, block, lam).as_rows(), **common,
                           structure=structure_name, lambda_alpha=alpha)
@@ -136,7 +146,8 @@ def run_fraction(bench, run, fraction: float, args, meta: Dict[str, Any]) -> Lis
             if entry.kind != "norm":
                 block = to_augmented(block, reference.layout.augmented_permutation(name))
             rows += analyse_layer(name, block, entry, ekfacs.get(name), kinds, args.alphas,
-                                  source, {**defaults, "reference": reference_name})
+                                  source, {**defaults, "reference": reference_name},
+                                  stein_max_p=args.stein_max_p)
 
         ranges = [(name, reference.layout.block_slice(name)) for name in factors]
         names, coupling = metrics.coupling_matrix(reference.matrix, ranges)
@@ -146,7 +157,8 @@ def run_fraction(bench, run, fraction: float, args, meta: Dict[str, Any]) -> Lis
                        metrics.offdiagonal_mass(reference.matrix, ranges).items()],
                       **block_defaults, structure="block_diagonal")
 
-        if source == "type2" and args.noise_partitions:
+        wanted = args.noise_at is None or fraction in args.noise_at
+        if source == "type2" and args.noise_partitions and wanted:
             def build(indices, _source=source):
                 return build_dense_reference(model, inputs[indices], targets[indices],
                                              source=_source, batch_size=args.batch,
@@ -179,6 +191,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="lambda = alpha * tr(R)/P (plan_exp_draft.md §3.3); never a single one")
     parser.add_argument("--noise-partitions", type=int, default=20,
                         help="§3.4's random partitions for the noise-floor interval; 0 to skip")
+    parser.add_argument("--noise-at", default=None,
+                        help="comma-separated fractions to measure the floor at (default: all). "
+                             "Each costs 2 x partitions half-size reference builds — ~49 min at "
+                             "A1's N = 55 000, so restricting it is usually right")
+    parser.add_argument("--stein-max-p", type=int, default=4096,
+                        help="skip M3 on blocks wider than this: its Cholesky is P^3/3 per "
+                             "(structure, lambda) and would dominate the job at A1's first layer")
     parser.add_argument("--modules", nargs="*", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--data-root", default=str(ROOT / "benchmarks" / "data"))
@@ -190,6 +209,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args = build_parser().parse_args(argv)
     args.alphas = [float(value) for value in str(args.alphas).split(",") if value]
+    args.noise_at = ([float(v) for v in str(args.noise_at).split(",") if v]
+                     if args.noise_at else None)
     fractions = [float(value) for value in str(args.fractions).split(",") if value]
     args.device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
 

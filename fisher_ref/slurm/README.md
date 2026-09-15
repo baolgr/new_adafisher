@@ -34,7 +34,24 @@ everything that needs two on the host**, where `--mem` is cheap.
 
 | Job | What it produces | Shape | `--time` |
 |---|---|---|---|
-| `dense_reference_a1.sh` | A1's dense `F`, `Ê` and per-layer blocks at `mlp_ln_mnist/diag/ckpt_0.5`, `N = 4000`; the source gap, the train/val gap, the noise floor, both spectra | `h100_1g.10gb:1`, 64G, 4 cpus | `01:30:00` (measured from job 21077038) |
+| `dense_reference_a1.sh` | A1's dense `F`, `Ê` and per-layer blocks at `mlp_ln_mnist/diag/ckpt_0.5`; the source gap, the train/val gap, the noise floor, both spectra | `h100_1g.10gb:1`, 64G, 4 cpus | `01:30:00` (measured from job 21077038) |
+| `p1_structural_a1.sh` | lot 2's P1 grid on A1: twelve structures × two sources × five dampings at each of the five checkpoints, `metrics.csv` + `meta.json` per fraction | `h100_1g.10gb:1`, 96G, 8 cpus | `03:00:00` **(estimate — replace after the first run)** |
+
+### Sizing a P1 job, and the two guards that make it finite
+
+Three facts, each of which changes the budget by an order of magnitude:
+
+- **A fraction costs three traversals of the probes per source, not one**: the dense reference, the
+  factor accumulation, and EKFAC's second pass — which cannot start until `Q_A` and `Q_G` exist.
+  At A1's `N = 55 000` that is `3 × 147 s` for type-2 and `3 × 15 s` for empirical.
+- **M3 must be guarded by block size.** It needs a Cholesky of the block per `(structure, λ)`. At
+  A1's first layer (`25 120²`) that is `P³/3` flops and a 5 GB dense `K`, thirty times over per
+  source — it would dominate everything else. `--stein-max-p 4096` skips it there and **records the
+  skip** as a `stein_kl_skipped_P` row, so it is never silently absent.
+- **The noise floor is measured at one fraction, not five.** Twenty random partitions are forty
+  half-size reference builds, ~49 min at this `N`; `--noise-at 1` keeps that once.
+
+Together: `5 × (441 + 45 + 180) + 2944 ≈ 1.9 h`.
 
 ### What the first run taught, before you write the second
 

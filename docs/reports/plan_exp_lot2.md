@@ -427,9 +427,31 @@ over-claim, not a result. The real run needs `N = 55 000`, where `plan_exp_lot1.
 
 ---
 
+### 5.7 Sizing the P1 job turned up two costs that would have dominated it
+
+`fisher_ref/slurm/p1_structural_a1.sh` is written and pushed but **not submitted**. Working out its
+`--time` from `plan_exp_lot1.md` §6.1's measurements exposed three things the runner had to gain
+guards for — each an order of magnitude, none visible at toy scale:
+
+1. **A fraction costs three traversals of the probes per source, not one**: the dense reference,
+   the factor accumulation, and EKFAC's second pass, which cannot start until `Q_A` and `Q_G`
+   exist. `441 s` for type-2 at `N = 55 000`, `45 s` for empirical.
+2. **M3 had to be guarded by block size.** It needs a Cholesky of the block per `(structure, λ)`;
+   at A1's first layer (`25 120²`) that is `P³/3` flops *and* a 5 GB dense `K`, thirty times over
+   per source. Unguarded it would have been ~90 % of the job. `--stein-max-p 4096` skips it there
+   and **writes a `stein_kl_skipped_P` row**, so the absence is in the data rather than inferred
+   from a gap in it.
+3. **`best_kron` was being materialised as a 5 GB `Dense`** — the optimal Kronecker fit *is*
+   Kronecker, so it is now a `Kron`, which also gives it a closed-form `logdet` (an `eigh` of 785
+   and of 32, not of 25 120). This one was a plain waste, found only by costing the job.
+
+The noise floor is measured at **one** fraction (`--noise-at 1`): twenty random partitions are forty
+half-size reference builds, ~49 min at this `N`, and it is a property of the estimator at that `θ`.
+Total: `5 × (441 + 45 + 180) + 2944 ≈ 1.9 h`, requested as `03:00:00`.
+
+---
+
 ## 6. The A1 P1 result (pending)
 
 *Empty until the cluster run. Steps 1-6's code is done and verified (566 tests, `ruff` and `mypy`
-clean); what remains is `p1_structural` at `N = 55 000` over the five fractions, which is a sbatch
-job sized like `plan_exp_lot1.md` §6.1's: the references dominate, at ~150 s each, and there are
-`5 fractions × 2 sources` of them plus the noise floor's 20 partitions.*
+clean), and the job is pushed; what remains is to submit it.*
