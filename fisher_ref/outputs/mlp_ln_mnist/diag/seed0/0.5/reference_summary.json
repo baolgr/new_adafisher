@@ -1,0 +1,129 @@
+{
+  "P": 26634,
+  "arm": "diag",
+  "batch_size": 512,
+  "blocks": {
+    "features.0": {
+      "P": 25120,
+      "deficiency": 4579,
+      "rank_1e_12": 20541,
+      "trace": 10.455614171506614,
+      "trace_share": 0.6267736957582387
+    },
+    "features.1": {
+      "P": 64,
+      "deficiency": 0,
+      "rank_1e_12": 64,
+      "trace": 1.3791136843805851,
+      "trace_share": 0.08267254000110305
+    },
+    "features.3": {
+      "P": 1056,
+      "deficiency": 34,
+      "rank_1e_12": 1022,
+      "trace": 3.469300486767657,
+      "trace_share": 0.20797116765393117
+    },
+    "features.4": {
+      "P": 64,
+      "deficiency": 0,
+      "rank_1e_12": 64,
+      "trace": 0.280898322954448,
+      "trace_share": 0.016838769786498457
+    },
+    "head": {
+      "P": 330,
+      "deficiency": 33,
+      "rank_1e_12": 297,
+      "trace": 1.0967149576211475,
+      "trace_share": 0.06574382680022862
+    }
+  },
+  "checkpoint": {
+    "arm": "diag",
+    "checkpoint": "/home/blgr/new_adafisher/benchmarks/outputs/mlp_ln_mnist/diag/ckpt_0.5.pt",
+    "epoch": 9,
+    "fraction": 0.5,
+    "has_optimizer_state": false,
+    "mislabelled": false,
+    "model": "mlp_ln_mnist",
+    "progress": 0.5,
+    "scheduled": true,
+    "seed": 0,
+    "step": 4290,
+    "total_steps": 8580
+  },
+  "device": "cuda",
+  "fraction": 0.5,
+  "fro": {
+    "E_hat": 1.4560883945337393,
+    "F": 1.8525425383077248
+  },
+  "metadata": {
+    "P": 26634,
+    "capture_dtype": "torch.float32",
+    "git_revision": "1f47fb62b6749d37c4bba433e6e5c3f94a48f9c0",
+    "loss": "cross_entropy",
+    "metrics_version": "fisher_ref/0.1",
+    "n_columns": 10,
+    "n_probes": 55000,
+    "n_rows": 550000,
+    "precision": {
+      "cudnn_allow_tf32": false,
+      "cudnn_benchmark": false,
+      "cudnn_deterministic": true,
+      "cudnn_fp32_precision": "ieee",
+      "deterministic_algorithms": false,
+      "matmul_allow_tf32": false,
+      "matmul_fp32_precision": "ieee"
+    },
+    "probe_digest": "e77410a65131",
+    "protocol": "P1",
+    "reference_dtype": "torch.float64",
+    "regime": "A",
+    "source": "type2",
+    "torch_version": "2.14.0"
+  },
+  "model": "mlp_ln_mnist",
+  "modules": null,
+  "n_probes": 55000,
+  "n_rows_type2": 550000,
+  "n_val_probes": 5000,
+  "noise_floor": 0.2985583090849218,
+  "null_gap_two_independent": 0.21111260493353742,
+  "peak_device_gb": 6.059425792,
+  "probe_digest": {
+    "train": "e77410a651310d1235a7548a113c86097f77b9797a066b0503e7cbe217915a64",
+    "val": "f89fba383e5d6ec869aaefb9204320aa075238f72369a58ab378a18eb53a0c39"
+  },
+  "seconds": {
+    "empirical": 15.00178087002132,
+    "type2": 147.3639644549694
+  },
+  "seed": 0,
+  "sigma_n": 0.1492791545424609,
+  "source_gap": 0.3751310654271854,
+  "spectrum": {
+    "E_hat": {
+      "condition_at_1e-12": 998066329355.3857,
+      "lambda_max": 0.7829870351856849,
+      "lambda_min": -1.2170035133833085e-15,
+      "rank_1e-12": 18342,
+      "seconds": 1286.4863287110347
+    },
+    "F": {
+      "condition_at_1e-12": 999426364085.4932,
+      "lambda_max": 0.921235481430793,
+      "lambda_min": -1.322538933627519e-15,
+      "rank_1e-12": 21829,
+      "seconds": 1279.8461317899637
+    }
+  },
+  "trace": {
+    "E_hat": 11.946171355899779,
+    "F": 16.68164162323045
+  },
+  "train_test_gap": 1.0222245452052305,
+  "train_val_gap": 0.7120927661535533,
+  "val_test_gap": 0.711131522801602
+}

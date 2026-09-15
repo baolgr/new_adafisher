@@ -31,7 +31,28 @@ Everything with more than one `P x P` live at once — the two references side b
 `P = 12 030`: `1.27 x P^2` for the whole build, against `+1.16 x P^2` for the single expression
 `0.5 * (M + M.T)` this code no longer uses.
 
-Result: ------------------------------- not yet run -------------------------------
+Result, 2026-09-15, job 21082966 (`h100_1g.10gb`, N = 55 000, COMPLETED in 01:06:33, MaxRSS 25.3 GB).
+Full analysis in `plan_exp_lot1.md` §6; the numbers:
+
+    builds       train type2 147.4 s | empirical 15.0 s | val/test 13.5 s | halves 73.6 s
+                 peak device 6.06 GB of the 10 GB slice
+    noise floor  0.2986 at N/2 = 27 500   ->  sigma_N = 0.1493
+    source gap   0.3751   =  2.51 sigma_N   -> Q1 is interpretable (it was not at N = 4 000)
+    train/val    0.7121   ~ 1.4 x its null  -> HF1 still not settled
+    val/test     0.7111   ~ 1.02 x its null -> indistinguishable...
+    train/test   1.0222   =  1.44 x train/val  -> ...but this does not fit; see §6.3
+    F            lambda_max 9.2124e-01  rank 21 829/26 634  tr 16.68
+    E_hat        lambda_max 7.8299e-01  rank 18 342/26 634  tr 11.95  (no longer N-limited)
+    blocks       features.0 P=25 120 trace 0.627 deficiency 4 579 (MNIST's dead pixels)
+                 features.3 P= 1 056 trace 0.208 deficiency    34
+                 features.1 P=    64 trace 0.083 deficiency     0
+                 head       P=   330 trace 0.066 deficiency    33 (= d_in + 1, the logit shift)
+                 features.4 P=    64 trace 0.017 deficiency     0
+
+Two things to carry forward: `N` is nearly free (build time is linear in it, 13.2x for 13.75x the
+probes) while a spectrum costs 1 280 s and does not thread — so budget these jobs from the
+eigendecomposition, not the references. And `sigma_N` fell by 2.92x for 13.75x the probes, where
+`N^{-1/2}` predicts 3.71x: the floor decays more slowly than the ideal rate.
 """
 
 from __future__ import annotations

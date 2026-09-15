@@ -353,27 +353,32 @@ root on `v^(t)` — is **identical across the five modes**.
 > the training jobs use** (~6 GB of 10), and §12's "an analysis job cannot allocate `F`" risk
 > becomes a rule instead: hold one `P x P` on the device, put everything needing two on the host.
 >
-> **The A1 run happened (job 21077038) and its headline is a problem with `N`, not with the code**
-> (`plan_exp_lot1.md` §6). Peak device **6.10 GB** against 6.0 predicted, so the 10 GB decision is
-> confirmed on the real thing. A full type-2 `F` at `N=4000`, `P=26 634` costs **11 s**; one
-> `26 634^2` `eigvalsh` costs **1156 s** and does **not** thread (19.8 GFLOP/s at 1 thread, 18.6 at
-> 8, 21.6 on the cluster's 16) — so budget these jobs from `(4/3)P^3/2e10` per spectrum and never
-> ask for cores to speed one up. The job was cancelled at its 00:50:00 limit inside the *per-block*
-> loop (the widest block is `25 120^2`, 83% of a full-`P` decomposition on its own) having produced
-> everything else, and **wrote nothing**, since its only write was at the end — now incremental,
-> cheapest-block-first, with `A1_BLOCK_SPECTRA=0` to skip. **The finding:** source gap
-> `||E_hat - F||/||F|| = 0.760`, train/val `0.822`, and the §3.4 noise floor `0.872` on halves of
-> `N/2 = 2000`, i.e. `sigma_N = 0.436` for one `N=4000` estimate and `0.617` for two independent
-> ones under the null. Q1 sits at `1.74 sigma_N` and HF1 at `1.33x` its null: **at this `N` the
-> campaign's two headline quantities are the same order as the estimator's own noise.** `N` was
-> chosen in §2.2 for *rank* (`N(C-1) >= P`), which is far weaker than accuracy; `sigma_N = 0.1`
-> needs `N ~ 76 000`, which at 11 s a build is ~3.5 min of GPU. **Set `N` from the noise floor, not
-> from the rank condition, and report every gap with its floor.** Also measured: `rank(E_hat) =
-> 3511/26 634` — bounded by `N` by construction, so a damped inverse of `E_hat` reads `lambda I` on
-> 23 123 directions (Kunstner et al. arXiv:1905.12558, in this repository's own numbers); and
-> `rank(F) = 18 564/26 634`, whose deficiency is roughly half explained by MNIST's 130 identically-
-> zero pixels (the same fact that crashed cuSOLVER in campaign 1, `_eigh_utils.py`) and otherwise
-> open.
+> **The A1 run is done** — job 21082966, `h100_1g.10gb`, `N = 55 000` (the whole MNIST train pool),
+> `COMPLETED` in `01:06:33`, MaxRSS 25.3 GB, peak device **6.06 GB** against the 6.0 predicted
+> (`plan_exp_lot1.md` §6). A first attempt (21077038, `N=4000`, 00:50:00) was cancelled in the
+> *per-block* loop having produced everything else and **written nothing** — its only write was at
+> the end; now incremental, cheapest-block-first, `A1_BLOCK_SPECTRA=0` to skip.
+> **Budget these jobs from the spectrum, not the references:** a full type-2 `F` over 55 000 probes
+> costs **147 s** (linear in `N`), one `26 634^2` `eigvalsh` costs **1280 s** and does **not**
+> thread (19.8 GFLOP/s at 1 thread, 18.6 at 8, 21.6 on 16 cluster cores) — never ask for cores to
+> speed up a spectrum. **Results:** noise floor `0.2986` on halves of 27 500, i.e.
+> `sigma_N = 0.1493`; **source gap `0.3751` = 2.51 sigma_N, so Q1 is interpretable** (it was 0.76
+> and 1.74 sigma at `N=4000` — most of that was noise). **HF1 is not settled**: train/val `0.7121`
+> at ~1.4x its null, and the new val/test check says `0.7111` = 1.02x *its* null (indistinguishable)
+> while train/test `1.0222` is 1.44x train/val — a tension the recorded data **cannot** resolve,
+> because the three gaps use two denominators and only the train-side norms are stored. Lot 2's
+> first job on HF1 is to record `||.||_F` for every reference and re-read all three against a common
+> denominator; until then do not quote val/test as licence to pool the two held-out sets.
+> Also measured: `sigma_N` fell 2.92x for 13.75x the probes where `N^{-1/2}` predicts 3.71x, so the
+> floor decays *more slowly* than the ideal rate and MNIST has no probes left to give; `rank(F) =
+> 21 829/26 634` and `rank(E_hat) = 18 342/26 634` — at `N > P` the empirical Fisher is no longer
+> rank-limited by `N`, and is **more** deficient than `F` (Kunstner et al. arXiv:1905.12558, sharper
+> than the first run could show). Per block, every deficiency is structural and two were predicted:
+> the **head's is exactly `33 = d_in + 1`** (the logit-shift kernel of §4 — adding a constant to
+> every logit leaves the softmax unchanged), and `features.0`'s **4 579 ~ 32 x 143** is MNIST's dead
+> pixels (that layer's input factor is rank 646/785, `_eigh_utils.py` — the fact that crashed
+> cuSOLVER in campaign 1). `features.0` also carries **63% of `tr(F)`**: A1's curvature is
+> overwhelmingly in its first layer, which conditions any per-layer-type reading of this model.
 
 ## Working language
 

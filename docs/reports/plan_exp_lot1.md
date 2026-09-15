@@ -11,8 +11,9 @@ per-layer blocks `B_ℓ`, in fp64, in regime A.
 figure. Nothing in `src/adafisher_modes/` and nothing in `benchmarks/` changes — `fisher_ref/` stays
 the reader lot 0 made it.
 
-**Status: phases 1-4 done** (code, tests, the real-checkpoint smoke of §4). The full A1 run at
-`N = 4000` is §5, deliberately left to the cluster; §6 is therefore empty, as `plan_lot8.md`'s was.
+**Status: done.** Code and tests (§1-§3), the real-checkpoint smoke (§4), and the A1 cluster run at
+`N = 55 000` (§5, §6 — job 21082966, `COMPLETED` in `01:06:33`). Q1 is measured and interpretable;
+HF1 is measured and **not** settled, for a reason §6.3 states precisely.
 
 ---
 
@@ -373,128 +374,158 @@ Three things worth recording from it.
 - The `1/N` and the layout survive the real path: `F` is PSD to `-1.3e-17`, and the three blocks'
   traces sum to `tr(F)` by construction.
 
-## 5. Phase 5 — the A1 run: written, not yet submitted
+## 5. Phase 5 — the A1 run: done
 
 Two files, both new, neither generated:
 
 - **`fisher_ref/experiments/dense_reference_a1.py`**, in `experiments/`' own style — one question,
-  no CLI, constants at the top (here environment variables with defaults, so the sbatch script can
-  set them), a printed fixed-width table, the result to be pasted back into its docstring. It
-  builds, at `N = 4000` type-2 probes (`N(C−1) = 36 000 ≥ P = 26 634`, so `F` is not rank-limited by
-  the probe count): `F` and `Ê` on the train probes and their spectra; `F` on the val probes, for
-  HF1; and a two-way split of the train probes, for §3.4's **noise floor** — the quantity that says
-  whether any later difference is interpretable at all. Per-block trace shares and ranks come free
-  from the slices. Only `reference_summary.json` and `spectrum.pt` are written; `F` is 5.68 GB and
-  recomputable in under a minute of GPU time (`plan_exp_draft.md` §12).
+  no CLI, constants at the top (environment variables with defaults, so the sbatch script can set
+  them), a printed fixed-width table, the result pasted back into its docstring.
 - **`fisher_ref/slurm/dense_reference_a1.sh`** (+ a README for the directory), because
   `benchmarks/slurm/` is read-only for this campaign and its generator enumerates *training*
   benchmarks.
 
 **The shape it asks for, and why it is not the 20-40 GB §2.2 assumed.** `h100_1g.10gb:1`,
-`--mem=64G`, `--cpus-per-task=16`. §0.9 is the reason: with one `P × P` buffer on the device the
+`--mem=64G`, `--cpus-per-task=4`. §0.9 is the reason: with one `P × P` buffer on the device the
 build peaks at ~6 GB of the 10 GB slice, and everything that needs two at once — the two references
-side by side, the `eigvalsh` — is host-side, where memory is cheap. So the job uses the *same*
-slice as every campaign-1 training job, which also means no scheduling risk and the cheapest
-billing. `--cpus-per-task=16` because the long pole is not the GPU at all: it is two host-side
-`26 634²` fp64 `eigvalsh` calls at `≈2.5·10¹³` flop each. `--time=00:50:00` is an **estimate**, and
-labelled as one — this job has never run, which is exactly the situation `benchmarks/slurm/
-README.md`'s "every `--time` is measured" rule exists to end; the first COMPLETED run replaces it.
+side by side, the `eigvalsh` — is host-side. So the job uses the *same* slice as every campaign-1
+training job: no scheduling risk, cheapest billing. `--cpus-per-task=4` because the long pole is
+not the GPU but two host-side `26 634²` fp64 `eigvalsh` calls, and **`eigvalsh` does not thread**
+(§6.1).
 
-Prerequisites verified present on `rorqual:/home/blgr/new_adafisher`: `dataset/MNIST` and
-`benchmarks/outputs/mlp_ln_mnist/diag/ckpt_0.5.pt`. The script was dry-run locally end to end on
-that same real checkpoint, restricted to three modules (`A1_MODULES`), so only the scale is
-untested.
+Two runs were needed, and §6 reports the second:
 
-Its numbers become §6 below and turn `plan_exp_draft.md` §13's
-`[ESTIMATE, to be measured at lot 1]` into `[MEASURED]`.
+| job | `N` | `--time` | outcome |
+|---|---:|---|---|
+| 21077038 | 4 000 | 00:50:00 | **CANCELLED** at the limit, inside the per-block loop, having written nothing (§6.6) |
+| 21082966 | 55 000 | 01:30:00 | **COMPLETED**, `01:06:33`, `MaxRSS 25.3 GB` |
 
-## 6. The A1 reference — first run (job 21077038, 2026-09-14)
+---
 
-`h100_1g.10gb`, `N = 4000`, `mlp_ln_mnist/diag/ckpt_0.5`, `P = 26 634`. The job was **CANCELLED at
-its 00:50:00 limit inside the per-block loop**, having produced everything else; the per-block
-ranks are the only missing row and the re-run at `--time=01:30:00` fills them. Nothing was written
-to disk, because the single write was at the end — fixed (§6.4).
+## 6. The A1 reference (job 21082966, 2026-09-15)
 
-### 6.1 What it cost, and the memory decision
+`h100_1g.10gb`, **`N = 55 000`** train probes — the whole MNIST training pool — with the two
+out-of-sample sets capped at 5 000 by the val split. `mlp_ln_mnist/diag/ckpt_0.5`, `P = 26 634`,
+`550 000` rows of `U`. Summary and spectra in
+`fisher_ref/outputs/mlp_ln_mnist/diag/seed0/0.5/`.
+
+### 6.1 Cost, and the memory decision confirmed
 
 ```
-type2      P=26634  rows=40000   11.2s   5.67 GB   peak device 6.10 GB
-empirical  P=26634  rows=4000     1.2s   5.67 GB   peak device 6.10 GB
-type2 val  P=26634  rows=40000   10.9s             peak device 6.10 GB
-type2 half P=26634  rows=20000    5.5s  (x2)       peak device 6.11 GB
-eigvalsh(F) 1155.6s     eigvalsh(E_hat) 1155.7s
+type2  train  N=55 000  rows=550 000   147.4 s      empirical  N=55 000   15.0 s
+type2  val    n= 5 000  rows= 50 000    13.5 s      type2 test  n= 5 000  13.5 s
+type2  halves n=27 500  rows=275 000    73.6 s (x2)
+eigvalsh(F) 1279.8 s    eigvalsh(E_hat) 1286.5 s    peak device 6.06 GB    MaxRSS 25.3 GB
 ```
 
-**§0.9's decision is confirmed on the real thing: peak device 6.10 GB against the ~6.0 GB
-predicted, on a 10 GB slice.** `plan_exp_draft.md` §2.2's "an analysis job that inherits the
-training job's `--gpus` line cannot form A1's `F` at all" is now measured to be false — it was a
-property of the three-buffer implementation, not of the matrix.
+**§0.9's decision holds at full scale: 6.06 GB peak on a 10 GB slice**, against the ~6.0 GB
+predicted and the ~17 GB `plan_exp_draft.md` §2.2 budgets. That factor-3 was the three-buffer
+implementation, not the matrix.
 
-**The references are cheap; the spectra are not.** A full type-2 `F` at `N = 4000` takes **11 s**,
-while one `26 634²` `eigvalsh` takes **1156 s** — and that is not a misconfiguration: torch's
-`eigvalsh` does not thread (measured 19.8 GFLOP/s at 1 thread, 18.6 at 8 on a laptop; the cluster
-ran at 21.6 GFLOP/s on 16 cores). `--cpus-per-task` was therefore dropped from 16 to 4, and the
-job's `--time` is set by `(4/3)P³ / 2·10¹⁰` seconds per decomposition.
+**The references are cheap and the spectra are not, by a factor 9.** A full type-2 `F` over the
+*entire* MNIST training set costs **147 s**; one `26 634²` `eigvalsh` costs **1280 s**, and does not
+thread (19.8 GFLOP/s at 1 thread, 18.6 at 8, 21.6 on 16 cluster cores). Build time is linear in `N`
+as expected — 11.2 s at `N = 4 000`, 147.4 s at 55 000, a ratio of 13.2 against 13.75 in `N`. So
+**`N` is nearly free and the spectrum is the budget**: `--mem` can drop to 32G (MaxRSS 25.3 GB) and
+`--time` is `(4/3)P³ / 2·10¹⁰` per decomposition plus a few minutes.
 
-### 6.2 The headline: at `N = 4000` this reference is noise-dominated
+### 6.2 The gaps, and the floor they must clear
 
-| quantity | measured |
-|---|---|
-| source gap `‖Ê − F‖_F / ‖F‖_F` (Q1) | **0.7597** |
-| train/val gap `‖F_val − F_train‖_F / ‖F_train‖_F` (HF1) | **0.8215** |
-| noise floor `‖F^(1) − F^(2)‖_F / ‖F^(2)‖_F`, halves of `N/2 = 2000` (§3.4) | **0.8721** |
+| quantity | `N = 4 000` (job 21077038) | **`N = 55 000`** |
+|---|---:|---:|
+| noise floor, halves of `N/2` | 0.8721 | **0.2986** |
+| ⇒ `σ_N`, error of one `N`-probe estimate | 0.436 | **0.1493** |
+| source gap `‖Ê − F‖/‖F‖` (Q1) | 0.7597 | **0.3751** |
+| train/val gap (HF1) | 0.8215 | **0.7121** |
+| val/test gap | — | **0.7111** |
+| train/test gap | — | **1.0222** |
 
-The floor is not directly comparable to the other two and must be rescaled. `F^(1) − F^(2)` is the
-difference of two *independent* `N/2` estimates, so it is `√2·σ_{N/2} = 2·σ_N`, giving
+**Q1 is now interpretable, and it was not before.** The source gap sits at **2.51 σ_N** (against
+1.74 at `N = 4 000`): the empirical Fisher differs from the true Fisher by two and a half times the
+estimator's own noise, at 50 % of an A1 trajectory. Note how much of the `N = 4 000` value was
+noise — 0.76 → 0.38 — which is exactly why §6.2 of the first run refused to read it.
 
-* `σ_N ≈ **0.436**` — the error of a single `N = 4000` estimate against `F_∞`;
-* `√2·σ_N ≈ **0.617**` — what two independent `N = 4000` estimates differ by **under the null**.
+**But the `N^{-1/2}` extrapolation that recommendation rested on is measured to be optimistic.**
+`σ_N` fell from 0.436 to 0.1493, a factor **2.92**, where `√(55000/4000) = 3.71` was expected. The
+floor is still falling, but more slowly than `N^{-1/2}`, so the "`σ_N = 0.1` needs `N ≈ 76 000`"
+arithmetic in the first run's §6.2 was wrong in the safe direction — 55 000 probes, the whole pool,
+gives 0.149 and MNIST has nothing more to give. `d(F_{N'}, F_N)` against `N'` (§3.4) is what would
+say whether the residual is a genuine systematic floor or a heavier-tailed variance.
 
-So the source gap sits at `1.74 σ_N` and the train/val gap at `1.33 ×` its own null. **Both headline
-quantities of the campaign are the same order as the estimator's own noise at this `N`.** §3.4's
-reading rule ("any difference below the floor is not interpretable") bites on the very first run,
-and it bites on Q1 and HF1 themselves, not on some downstream comparison of approximations.
+**HF1 is still not settled**, and it is the out-of-sample side that blocks it: the val and test sets
+are 5 000 probes each, where `σ ≈ 0.50`. The train/val gap of 0.712 sits at roughly 1.4× its null.
 
-The fix is cheap and the run itself shows why: `N` was chosen in §2.2 for **rank**
-(`N(C−1) = 36 000 ≥ P`), which is a far weaker requirement than accuracy. Since `σ_N ∝ N^{-1/2}`,
-reaching `σ_N = 0.1` needs `N ≈ 76 000` — and a build is 11 s, so that is ~3.5 min of GPU per
-reference, not a new regime. **The campaign's `N` should be set by the noise floor, not by the rank
-condition**, and every gap must be reported with its floor.
+### 6.3 The val/test check: interchangeable — and a tension the instrumentation cannot resolve
 
-Two caveats to carry with these numbers. This is **one** split, where §3.4 asks for 20 random
-partitions and a 95 % interval — that is lot 2's `metrics/noise_floor.py`, and the point estimate
-above may move. And a *relative Frobenius* error of 0.44 does not mean the leading structure is
-noise: the Frobenius norm weights the bulk, so the top eigenspace may well be far better determined
-than this single number suggests (M6 is the metric that would say).
+§6.5's falsification check, run for the first time. Both sets at the same `n = 5 000`, so the null
+for two independent estimates of the same matrix is `√2 · σ_5000 ≈ 0.70`:
 
-### 6.3 Spectra
+* **`‖F_test − F_val‖ / ‖F_val‖ = 0.7111`, i.e. `1.02 ×` that null.** Val and test are
+  statistically **indistinguishable**. On this evidence the distributional worry does not
+  materialise, and pooling them into a 15 000-probe out-of-sample set is justified — which is what
+  §6.5's table priced at an HF1 null of 0.25 instead of 0.41.
 
-| | `λ_max` | `λ_min` | `rank(1e-12)` |
-|---|---|---|---|
-| `F` (type-2) | `9.1613e-01` | `-2.61e-15` | **18 564 / 26 634** |
-| `Ê` (empirical) | `1.1169e+00` | `-5.53e-15` | **3 511 / 26 634** |
+* **But `train/test = 1.0222` is `1.44 ×` `train/val = 0.7121`**, and that does not fit. If val and
+  test were interchangeable, both should stand at the same distance from the train reference.
 
-* **`Ê` is rank-limited by construction**: it is a sum of `N = 4000` outer products, so its rank
-  cannot exceed 4 000 — here 3 511. Any metric through a damped inverse of `Ê` therefore reads `λI`
-  on **23 123 of 26 634 directions**. That is Kunstner, Balles & Hennig's (arXiv:1905.12558) point
-  in this repository's own numbers, and it is a reason to prefer `F` as the reference wherever the
-  campaign has a choice.
-* **`F`'s deficiency of 8 070 is larger than the head's 33** (§4's logit-shift kernel). Part of it
-  is already documented elsewhere in this repository: `mlp_ln_mnist`'s first `Linear` has an input
-  factor of rank 646/785 with 136 exactly-zero eigenvalues, because 130 of MNIST's 784 pixels are
-  identically zero (`_eigh_utils.py`'s docstring — the fact that crashed cuSOLVER in campaign 1).
-  A dead input coordinate kills one column of that layer's block per output unit, i.e. `32 × 136`
-  ≈ 4 352 directions, plus the head's 33. That accounts for roughly half; the rest is **not
-  explained here** and is a question for lot 2, not a claim.
+The tension is **not resolvable from what was recorded**, and that is an instrumentation failure,
+not a finding: the three gaps use two different denominators (`‖F_train‖` for two of them,
+`‖F_val‖` for the third) and the script stores `‖·‖_F` only for the train-side `F` and `Ê`. A
+`‖F_val‖` about 1.6× `‖F_train‖` would reconcile all three, but a 5 000-probe estimate's norm
+should be inflated by only ~12 %, not 60 %.
 
-### 6.4 A third probe split, and why it is a *check* before it is a sample size
+**So HF1 stays open, and lot 2's first job on it is to close this.** One line in the builder —
+record `trace` and `‖·‖_F` for *every* reference built — plus reporting all three gaps against a
+common denominator. Until then, do **not** quote the val/test result as licence to pool.
+
+### 6.4 Spectra and the per-layer blocks
+
+| | `λ_max` | `rank(1e-12)` | `κ` |
+|---|---:|---:|---:|
+| `F` (type-2) | `9.2124e-01` | **21 829 / 26 634** | `9.99e+11` |
+| `Ê` (empirical) | `7.8299e-01` | **18 342 / 26 634** | `9.98e+11` |
+| | `tr(F) = 16.68` | `tr(Ê) = 11.95` | |
+
+At `N = 55 000 > P`, `Ê` is no longer rank-limited by the probe count (it was 3 511 at `N = 4 000`,
+bounded by `N`), so its remaining deficiency of **8 292** is structural. It is *more* rank-deficient
+than `F` — 2.5× the deficiency — which is a sharper version of Kunstner, Balles & Hennig's point
+(arXiv:1905.12558) than the first run could show.
+
+The per-block table, the row the first run never reached:
+
+| block | `P` | trace share | rank | deficiency |
+|---|---:|---:|---:|---:|
+| `features.0` `Linear(784→32)` | 25 120 | **0.627** | 20 541 | **4 579** |
+| `features.3` `Linear(32→32)` | 1 056 | 0.208 | 1 022 | 34 |
+| `features.1` `LayerNorm(32)` | 64 | 0.083 | 64 | 0 |
+| `head` `Linear(32→10)` | 330 | 0.066 | 297 | **33** |
+| `features.4` `LayerNorm(32)` | 64 | 0.017 | 64 | 0 |
+
+Every deficiency is structural, and two were predicted before the run:
+
+* **the head's is exactly `33 = d_in + 1`** — §4's logit-shift kernel, confirmed at full scale on
+  the real model: adding a constant to every logit leaves the softmax unchanged, so
+  `W += 1_C v^T, b += c·1_C` is annihilated for every `v`;
+* **`features.0`'s 4 579 ≈ 32 × 143** — MNIST's dead pixels, one killed direction per output unit
+  per dead input coordinate. `_eigh_utils.py` records that layer's input factor as rank 646/785
+  with 136 exactly-zero eigenvalues (130 identically-zero pixels); 143 is that plus the
+  near-zero border, so the agreement is good;
+* `features.3`'s 34 is the same mechanism through the preceding `LayerNorm`, whose output is
+  mean-zero and unit-variance per sample, i.e. two constraints on its 32 dimensions;
+* the block deficiencies sum to 4 646 against `F`'s own 4 805, the 159 difference being the
+  inter-block directions.
+
+`features.0` also carries **63 %** of `tr(F)`: A1's curvature is overwhelmingly in its first layer,
+which is worth knowing before reading any per-layer-type conclusion drawn on this model.
+
+### 6.5 A third probe split, and why it is a *check* before it is a sample size
 
 §6.2's floor is dominated by the **out-of-sample side**: the HF1 null is
-`sqrt(σ_train² + σ_held²)`, so with the train side raised to 55 000 (`σ = 0.118`) and `val` stuck at
-5 000 (`σ = 0.390`) the null only falls from 0.617 to **0.407**. `val` is the binding constraint,
-and it cannot be widened: `val_size = 5000` is what the *training* runs partitioned on, so changing
-it would retroactively redefine which images those weights saw — the same "it would replace
-campaign 1 rather than augment it" argument as `--checkpoint-optimizer-state`.
+`sqrt(σ_train² + σ_held²)`, so with the train side at 55 000 (`σ = 0.149`) and `val` stuck at 5 000
+(`σ ≈ 0.50`) the null stays near 0.52. `val` is the binding constraint and it cannot be widened:
+`val_size = 5000` is what the *training* runs partitioned on, so changing it would retroactively
+redefine which images those weights saw — the same "it would replace campaign 1 rather than augment
+it" argument as `--checkpoint-optimizer-state`.
 
 What *is* available is the dataset's own test set — 10 000 further MNIST images that
 `build_probe_set` never touched (lot 0 used `train=True` unconditionally), and which the training
@@ -509,29 +540,36 @@ harness loads only to report a final number. Two facts decide whether it may be 
   set is a separate collection, with disjoint writers in the original NIST split.
 
 So `split="test"` is added to `fisher_ref/probes.py` — a reader change, nothing in `benchmarks/` —
-but the two are **not pooled**. The A1 job now builds `F_val` and `F_test` at the *same* `n` and
-reports `‖F_test − F_val‖ / ‖F_val‖`. If that sits inside their combined floor, they are
-interchangeable and a later lot may pool them, taking the HF1 null from 0.407 to **0.254** (a
-factor 1.6, and 2.4 against the present 0.617). If it does not, pooling would have turned a
-distribution shift into what reads as HF1 signal — and the check is what says which, at the cost of
-one extra 11 s build.
+but the two are **not pooled**. The job builds `F_val` and `F_test` at the *same* `n` and reports
+their gap; §6.3 is that measurement, and it says "interchangeable" while a second gap says
+otherwise, so the pooling below stays **pending**.
 
 | out-of-sample side | `n` | `σ` | HF1 null with train at 55 000 |
 |---|---:|---:|---:|
-| `val` (today) | 5 000 | 0.390 | 0.407 |
-| `test` | 10 000 | 0.276 | 0.301 |
-| `val + test`, **only if the check passes** | 15 000 | 0.225 | 0.254 |
+| `val` (today) | 5 000 | ~0.50 | ~0.52 |
+| `test` | 10 000 | ~0.35 | ~0.38 |
+| `val + test`, **only once §6.3 is resolved** | 15 000 | ~0.29 | ~0.32 |
 
-These `σ` extrapolate one measured point (`σ_4000 = 0.436`) as `N^{-1/2}`; §3.4's `d(F_{N'}, F_N)`
-curve is what would verify the exponent.
+### 6.6 What the two runs changed in the code
 
-### 6.5 What the run changed in the code
+1. **The summary is written incrementally** (`checkpoint_summary()` after every stage). Job
+   21077038 computed all three gaps and both spectra and saved **none** of them, because the single
+   write was at the end — the same failure `benchmarks/common/runner.py` already fixed for a
+   grouped training job ("rewrite the report after every completed arm").
+2. **The per-block loop runs cheapest block first**, and `A1_BLOCK_SPECTRA=0` skips it. `features.0`
+   is `25 120²`, 83 % of a full-`P` decomposition on its own — it is what the first run's time limit
+   hit, and the four cheap blocks behind it were lost for nothing.
+3. `--cpus-per-task` 16 → 4, `--time` 00:50:00 → 01:30:00, both on the measured basis (§6.1).
+4. **The seed is filtered explicitly.** `discover_runs(model, arm)` matched five runs once the
+   extra-seed campaign landed (seed 0 under `outputs/<group>/<model>/`, seeds 1-4 under
+   `outputs/seeds/`), and the script took `runs[0]` — correct only by the accident that
+   `"mnist" < "seeds"`. It now filters on `A1_SEED` and refuses to guess.
+5. **`fisher_ref/slurm/logs/*.out` and `fisher_ref/outputs/**/*.pt` are gitignored**, as their
+   `benchmarks/` counterparts already were.
 
-1. **The summary is now written incrementally** (`checkpoint_summary()` after every stage). The run
-   computed all three gaps and both spectra and saved **none** of them, because the single write
-   was at the end — the same failure `benchmarks/common/runner.py` already fixed for a grouped
-   training job ("rewrite the report after every completed arm").
-2. **The per-block loop runs cheapest block first**, and `A1_BLOCK_SPECTRA=0` skips it. On A1 the
-   widest block is `25 120²`, i.e. 83 % of a full-`P` decomposition on its own — it is what the
-   time limit actually hit, and the four cheap blocks behind it were lost for nothing.
-3. `--cpus-per-task` 16 → 4 (§6.1), `--time` 00:50:00 → 01:30:00 on the measured basis.
+### 6.7 Still open
+
+* **HF1**, blocked on §6.3's denominator problem, then on whether val and test may be pooled.
+* **The noise floor as an interval**: §3.4 asks for 20 random partitions and a 95 % band; one split
+  gives a point estimate, and §6.2's sub-`N^{-1/2}` decay is the kind of thing a band would settle.
+* **`Ê`'s structural 8 292-dimensional kernel** — measured here, unexplained.
