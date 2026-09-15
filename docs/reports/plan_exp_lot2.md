@@ -317,6 +317,43 @@ Together they bound what a K-FAC result can mean: the structure is exact in a de
 provably not exact as soon as the source stops being type-2, which is the setting `AdaFisherMulti`
 actually runs in.
 
+### 5.4 Step 4: T8, T9, T13 pass, and two bugs the identities caught
+
+The zoo needed **one** new block class, not four. TKFAC is `δ·Φ ⊗ Ψ`, which in `rvec` order is a
+`Kron` with the scalar folded into the output factor — and folding it there rather than carrying it
+alongside is what keeps `solve` and `logdet` exact, since `δK + λI` is not Kronecker but
+`kron(δΨ, Φ)` still is. A normalisation layer's four readings are `Dense`/`BlockDiag`/`Diag`. Only
+EKFAC, which carries an eigenbasis, is genuinely new. Fewer representations, fewer places for the
+`rvec` convention to go wrong — and both bugs below were exactly that kind of error.
+
+**The trace identities are not decoration; they are what failed.**
+
+* **T9 passed first time** — `tr(K_EKFAC) = tr(B_ℓ)` to `1e-10`. It cannot fail for a data reason:
+  `Σ_ij s_ij` is the mean of `‖Q_Gᵀ G Q_A‖_F²` and an orthogonal change of basis preserves the
+  Frobenius norm, so a failure would mean the bases are not orthonormal (asserted separately).
+* **T8 failed by a factor of exactly 3** on a 3-class problem — i.e. by `C`. TKFAC's `δ` was being
+  divided by `N·C` because the accumulator incremented its count once per `(probe, column)` step,
+  while the reference normalises `B_ℓ` by `N` and *sums* over the `C` columns. The gap being
+  precisely the class count is what made it a two-minute diagnosis rather than a search.
+* **EKFAC's conformance test failed on a transposition**: the second contraction took `Q_G[i, o]`
+  where it needed `Q_G[o, i]`. The eigenvectors are the *columns*, so the operator was being applied
+  in a mirrored basis — `trace`, `fro2` and `diag` were all still correct, because they never touch
+  the basis orientation. Only `matvec` against `to_dense()` sees it. This is the `CLAUDE.md` pitfall
+  "compare the applied preconditioners, never the bases", in its constructive form.
+
+**T13 passes**: this campaign's `A` and `G` agree with `adafisher_modes`' own `compute_h_full` /
+`compute_s_full` to `1e-10` at the degenerate setting (one update, no EMA, empirical source, no
+damping). The plan's §0.12 worry — "two implementations nobody compared" — is now one measured
+statement. It works because A1 is unshared (`T = 1`): at `T > 1` the two normalisations differ by
+`T` by construction, which is HF2 and lot 3's business, not a discrepancy.
+
+**HF4 is instrumented and its four readings all exist** on a real `LayerNorm`: the exact `2C × 2C`
+block, the same with the `γ`-`β` cross terms dropped, Proposition 3.1's Hadamard form, and
+`diag.py`'s as-implemented diagonal. One thing already falls out analytically and is now asserted:
+**Prop. 3.1 is exact on the `β` block**, since `∂/∂β = Σ_t g_t` makes that block `S` itself. So HF4
+is entirely a statement about `γ` and about the cross terms — which narrows what the A1 run has to
+measure.
+
 ## 6. The A1 P1 result (pending)
 
 *Empty until step 6 runs.*

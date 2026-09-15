@@ -26,8 +26,12 @@ from fisher_ref.approx import (  # noqa: E402
     Dense,
     Diag,
     Kron,
+    accumulate_ekfac,
+    accumulate_factors,
     af_raw_from_factors,
     block_diagonal_of,
+    cross_term_share,
+    exact_separate,
     optimal_scale,
     rearrange,
 )
@@ -396,3 +400,170 @@ def test_iter_probe_columns_is_reproducible_across_two_passes() -> None:
     assert len(first) == len(second)
     for a, b in zip(first, second):
         assert torch.equal(a, b)
+
+
+# ----------------------------------------------------------------------------------------------
+# T8 / T9 / T13 — the estimators built from the shared traversal
+# ----------------------------------------------------------------------------------------------
+
+
+def _unshared_net() -> Tuple[nn.Module, Tensor, Tensor]:
+    seed_all(15)
+    model = nn.Sequential(nn.Linear(4, 5), nn.Tanh(), nn.Linear(5, 3)).to(DTYPE)
+    return model, torch.randn(20, 4, dtype=DTYPE), torch.randint(0, 3, (20,))
+
+
+def _zoo(model: nn.Module, inputs: Tensor, targets: Tensor, source: str = "type2"):
+    modules = capture.capturable_modules(model)
+    factors = accumulate_factors(model, inputs, targets, source=source, modules=modules,
+                                 batch_size=int(inputs.shape[0]), dtype=DTYPE)
+    ekfacs = accumulate_ekfac(model, inputs, targets, source=source, modules=modules,
+                              factors=factors, batch_size=int(inputs.shape[0]), dtype=DTYPE)
+    reference = build_dense_reference(model, inputs, targets, source=source,
+                                      batch_size=int(inputs.shape[0]))
+    return factors, ekfacs, reference
+
+
+def test_t8_tkfac_preserves_the_trace_of_the_exact_block() -> None:
+    """T8 — ``tr(K_TKFAC) = tr(B_l)``, to ``1e-10``, on an unshared layer.
+
+    An identity of the estimator, not a property of the data: ``tr(K) = delta`` by unit-trace
+    normalisation, and ``delta = E[tr(Lambda) tr(Gamma)] = E[||a||^2 ||g||^2] = tr(B_l)``.
+    """
+    model, inputs, targets = _unshared_net()
+    factors, _, reference = _zoo(model, inputs, targets)
+    for name, entry in factors.items():
+        perm = reference.layout.augmented_permutation(name)
+        exact = to_augmented(reference.block(name), perm)
+        tkfac = entry.tkfac()
+        assert torch.allclose(tkfac.trace(), exact.diagonal().sum(), rtol=0, atol=1e-10), name
+
+
+def test_t9_ekfac_preserves_the_trace_and_its_bases_are_orthonormal() -> None:
+    """T9 — ``tr(K_EKFAC) = tr(B_l)`` to ``1e-10``.
+
+    ``sum_ij s_ij`` is the mean of ``||Q_G^T G Q_A||_F^2``, and an orthogonal change of basis leaves
+    the Frobenius norm alone. So if this fails, the eigenbases are not orthonormal — which is
+    asserted separately, because that is the only way the identity can break.
+    """
+    model, inputs, targets = _unshared_net()
+    factors, ekfacs, reference = _zoo(model, inputs, targets)
+    assert ekfacs, "the second sweep produced no EKFAC"
+    for name, block in ekfacs.items():
+        perm = reference.layout.augmented_permutation(name)
+        exact = to_augmented(reference.block(name), perm)
+        assert torch.allclose(block.trace(), exact.diagonal().sum(), rtol=0, atol=1e-10), name
+        for basis in (block.QA, block.QG):
+            identity = torch.eye(basis.shape[0], dtype=DTYPE)
+            assert torch.allclose(basis.T @ basis, identity, atol=1e-10), name
+
+
+def test_ekfac_dominates_kfac_in_frobenius_norm() -> None:
+    """EKFAC's whole claim: the optimal diagonal *in K-FAC's basis* cannot be worse than K-FAC's own
+    (EKFAC Thm 2/3). Measured against the exact block, as `test_frobenius_dominance.py` does for the
+    optimizer's own implementations.
+    """
+    model, inputs, targets = _unshared_net()
+    factors, ekfacs, reference = _zoo(model, inputs, targets)
+    for name, block in ekfacs.items():
+        perm = reference.layout.augmented_permutation(name)
+        exact = to_augmented(reference.block(name), perm)
+        kfac_gap = float(torch.linalg.matrix_norm(factors[name].kfac().to_dense() - exact))
+        ekfac_gap = float(torch.linalg.matrix_norm(block.to_dense() - exact))
+        assert ekfac_gap <= kfac_gap + 1e-12, f"{name}: EKFAC {ekfac_gap} > KFAC {kfac_gap}"
+
+
+@pytest.mark.parametrize("name", ["0", "2"])
+def test_ekfac_conformance(name: str) -> None:
+    """The protocol, on a real EKFAC rather than a synthetic one."""
+    model, inputs, targets = _unshared_net()
+    _, ekfacs, _ = _zoo(model, inputs, targets)
+    block = ekfacs[name]
+    dense = block.to_dense()
+    seed_all(16)
+    v = torch.randn(block.P, dtype=DTYPE)
+    assert torch.allclose(block.matvec(v), dense @ v, atol=1e-10)
+    assert torch.allclose(block.diag(), dense.diagonal(), atol=1e-10)
+    assert torch.allclose(block.trace(), dense.diagonal().sum(), atol=1e-10)
+    assert torch.allclose(block.fro2(), (dense * dense).sum(), atol=1e-10)
+    R = torch.randn(block.P, block.P, dtype=DTYPE)
+    R = R @ R.T
+    assert torch.allclose(block.inner_dense(R), (R * dense).sum(), atol=1e-9)
+    lam = 0.5
+    damped = dense + lam * torch.eye(block.P, dtype=DTYPE)
+    assert torch.allclose(block.solve(v, lam), torch.linalg.solve(damped, v), atol=1e-9)
+    assert torch.allclose(block.logdet(lam), torch.logdet(damped), atol=1e-9)
+
+
+def test_t13_factors_match_adafisher_modes_at_the_degenerate_setting() -> None:
+    """T13 — this campaign's K-FAC factors against ``adafisher_modes``' own, to ``1e-10``.
+
+    The degenerate setting of ``plan_exp_draft.md`` §10.2: one update, no EMA, the **empirical**
+    source (one column, so ``C = 1``), no damping. ``compute_h_full``/``compute_s_full`` are the
+    optimizer's own formulas, pinned by 238 pre-existing tests — so this turns "our K-FAC" and "the
+    optimizer's K-FAC" into one measured statement instead of two implementations nobody compared
+    (``plan_exp_draft.md`` §0.12).
+    """
+    from adafisher_modes.factors import compute_h_full, compute_s_full  # noqa: PLC0415
+
+    model, inputs, targets = _unshared_net()
+    modules = capture.capturable_modules(model)
+    factors = accumulate_factors(model, inputs, targets, source="empirical", modules=modules,
+                                 batch_size=int(inputs.shape[0]), dtype=DTYPE)
+
+    captured: dict = {}
+    for step in capture.iter_probe_columns(model, inputs, targets, source="empirical",
+                                           modules=modules, batch_size=int(inputs.shape[0]),
+                                           dtype=DTYPE):
+        for layer in step.capturer:
+            captured[layer.name] = (layer.a.reshape(-1, layer.a.shape[-1]),
+                                    layer.g.reshape(-1, layer.g.shape[-1]), layer.module)
+
+    for name, (a, g, module) in captured.items():
+        theirs_a = compute_h_full(a, module)
+        theirs_g = compute_s_full(g, module)
+        assert torch.allclose(factors[name].A, theirs_a, rtol=0, atol=1e-10), f"A of {name}"
+        assert torch.allclose(factors[name].G, theirs_g, rtol=0, atol=1e-10), f"G of {name}"
+
+
+# ----------------------------------------------------------------------------------------------
+# HF4 — the normalisation block's four readings
+# ----------------------------------------------------------------------------------------------
+
+
+def test_hf4_normalisation_readings_are_all_computable_and_differ() -> None:
+    """The exact ``2C x 2C`` block, the same with the cross terms dropped, Prop. 3.1's Hadamard
+    form, and ``diag.py``'s as-implemented diagonal — all four on one real ``LayerNorm``.
+
+    HF4 is the gap between the first two; the other two are what the optimizer actually uses.
+    """
+    seed_all(17)
+    model = nn.Sequential(nn.Linear(4, 6), nn.LayerNorm(6), nn.Tanh(), nn.Linear(6, 3)).to(DTYPE)
+    inputs = torch.randn(24, 4, dtype=DTYPE)
+    targets = torch.randint(0, 3, (24,))
+    modules = capture.capturable_modules(model)
+    factors = accumulate_factors(model, inputs, targets, source="type2", modules=modules,
+                                 batch_size=24, dtype=DTYPE)
+    reference = build_dense_reference(model, inputs, targets, source="type2", batch_size=24)
+
+    exact = reference.block("1")                       # (gamma, beta) stacked: 2C x 2C
+    channels = 6
+    assert exact.shape == (2 * channels, 2 * channels)
+
+    separate = exact_separate(exact, channels)
+    assert torch.allclose(separate.to_dense()[:channels, :channels], exact[:channels, :channels],
+                          atol=1e-12)
+    assert float(separate.to_dense()[:channels, channels:].abs().max()) == 0.0
+
+    total_share, diagonal_share = cross_term_share(exact, channels)
+    assert 0.0 < total_share < 1.0 and diagonal_share > 0.0
+
+    stats = factors["1"].norm_stats()
+    hadamard = stats.hadamard()
+    assert hadamard.P == 2 * channels
+    # beta's exact block is S itself (d/d beta = sum_t g), so Prop. 3.1 is exact there.
+    assert torch.allclose(hadamard.to_dense()[channels:, channels:], exact[channels:, channels:],
+                          atol=1e-10)
+
+    as_implemented = stats.as_implemented_diagonal()
+    assert as_implemented.P == 2 * channels
