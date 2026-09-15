@@ -449,6 +449,33 @@ The noise floor is measured at **one** fraction (`--noise-at 1`): twenty random 
 half-size reference builds, ~49 min at this `N`, and it is a property of the estimator at that `θ`.
 Total: `5 × (441 + 45 + 180) + 2944 ≈ 1.9 h`, requested as `03:00:00`.
 
+### 5.8 One unreproducible test failure, investigated and left open
+
+A single full-suite run reported `1 failed, 565 passed` and was never reproduced. Recorded here so
+the investigation is not repeated:
+
+* **19 consecutive clean full-suite runs** since (7 ad hoc, then 12 in a dedicated loop). The
+  failure rate, if any, is below 1 in 19.
+* **The suite's only machine-dependent assertions are four live wall-clock comparisons**, all
+  pre-existing (two in `test_equal_wallclock_bench.py`, two in `test_cifar10_bench.py`); lots 1 and
+  2 introduced none. The prime suspect,
+  `test_eigenbasis_modes_pay_more_per_step_than_diag`, asserts `median(step_s)` of `ekfac` and
+  `tekfac` above `diag`'s. It was tested directly:
+
+  | condition | `ekfac/diag` |
+  |---|---|
+  | idle, 5 runs | 1.54 - 1.66x |
+  | 8 CPU-load processes, 3 runs | 2.18 - 2.84x |
+  | IO bursts at test start, 6 runs | 1.54 - 1.58x |
+
+  Contention makes the margin **wider**, because the heavier mode is penalised more — so this test
+  cannot fail from load alone, and the hypothesis is disconfirmed rather than merely untested.
+* **The test's name was lost** because the run's output was piped through `tail -1`. That is the
+  one concrete lesson: never truncate a test run's output, since a flake's only evidence is the
+  name it prints once.
+
+No code was changed on the strength of a guess. If it recurs, the full output will name it.
+
 ---
 
 ## 6. The A1 P1 result (pending)
