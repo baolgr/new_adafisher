@@ -383,6 +383,53 @@ measures `2σ_N`, so two independent `N`-probe references must clear `d_split/�
 means anything. `convergence_curve` supplies the `d(F_{N'}, F_N)` against `N'` that would say
 whether lot 1's sub-`N^{-1/2}` decay (§6.2 there) is a systematic floor or a heavier tail.
 
+### 5.6 Step 6: the runner, and a smoke run that rejects its own numbers
+
+`fisher_ref/runners/p1_structural.py` sweeps `(model, arm, seed, fraction) × structure × source ×
+λ` and writes §13's long format — one row per measured number, so a new structure or metric never
+changes the schema. Twelve structures come out of it per checkpoint: `kfac`, `ekfac`, `tkfac`,
+`af_raw`, `exact_diag`, `best_kron`, `block_diagonal`, `exact_block`, plus `hadamard`,
+`exact_separate` and `as_implemented` on normalisation layers.
+
+**One integration bug, worth the guard it produced.** The traversal casts the *batch* to fp64, not
+the network — `build_dense_reference` prepared the model internally, so the accumulators, calling
+`iter_probe_columns` directly, hit a bare `mat1 and mat2 must have the same dtype` from inside
+`nn.Linear`. `capture.prepare_model` is now public, the traversal raises a `TypeError` naming it,
+and the runner prepares **once** and hands the same object to the reference builder and to both
+accumulators — which is also what guarantees they see the same parameters, not just the same
+probes.
+
+**A smoke run on the real `mlp_ln_mnist/diag/ckpt_0.5`**, `N = 512`, three modules, `P = 458`. The
+ordering is exactly what theory demands, which is the point of running it:
+
+| layer | structure | `e_F` | `cos_F` |
+|---|---|---:|---:|
+| `head` | `best_kron` | 0.691 | 0.723 |
+| `head` | `tkfac` | 0.711 | 0.703 |
+| `head` | `ekfac` | 0.756 | 0.655 |
+| `head` | `kfac` | 0.768 | 0.641 |
+| `head` | `exact_diag` | 0.921 | 0.389 |
+| `head` | `af_raw` | 0.960 | 0.282 |
+| `features.1` (LN) | `exact_separate` | 0.677 | 0.736 |
+| `features.1` (LN) | `hadamard` | 0.783 | 0.625 |
+| `features.1` (LN) | `as_implemented` | 0.870 | 0.497 |
+
+`best_kron` ≤ every Kronecker structure (it is the optimal one), EKFAC ≤ K-FAC, and `af_raw` is
+worse than `exact_diag` — the diagonal control beats AdaFisher's factorised diagonal, which is HF3
+in one line.
+
+**And the reading rule rejects all of it.** At `N = 512` the noise floor is `0.974`, so
+`σ_N = 0.487` and two independent references differ by `0.689` under the null. Every number in that
+table sits at or below the null: **at this probe count nothing is interpretable**, exactly as §3.4
+and §10.3 require. The smoke run is therefore a demonstration that the machinery refuses to
+over-claim, not a result. The real run needs `N = 55 000`, where `plan_exp_lot1.md` §6.2 measured
+`σ_N = 0.149`.
+
+---
+
 ## 6. The A1 P1 result (pending)
 
-*Empty until step 6 runs.*
+*Empty until the cluster run. Steps 1-6's code is done and verified (566 tests, `ruff` and `mypy`
+clean); what remains is `p1_structural` at `N = 55 000` over the five fractions, which is a sbatch
+job sized like `plan_exp_lot1.md` §6.1's: the references dominate, at ~150 s each, and there are
+`5 fractions × 2 sources` of them plus the noise floor's 20 partitions.*

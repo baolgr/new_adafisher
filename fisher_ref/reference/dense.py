@@ -26,7 +26,6 @@ micro-batches; only ``U_blk`` (``batch_size x P``, 54 MB at ``P = 26 634``) and 
 
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -34,7 +33,13 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from ..capture import capturable_modules, coverage, iter_probe_columns, per_sample_gradients
+from ..capture import (
+    capturable_modules,
+    coverage,
+    iter_probe_columns,
+    per_sample_gradients,
+    prepare_model,
+)
 from ..conventions import REFERENCE_DTYPE, run_metadata
 
 
@@ -220,14 +225,6 @@ def symmetrize_(matrix: Tensor, block: int = 4096) -> Tensor:
     return matrix
 
 
-def _prepared(model: nn.Module, dtype: torch.dtype, device: Any) -> nn.Module:
-    """``model`` in ``dtype`` on ``device``, copied only when a cast is actually needed."""
-    parameter = next(model.parameters(), None)
-    if parameter is not None and parameter.dtype == dtype and str(parameter.device) == str(device):
-        return model
-    return copy.deepcopy(model).to(device=device, dtype=dtype)
-
-
 def _selected_modules(model: nn.Module,
                       modules: Optional[Sequence[str]]) -> Dict[str, nn.Module]:
     available = capturable_modules(model)
@@ -276,7 +273,7 @@ def build_dense_reference(
     the first micro-batch: with a ``BatchNorm`` left in train mode there are no per-sample
     gradients to stack and the whole object is undefined (``plan_exp_draft.md`` §2.5).
     """
-    model = _prepared(model, dtype, device)
+    model = prepare_model(model, dtype, device)
     selected = _selected_modules(model, modules)
     parameter_names = [f"{name}.{p_name}" if name else p_name
                        for name, module in selected.items()

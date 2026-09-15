@@ -7,6 +7,7 @@ tiny models, and against the exact blocks lot 1 already knows how to build.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Tuple
@@ -20,7 +21,8 @@ from torch import Tensor
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from fisher_ref import capture, metrics  # noqa: E402
+from benchmarks.common.runner import discover_benchmarks  # noqa: E402
+from fisher_ref import capture, conventions, metrics  # noqa: E402
 from fisher_ref.approx import (  # noqa: E402
     BlockDiag,
     Dense,
@@ -753,3 +755,73 @@ def test_probe_gradient_matches_autograd() -> None:
     nn.CrossEntropyLoss()(model(inputs), targets).backward()
     expected = torch.cat([p.grad.reshape(-1) for p in model.parameters()])
     assert torch.allclose(gradient, expected, atol=1e-12)
+
+
+# ----------------------------------------------------------------------------------------------
+# The P1 runner (plan_exp_draft.md §13's format)
+# ----------------------------------------------------------------------------------------------
+
+
+def test_prepare_model_guards_the_traversal_dtype() -> None:
+    """The traversal casts the *batch*, not the network, so a model left in fp32 surfaces as a bare
+    ``mat1 and mat2 must have the same dtype`` from inside ``nn.Linear``. It must be a clear error
+    naming the fix instead — this is how the P1 runner first failed.
+    """
+    seed_all(29)
+    model = nn.Sequential(nn.Linear(4, 3)).float()
+    inputs = torch.randn(6, 4, dtype=DTYPE)
+    targets = torch.randint(0, 3, (6,))
+    with pytest.raises(TypeError, match="prepare_model"):
+        next(capture.iter_probe_columns(model, inputs, targets, source="type2",
+                                        modules=capture.capturable_modules(model),
+                                        batch_size=6, dtype=DTYPE))
+
+    prepared = capture.prepare_model(model, DTYPE, "cpu")
+    assert next(prepared.parameters()).dtype is DTYPE
+    assert next(model.parameters()).dtype is torch.float32, "the caller's model must not be mutated"
+    next(capture.iter_probe_columns(prepared, inputs, targets, source="type2",
+                                    modules=capture.capturable_modules(prepared),
+                                    batch_size=6, dtype=DTYPE))
+
+
+def test_p1_runner_writes_the_declared_schema(tmp_path: Path) -> None:
+    """``plan_exp_draft.md`` §13's long format, end to end on a synthetic checkpoint tree: one row
+    per measured number, so a new structure or metric never changes the schema.
+    """
+    import csv
+
+    from benchmarks.common.checkpoints import CheckpointWriter
+    from fisher_ref.runners import p1_structural
+
+    bench = discover_benchmarks()["mlp_ln_mnist"]
+    seed_all(30)
+    model = bench.build_model()
+    arm_dir = tmp_path / "outputs" / "mnist" / "mlp_ln_mnist" / "diag"
+    writer = CheckpointWriter(output_dir=arm_dir, fractions=(0.5,), total_steps=100, seed=0)
+    writer.save(0.5, 50, 1, model, scheduled=True)
+    (tmp_path / "outputs" / "mnist" / "mlp_ln_mnist" / "manifest.json").write_text(
+        json.dumps({"config": {"seed": 0}, "arms": {"diag": {}}}))
+
+    out = tmp_path / "results"
+    p1_structural.main([
+        "--model", "mlp_ln_mnist", "--arm", "diag", "--fractions", "0.5", "--probes", "32",
+        "--batch", "32", "--modules", "head", "--noise-partitions", "3", "--alphas", "1e-3,1",
+        "--outputs-root", str(tmp_path / "outputs"), "--out-dir", str(out),
+        "--data-root", str(REPO_ROOT / "benchmarks" / "data"), "--device", "cpu",
+    ])
+
+    written = out / "mlp_ln_mnist" / "diag" / "seed0" / "0.5"
+    rows = list(csv.DictReader((written / "metrics.csv").open()))
+    assert rows and list(rows[0]) == list(p1_structural.COLUMNS)
+    assert {"kfac", "ekfac", "tkfac", "af_raw", "exact_diag", "best_kron"} <= {
+        row["structure"] for row in rows}
+    assert {"e_F", "cos_F", "e_F_star", "stein_kl", "noise_floor"} <= {
+        row["metric"] for row in rows}
+    assert {"type2", "empirical"} == {row["source"] for row in rows if row["source"]}
+    # Every inverse metric is reported across the sweep, never at one lambda (§3.3, §10.3).
+    assert {row["lambda_alpha"] for row in rows if row["metric"] == "stein_kl"} == {"0.001", "1.0"}
+
+    meta = json.loads((written / "meta.json").read_text())
+    assert meta["metrics_version"] == conventions.METRICS_VERSION
+    assert meta["protocol"] == "P1" and meta["precision"]["cudnn_allow_tf32"] is not True
+    assert "noise_floor" in meta

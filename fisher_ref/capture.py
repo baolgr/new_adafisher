@@ -37,6 +37,7 @@ Three things here are deliberate, and each of them was a bug first.
 
 from __future__ import annotations
 
+import copy
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -344,6 +345,22 @@ class ProbeColumn:
         return self.stop - self.start
 
 
+def prepare_model(model: nn.Module, dtype: torch.dtype, device: object) -> nn.Module:
+    """``model`` in ``dtype`` on ``device``, deep-copied only when a cast is actually needed.
+
+    A reader must not mutate the caller's model, and every consumer of :func:`iter_probe_columns`
+    must hand it a model already in the reference dtype — the traversal casts the *batch*, not the
+    network, so a mismatch surfaces as a bare ``mat1 and mat2 must have the same dtype`` from deep
+    inside ``nn.Linear``. Prepare once and pass the same object to the reference builder and to the
+    factor accumulators, which also guarantees they see the same parameters
+    (``plan_exp_lot2.md`` §0.2).
+    """
+    parameter = next(model.parameters(), None)
+    if parameter is not None and parameter.dtype == dtype and str(parameter.device) == str(device):
+        return model
+    return copy.deepcopy(model).to(device=device, dtype=dtype)
+
+
 def iter_probe_columns(
     model: nn.Module,
     inputs: Tensor,
@@ -375,6 +392,13 @@ def iter_probe_columns(
     """
     from .sources import output_root  # noqa: PLC0415 - avoids a cycle at import time
 
+    parameter = next(model.parameters(), None)
+    if parameter is not None and parameter.dtype != dtype:
+        raise TypeError(
+            f"the model is {parameter.dtype} but the traversal runs in {dtype}: call "
+            "capture.prepare_model(model, dtype, device) once and pass the result to every "
+            "consumer, so the reference and the structures share one network."
+        )
     n_probes = int(inputs.shape[0])
     checked = not check_independence
     with reference_mode(model), Capture(model, modules) as capturer:
