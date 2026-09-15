@@ -20,7 +20,7 @@ from torch import Tensor
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from fisher_ref import capture  # noqa: E402
+from fisher_ref import capture, metrics  # noqa: E402
 from fisher_ref.approx import (  # noqa: E402
     BlockDiag,
     Dense,
@@ -567,3 +567,189 @@ def test_hf4_normalisation_readings_are_all_computable_and_differ() -> None:
 
     as_implemented = stats.as_implemented_diagonal()
     assert as_implemented.P == 2 * channels
+
+
+# ----------------------------------------------------------------------------------------------
+# The metrics (plan_exp_draft.md §5) — brute force is the oracle
+# ----------------------------------------------------------------------------------------------
+
+
+def test_m1_frobenius_against_brute_force() -> None:
+    """``e_F``, ``cos_F``, ``e_F*`` and ``c*`` against the dense expressions they abbreviate."""
+    seed_all(20)
+    R = torch.randn(12, 12, dtype=DTYPE)
+    R = R @ R.T
+    K = Diag(torch.rand(12, dtype=DTYPE) + 0.2)
+    dense = K.to_dense()
+
+    report = metrics.frobenius(R, K)
+    assert abs(report.e_F - float(torch.linalg.matrix_norm(R - dense)
+                                  / torch.linalg.matrix_norm(R))) < 1e-10
+    expected_cos = float((R * dense).sum() / (torch.linalg.matrix_norm(R)
+                                              * torch.linalg.matrix_norm(dense)))
+    assert abs(report.cos_F - expected_cos) < 1e-10
+    # e_F* is the gap that survives the best rescaling.
+    rescaled = float(torch.linalg.matrix_norm(R - report.c_star * dense)
+                     / torch.linalg.matrix_norm(R))
+    assert abs(report.e_F_star - rescaled) < 1e-9
+
+
+def test_m1_separates_scale_from_direction() -> None:
+    """The distinction ``plan_exp_lot2.md`` §5.1 makes load-bearing: a structure that is exactly
+    right up to a factor has a large ``e_F`` and ``cos_F = 1``, hence ``e_F* = 0``.
+    """
+    seed_all(21)
+    R = torch.randn(8, 8, dtype=DTYPE)
+    R = R @ R.T
+    report = metrics.frobenius(R, Dense(3.0 * R))
+    assert abs(report.e_F - 2.0) < 1e-12          # ||R - 3R|| = 2||R||
+    assert abs(report.cos_F - 1.0) < 1e-12
+    assert abs(report.c_star - 1.0 / 3.0) < 1e-12
+    # e_F* = sqrt(1 - cos^2) loses half its digits as cos -> 1, so fp64 floors it near sqrt(eps).
+    # The bound asserted here *is* that floor, and it is why the module documents any value below
+    # 1e-7 as "indistinguishable from a pure rescaling" rather than as a measurement.
+    assert 0.0 < report.e_F_star < 1e-7
+
+
+def test_t7_stein_kl_is_zero_against_itself_and_matches_brute_force() -> None:
+    """T7 — ``D_lam(R || R) = 0`` exactly, and the Cholesky form agrees with the dense expression.
+
+    The self-consistency half is the one that catches a sign or a transposition: every term is
+    individually large and they must cancel to ``1e-8``.
+    """
+    seed_all(22)
+    R = torch.randn(10, 10, dtype=DTYPE)
+    R = R @ R.T + torch.eye(10, dtype=DTYPE)
+    lam = 0.3
+
+    self_report = metrics.stein_kl(R, Dense(R), lam)
+    assert abs(self_report.kl) < 1e-8, self_report
+
+    K = Dense(R + 0.5 * torch.eye(10, dtype=DTYPE))
+    report = metrics.stein_kl(R, K, lam)
+    identity = torch.eye(10, dtype=DTYPE)
+    damped_R, damped_K = R + lam * identity, K.to_dense() + lam * identity
+    expected = 0.5 * float(torch.linalg.solve(damped_R, damped_K).diagonal().sum() - 10
+                           - torch.logdet(damped_K) + torch.logdet(damped_R))
+    assert abs(report.kl - expected) < 1e-8
+    assert report.kl > 0
+
+
+def test_m5_rho_is_one_for_the_exact_preconditioner_and_below_one_otherwise() -> None:
+    """``rho = 1`` iff the direction is parallel to the exact natural gradient; ``rho in [0, 1]``."""
+    seed_all(23)
+    R = torch.randn(9, 9, dtype=DTYPE)
+    R = R @ R.T + torch.eye(9, dtype=DTYPE)
+    g = torch.randn(9, dtype=DTYPE)
+    lam = 0.25
+
+    exact = metrics.rho(R, Dense(R), g, lam)
+    assert abs(exact.rho - 1.0) < 1e-10
+    assert abs(exact.cos_directions - 1.0) < 1e-10
+
+    # A scalar multiple does NOT keep the direction once damped: (7R + lam I)^{-1} g is
+    # (R + (lam/7) I)^{-1} g, i.e. the same structure at a different damping. So rho is high but
+    # not 1, and this is the concrete reason plan_exp_draft.md §3.3 sweeps lambda instead of fixing
+    # it — a structure that is right up to a scale still takes a different step.
+    scaled = metrics.rho(R, Dense(7.0 * R), g, lam)
+    assert 0.99 < scaled.cos_directions < 1.0
+    assert scaled.rho < 1.0
+    undamped = metrics.rho(R, Dense(7.0 * R), g, 0.0)
+    assert abs(undamped.cos_directions - 1.0) < 1e-9   # without damping, scale is irrelevant
+
+    crude = metrics.rho(R, Diag(R.diagonal().clone()), g, lam)
+    assert 0.0 <= crude.rho <= 1.0 + 1e-12
+    assert crude.rho < exact.rho
+
+
+def test_m7_sigma_ratio_is_zero_for_a_kronecker_block_and_positive_otherwise() -> None:
+    seed_all(24)
+    d_out, d_in = 3, 4
+    A = torch.randn(d_in, d_in, dtype=DTYPE)
+    A = A @ A.T
+    G = torch.randn(d_out, d_out, dtype=DTYPE)
+    G = G @ G.T
+
+    exact_kron = metrics.kronecker_structure(torch.kron(G, A), d_out, d_in)
+    assert exact_kron.sigma_ratio < 1e-13 and exact_kron.tail_mass < 1e-26
+
+    generic = torch.randn(d_out * d_in, d_out * d_in, dtype=DTYPE)
+    generic = generic @ generic.T
+    report = metrics.kronecker_structure(generic, d_out, d_in)
+    assert report.sigma_ratio > 1e-3
+
+
+def test_m7_best_rank1_fit_beats_kfac_on_frobenius() -> None:
+    """The top singular pair of the rearrangement is the *optimal* Kronecker fit, so K-FAC's own
+    factors cannot beat it — the gap between the two is how much of K-FAC's error is the
+    independence assumption rather than the Kronecker form.
+    """
+    model, inputs, targets = _unshared_net()
+    factors, _, reference = _zoo(model, inputs, targets)
+    for name, entry in factors.items():
+        perm = reference.layout.augmented_permutation(name)
+        exact = to_augmented(reference.block(name), perm)
+        d_out, d_in = entry.d_out, entry.d_in
+        A, G = metrics.best_kronecker_fit(exact, d_out, d_in)
+        best = float(torch.linalg.matrix_norm(exact - torch.kron(G, A)))
+        kfac = float(torch.linalg.matrix_norm(exact - entry.kfac().to_dense()))
+        assert best <= kfac + 1e-10, f"{name}: optimal {best} > kfac {kfac}"
+
+
+def test_m8_coupling_is_one_on_the_diagonal_and_bounded() -> None:
+    seed_all(25)
+    model, inputs, targets = _unshared_net()
+    reference = build_dense_reference(model, inputs, targets, source="type2", batch_size=20)
+    ranges = [(name, reference.layout.block_slice(name)) for name in ("0", "2")]
+    names, matrix = metrics.coupling_matrix(reference.matrix, ranges)
+    assert names == ["0", "2"]
+    assert torch.allclose(matrix.diagonal(), torch.ones(2, dtype=DTYPE), atol=1e-10)
+    assert float(matrix[0, 1]) >= 0.0 and float(matrix[0, 1]) == pytest.approx(float(matrix[1, 0]))
+
+    shares = metrics.offdiagonal_mass(reference.matrix, ranges)
+    assert 0.0 < shares["block_diagonal_share"] <= 1.0
+    assert abs(shares["block_diagonal_share"] + shares["offdiagonal_share"] - 1.0) < 1e-12
+
+
+def test_noise_floor_interval_and_scaling() -> None:
+    """§3.4's 20 partitions, and the scaling that turns a split into a floor: the split measures
+    ``2 sigma_N``, so two independent ``N``-probe references must clear ``d_split / sqrt(2)``.
+    """
+    seed_all(26)
+    model, inputs, targets = _unshared_net()
+
+    def build(indices):
+        return build_dense_reference(model, inputs[indices], targets[indices], source="type2",
+                                     batch_size=len(indices)).matrix
+
+    floor = metrics.noise_floor(build, int(inputs.shape[0]), partitions=6, seed=0)
+    assert floor.n_partitions == 6 and len(floor.splits) == 6
+    assert floor.low <= floor.median <= floor.high
+    assert abs(floor.sigma_n - floor.median / 2.0) < 1e-12
+    assert abs(floor.null_two_independent - floor.median / (2.0 ** 0.5)) < 1e-12
+    assert floor.contains(floor.median)
+
+
+def test_convergence_curve_decreases_with_more_probes() -> None:
+    seed_all(27)
+    model, inputs, targets = _unshared_net()
+
+    def build(indices):
+        return build_dense_reference(model, inputs[indices], targets[indices], source="type2",
+                                     batch_size=len(indices)).matrix
+
+    curve = metrics.convergence_curve(build, int(inputs.shape[0]), fractions=(0.25, 0.5, 1.0))
+    assert curve[1.0] < 1e-12                       # the full set against itself
+    assert curve[0.25] > curve[0.5] > curve[1.0]
+
+
+def test_probe_gradient_matches_autograd() -> None:
+    seed_all(28)
+    model, inputs, targets = _unshared_net()
+    gradient = metrics.probe_gradient(model, inputs, targets, nn.CrossEntropyLoss())
+    assert gradient.numel() == sum(p.numel() for p in model.parameters())
+
+    model.zero_grad(set_to_none=True)
+    nn.CrossEntropyLoss()(model(inputs), targets).backward()
+    expected = torch.cat([p.grad.reshape(-1) for p in model.parameters()])
+    assert torch.allclose(gradient, expected, atol=1e-12)

@@ -354,6 +354,35 @@ block, the same with the `γ`-`β` cross terms dropped, Proposition 3.1's Hadama
 is entirely a statement about `γ` and about the cross terms — which narrows what the A1 run has to
 measure.
 
+### 5.5 Step 5: the metrics, T7, and two numerical facts worth carrying
+
+`metrics/` implements §0.5's five: M1 (`frobenius`), M3 (`stein`), M5 (`ngd`), M7 (`kron_diag`),
+M8 (`coupling`), plus §3.4's noise floor as an **interval** rather than lot 1's single split.
+**T7 passes**: `D_λ(R‖R) = 0` to `1e-8` — the half that catches a sign or a transposition, since
+every term is individually large and they must cancel — and the Cholesky form agrees with the dense
+expression.
+
+Two things the tests turned up that are properties of the *quantities*, not of the code, and that
+change how results must be read:
+
+1. **`e_F*` is floored at `√ε ≈ 1.5e-8` in fp64.** It is `sqrt(1 − cos_F²)`, which loses half its
+   significant digits as `cos_F → 1` — and `cos_F → 1` is exactly the regime §5.1 made
+   load-bearing ("the right shape, the wrong size"). Writing it as
+   `sqrt(‖R‖² − ⟨R,K⟩²/‖K‖²)/‖R‖` cancels identically, so the floor is intrinsic. **A reported
+   `e_F*` below `1e-7` means "indistinguishable from a pure rescaling", not a measurement.**
+2. **Damping breaks the scale-invariance of the direction.** `(cR + λI)^{-1} g` is
+   `(R + (λ/c)I)^{-1} g`: a structure that is right *up to a scalar* still takes a different step
+   once damped, and `ρ < 1` for it. Measured on the fixture: `cos = 0.9987` at `c = 7`, and exactly
+   `1` at `λ = 0`. This is the concrete reason `plan_exp_draft.md` §3.3 sweeps `λ` rather than
+   fixing it, and it means `c*` (M1) and `ρ` (M5) genuinely answer different questions — a structure
+   can be perfect for M1 after rescaling and still lose on M5.
+
+The noise floor now returns `(median, 95 % interval, σ_N, null_two_independent)` over 20 random
+partitions, with the scaling derived in the module rather than in passing: a split of halves
+measures `2σ_N`, so two independent `N`-probe references must clear `d_split/√2` before their gap
+means anything. `convergence_curve` supplies the `d(F_{N'}, F_N)` against `N'` that would say
+whether lot 1's sub-`N^{-1/2}` decay (§6.2 there) is a systematic floor or a heavier tail.
+
 ## 6. The A1 P1 result (pending)
 
 *Empty until step 6 runs.*
