@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import pytest
@@ -370,8 +370,13 @@ def test_t0_6_weight_sharing_is_read_from_a_forward_pass() -> None:
 
 
 def _write_run(root: Path, model: str, arm: str, *, seed: int, fractions=(0.0, 0.5, 1.0),
-               model_kwargs: Dict[str, str] | None = None) -> nn.Module:
-    """One arm's output directory, written with the real ``CheckpointWriter``."""
+               model_kwargs: Dict[str, str] | None = None,
+               record_model: bool = False) -> nn.Module:
+    """One arm's output directory, written with the real ``CheckpointWriter``.
+
+    ``record_model`` writes ``config["model"]`` the way ``runner.main`` now does; leaving it off
+    reproduces the manifests of every run already on disk, which is the fallback path.
+    """
     bench = BENCHES[model]
     seed_all(seed)
     net = bench.build_model(**(model_kwargs or {}))
@@ -380,7 +385,10 @@ def _write_run(root: Path, model: str, arm: str, *, seed: int, fractions=(0.0, 0
     for fraction in fractions:
         writer.save(fraction, int(fraction * 100), int(fraction * 10), net,
                     scheduled=fraction != 1.0)
-    manifest = {"config": {"seed": seed, "epochs": 5, **(model_kwargs or {})},
+    config: Dict[str, Any] = {"seed": seed, "epochs": 5, **(model_kwargs or {})}
+    if record_model:
+        config["model"] = model
+    manifest = {"config": config,
                 "arms": {arm: {"steps": 100, "checkpoints": dict(writer.written)}}}
     (root / "manifest.json").write_text(__import__("json").dumps(manifest))
     return net
@@ -417,6 +425,86 @@ def test_t0_7_bridge_discovers_both_layouts_and_reloads_theta(tmp_path: Path) ->
     assert load_theta(run, 0.0, build_model=False).step == 0
     with pytest.raises(KeyError):
         load_theta(run, 0.1)
+
+
+def test_t0_7_bridge_descends_into_a_declared_dataset_group(tmp_path: Path) -> None:
+    """``outputs/<group>/<model>/<arm>/`` is discovered alongside the flat layout — otherwise a
+    bench gaining an ``output_group`` would silently make its whole result tree invisible.
+
+    Only a *declared* group name is descended into. A legacy directory that merely looks like one
+    (``outputs/lot8_cifar10/``) stays a model directory, so nothing is invented.
+    """
+    outputs = tmp_path / "outputs"
+    _write_run(outputs / "cifar10" / "cnn_gn_cifar", "cnn_gn_cifar", "diag", seed=0,
+               record_model=True)
+    _write_run(outputs / "mnist" / "mlp_ln_mnist", "mlp_ln_mnist", "adamw", seed=0,
+               record_model=True)
+    _write_run(outputs / "resnet20_cifar", "resnet20_cifar", "diag", seed=0)  # still flat
+    _write_run(outputs / "lot8_cifar10" / "cnn_gn_cifar", "cnn_gn_cifar", "diag", seed=0)
+
+    found = {(r.model, r.arm) for r in discover_runs(outputs)}
+    assert found == {("cnn_gn_cifar", "diag"), ("mlp_ln_mnist", "adamw"),
+                     ("resnet20_cifar", "diag")}
+    assert discover_runs(outputs, model="cnn_gn_cifar")[0].bench_name == "cnn_gn_cifar"
+    # A model appears once, not twice: a directory holding arms is never also treated as a group.
+    assert len(discover_runs(outputs, model="cnn_gn_cifar")) == 1
+
+
+def test_t0_7_bench_is_resolved_from_the_manifest_not_the_directory_name(tmp_path: Path) -> None:
+    """``--output-dir`` is free-form, so a run directory's name is a label, not an identifier.
+
+    The case that made this concrete: A2's BatchNorm variant is written to
+    ``outputs/cnn_gn_cifar_bn/`` by ``--norm bn``, and there is no ``benchmarks/cnn_gn_cifar_bn/``
+    folder — so resolving the bench by directory name left its 28 checkpoints unloadable, and that
+    is exactly the run protocol P2 compares the GroupNorm one against. ``runner.main`` now records
+    ``config["model"]``; :data:`_LEGACY_BENCH_OF_DIRECTORY` covers the trees written before it did.
+    """
+    outputs = tmp_path / "outputs"
+    recorded = _write_run(outputs / "some_ad_hoc_dir", "cnn_gn_cifar", "diag", seed=0,
+                          model_kwargs={"norm": "bn"}, record_model=True)
+    legacy = _write_run(outputs / "cnn_gn_cifar_bn", "cnn_gn_cifar", "diag", seed=0,
+                        model_kwargs={"norm": "bn"})  # no config["model"]: the on-disk shape
+    _write_run(outputs / "unknown_dir", "cnn_gn_cifar", "diag", seed=0)
+
+    runs = {r.model: r for r in discover_runs(outputs)}
+    # `model` stays the directory label — two runs of one bench must not collapse into one row.
+    assert set(runs) == {"some_ad_hoc_dir", "cnn_gn_cifar_bn", "unknown_dir"}
+    assert runs["some_ad_hoc_dir"].bench_name == "cnn_gn_cifar"      # from the manifest
+    assert runs["cnn_gn_cifar_bn"].bench_name == "cnn_gn_cifar"      # from the legacy map
+    assert runs["unknown_dir"].bench_name == "unknown_dir"           # no evidence: unchanged
+
+    for key, original in (("some_ad_hoc_dir", recorded), ("cnn_gn_cifar_bn", legacy)):
+        loaded = load_theta(runs[key], 0.5)
+        assert runs[key].model_kwargs() == {"norm": "bn"}
+        # The variant is honoured, not merely tolerated: a `gn` rebuild would carry GroupNorm.
+        assert any(isinstance(m, nn.BatchNorm2d) for m in loaded.model.modules()), key
+        assert not any(isinstance(m, nn.GroupNorm) for m in loaded.model.modules()), key
+        for (name, restored), (_, before) in zip(loaded.model.named_parameters(),
+                                                 original.named_parameters()):
+            assert torch.equal(restored, before), f"{key}/{name}"
+
+    # An unresolvable directory fails loudly, and the message says what to do about it.
+    with pytest.raises(KeyError, match="_LEGACY_BENCH_OF_DIRECTORY"):
+        load_theta(runs["unknown_dir"], 0.5)
+    assert load_theta(runs["unknown_dir"], 0.5, build_model=False).step == 50  # metadata still ok
+
+
+def test_t0_7_the_runner_records_the_bench_it_ran(tmp_path: Path) -> None:
+    """The other half of the fix: without ``config["model"]`` in what ``runner.main`` writes, the
+    bridge is back to guessing from a directory name.
+    """
+    import json
+
+    from benchmarks.common.records import write_manifest
+
+    path = tmp_path / "manifest.json"
+    write_manifest([], {"model": "cnn_gn_cifar", "output_group": "", "norm": "bn"}, path)
+    config = json.loads(path.read_text())["config"]
+    assert config["model"] == "cnn_gn_cifar" and config["norm"] == "bn"
+    assert "output_group" in config
+
+    source = (REPO_ROOT / "benchmarks" / "common" / "runner.py").read_text()
+    assert '"model": bench.name' in source, "runner.main must record the bench it ran"
 
 
 def test_t0_8_bridge_rejects_a_pre_fix_checkpoint(tmp_path: Path) -> None:

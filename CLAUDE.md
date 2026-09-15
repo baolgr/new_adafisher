@@ -234,9 +234,10 @@ root on `v^(t)` — is **identical across the five modes**.
 > (`reference_repos/AdaFisher/Image_Classification/src/utils/data.py:157-194`): `RandomResizedCrop`
 > + flip + `Normalize(0.485/0.456/0.406, 0.229/0.224/0.225)` + Cutout at the same `cutout_length:
 > 16` its CIFAR configs use, `Resize(256)` + `CenterCrop(224)` on eval. (4) `Benchmark.output_group`
-> is a **new, optional, empty-by-default** field routing both the results and the jobs into a
-> one-level dataset subdirectory; the eight existing benches leave it empty and keep the flat
-> `outputs/<model>/` layout, because that is the path `fisher_ref/checkpoints.py` discovers runs at.
+> routes both the results and the jobs into a one-level dataset subdirectory. It was introduced
+> empty-by-default for the eight existing benches and then, in a follow-up, set on all twenty:
+> `outputs/{mnist,cifar10,cifar100,imagenet}/<model>/` and `slurm/<group>/`, with the eight
+> original result trees migrated and `fisher_ref/checkpoints.py` taught to read both layouts.
 >
 > **What is measured and what is not.** Every new model builds, forwards, and runs all five Fisher
 > modes for two real `AdaFisherMulti` steps with no parameter left un-updated — including ResNet-50
@@ -521,16 +522,19 @@ adafisher /
 │   │                             #   resnet50_imagenet has its OWN model.py (the paper's ImageNet
 │   │                             #   7x7/s2+maxpool stem, 25 557 032) and vit_small_imagenet is
 │   │                             #   ViTCIFAR configured as ViT-S/16 @224 (22 050 664)
-│   ├── outputs/<model>/<arm>/    # results indexed by what they measure, not by lot (D6);
-│   │                             #   the old outputs/lot7_*, outputs/lot8_* are left untouched.
-│   │                             #   outputs/{cifar100,imagenet}/<model>/<arm>/ for the new
-│   │                             #   datasets (Benchmark.output_group); the 8 original models
-│   │                             #   deliberately stay flat — fisher_ref/checkpoints.py reads that
-│   ├── slurm/                    # 181 generated sbatch jobs (20 models x (1 calibration + 7
-│   │   ├── cifar100/             #   per-arm) + 18 grouped + 1 lam sweep + 1 seeds job) + READMEs
-│   │   └── imagenet/             #   + generate_jobs.py, which enumerates model folders. One
-│   │                             #   subdirectory per dataset, matching outputs/; imagenet/ also
-│   │                             #   holds the hand-written stage_imagenet.sh
+│   ├── outputs/<group>/<model>/<arm>/   # results indexed by what they measure, not by lot (D6),
+│   │                             #   grouped by dataset (Benchmark.output_group): mnist, cifar10,
+│   │                             #   cifar100, imagenet. outputs/seeds/<model>/seed<n>/ keeps its
+│   │                             #   own layout (its axis is the seed); outputs/lot8_cifar10/ is
+│   │                             #   legacy and left untouched. fisher_ref/checkpoints.py reads
+│   │                             #   BOTH the grouped and the flat layout
+│   ├── slurm/                    # 180 generated sbatch jobs (20 models x (1 calibration + 7
+│   │   ├── mnist/                #   per-arm) + 18 grouped + 1 lam sweep + 1 seeds job) + READMEs
+│   │   ├── cifar10/              #   + generate_jobs.py, which enumerates model folders. One
+│   │   ├── cifar100/             #   subdirectory per dataset, matching outputs/. At the top
+│   │   └── imagenet/             #   level only: generate_jobs.py, train_v0_seeds.sh (spans two
+│   │                             #   datasets) and the hand-written dispatch_remaining_arms.sh;
+│   │                             #   imagenet/ also holds the hand-written stage_imagenet.sh
 │   └── archives/                 # gitignored; superseded/duplicated result trees moved aside
 │                                 #   between campaigns, each with its own README saying why
 ├── docs/reports/
@@ -694,9 +698,17 @@ rsync -av --include='*/' --include='*.csv' --include='*.md' --include='*.json' \
       rorqual:/home/blgr/new_adafisher/benchmarks/outputs/ \
       benchmarks/outputs/
 
-# checkpoints for one model only (large — pull selectively)
-rsync -av rorqual:/home/blgr/new_adafisher/benchmarks/outputs/<model>/ \
-      benchmarks/outputs/<model>/
+# THE CHECKPOINTS ARE NOT IN THAT FILTER. Pull them explicitly, or fisher_ref's bridge finds a
+# campaign's reports and none of its theta — which is how a 5-seed campaign silently reads as 1
+# seed. This one line is what took available_seeds() from [0] to [0, 1, 2, 3, 4].
+rsync -av --include='*/' --include='ckpt_*.pt' --exclude='*' \
+      rorqual:/home/blgr/new_adafisher/benchmarks/outputs/seeds/ \
+      benchmarks/outputs/seeds/
+
+# checkpoints for one model only (large — pull selectively). Note the <group>: results are
+# grouped by dataset (mnist / cifar10 / cifar100 / imagenet) on both sides.
+rsync -av rorqual:/home/blgr/new_adafisher/benchmarks/outputs/<group>/<model>/ \
+      benchmarks/outputs/<group>/<model>/
 
 # check a specific JobID's name/state directly on the cluster instead of guessing from local logs
 ssh rorqual "sacct -j <jobid> --format=JobID,JobName%30,Start,End,Elapsed,State,ExitCode"
@@ -1096,17 +1108,30 @@ scale, and independently at each of the `k_h·k_w` kernel offsets (`plan_lot6.md
   falls back and `Resize((32,32))` is in the pipeline either way, the two being numerically
   identical — but then every epoch decodes 1.28 M full-resolution JPEGs to feed a model whose
   forward pass takes microseconds. Build it.
-- **The CIFAR-100 and ImageNet checkpoints are invisible to `fisher_ref/checkpoints.py`.** The
-  bridge walks `outputs/<model>/<arm>/` and was left unchanged: a dataset group directory is inert
-  there — not mistaken for a model, no crash, no runs returned (asserted in
-  `tests/test_dataset_benches.py`). The Fisher-drift campaign is defined over the eight original
-  models (`plan_exp_draft.md` §4); pointing it at another dataset is a deliberate change to that
-  bridge, not a side effect of adding a bench.
-- **`Benchmark.output_group` must stay empty for the eight original models.** It routes results to
-  `outputs/<group>/<model>/` and jobs to `slurm/<group>/`; `fisher_ref/checkpoints.py` discovers
-  runs at `outputs/<model>/<arm>/` and several campaign reports cite that path, so moving MNIST and
-  CIFAR-10 under `mnist/` + `cifar10/` would break the bridge for no gain. New datasets get
-  subdirectories; the existing eight stay flat. `tests/test_dataset_benches.py` asserts both halves.
+- **Every bench is grouped by its dataset, and a run directory's name is a label, not an
+  identifier.** `Benchmark.output_group` (`mnist`/`cifar10`/`cifar100`/`imagenet`) routes results
+  to `outputs/<group>/<model>/` and jobs to `slurm/<group>/`; all twenty models are grouped, and
+  the eight original result trees were migrated. Three things make that safe, and all three are
+  asserted:
+  * `fisher_ref/checkpoints.py::discover_runs` reads **both** layouts, grouped and flat, so a tree
+    that has not moved still resolves. It descends only into a directory named after a group some
+    bench actually *declares*, so `_calibration` and `outputs/lot8_cifar10/` cannot be mistaken
+    for one.
+  * The network is rebuilt from `manifest.json`'s `config["model"]` — written by `runner.main`
+    since this change — not from the directory name, because `--output-dir` is free-form.
+    `_LEGACY_BENCH_OF_DIRECTORY` covers the manifests written before that. The case that forced
+    it: A2's BatchNorm variant lives in `outputs/cifar10/cnn_gn_cifar_bn/` with no
+    `benchmarks/cnn_gn_cifar_bn/` folder, and it is exactly the run protocol P2 compares the
+    GroupNorm one against — its 28 checkpoints were unloadable until then.
+  * `RunRef.model` stays the **directory** label, so `cnn_gn_cifar` and `cnn_gn_cifar_bn` remain
+    two rows and do not collapse into one.
+  `outputs/seeds/<model>/seed<n>/` is deliberately left ungrouped: its axis is the seed.
+- **The results rsync recipe does not include checkpoints.** Its filter is `*.csv *.md *.json
+  *.png`, so a campaign's reports arrive and its `ckpt_*.pt` do not — and `discover_runs` then
+  reports a 5-seed campaign as 1 seed, with no error anywhere. Measured: the extra-seed campaign
+  had completed and `available_seeds()` still returned `[0]` until the checkpoints were pulled
+  explicitly (the second rsync line under "Cluster sync" above). 80 runs / 399 checkpoints is the
+  current, correct state.
 - **A new `benchmarks/<model>/` folder must be added to four registries, not one.** The folder list
   is the registry for *discovery*, but four tests exist precisely to fail when a folder appears
   without its contract: `tests/test_benchmark_models.py::EXPECTED`,

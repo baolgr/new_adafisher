@@ -13,8 +13,9 @@
 #SBATCH --output=benchmarks/slurm/logs/%x-%j.out
 
 # --time: MEASURED. 2 x T_diag per (model, seed): 24.4 min for one full sweep of the five models; 4 regime-A seeds + 2 regime-B seeds = 62 min of training, plus ~2 min of eval and ~40 s of setup.
-# Dataset: cifar10 and mnist must be staged under $SLURM_SUBMIT_DIR/dataset (compute nodes have no
-# internet; --no-allow-download turns a missing dataset into a clear error, not a timeout).
+# Dataset: cifar10 and mnist, read from $DATA_ROOT (default $SLURM_SUBMIT_DIR/dataset; an ImageNet job
+# overrides it with the node-local copy it stages below). Compute nodes have no internet, and
+# --no-allow-download turns a missing dataset into a clear error rather than a network timeout.
 
 set -euo pipefail
 cd "$SLURM_SUBMIT_DIR"
@@ -28,6 +29,7 @@ pip install --no-index --upgrade pip
 pip install --no-index -r requirements-cluster.txt
 
 export PYTHONPATH="$SLURM_SUBMIT_DIR/src:$SLURM_SUBMIT_DIR"
+DATA_ROOT="${DATA_ROOT:-$SLURM_SUBMIT_DIR/dataset}"
 
 # Extra training seeds for the Fisher-drift campaign (plan_exp_draft_v0.md §3.4). Only the two
 # trajectories §3.5 samples are run -- AdamW (neutral reference) and AdaFisher (diag) -- so this is
@@ -37,7 +39,8 @@ export PYTHONPATH="$SLURM_SUBMIT_DIR/src:$SLURM_SUBMIT_DIR"
 # No --lr-schedule flag on purpose: seed 0 ran under the default 'nominal' schedule and these must
 # match it to be comparable, which is the whole point. Do not add --lr-schedule budget here.
 #
-# Writes to benchmarks/outputs/seeds/<model>/seed<n>/, leaving outputs/<model>/ (seed 0) untouched.
+# Writes to benchmarks/outputs/seeds/<model>/seed<n>/ -- deliberately ungrouped, its axis being
+# the seed -- leaving outputs/<group>/<model>/ (seed 0) untouched.
 # One failing run does not abort the rest; the job exits non-zero at the end if any failed.
 FAILED=()
 run_one () {  # $1 = model, $2 = seed
@@ -50,7 +53,7 @@ run_one () {  # $1 = model, $2 = seed
     --max-epoch-factor 3 \
     --num-workers 8 \
     --no-allow-download \
-    --data-root "$SLURM_SUBMIT_DIR/dataset" \
+    --data-root "$DATA_ROOT" \
     --checkpoints 0,0.01,0.1,0.5,1 \
     --no-plot \
     --output-dir "$SLURM_SUBMIT_DIR/benchmarks/outputs/seeds/$1/seed$2" \

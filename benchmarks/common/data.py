@@ -17,6 +17,19 @@ Protocol, from the papers rather than from habit:
 - **MNIST**: no augmentation at all, train or eval (``augment=False`` in its spec), the historical
   auto-encoder protocol of ``ekfac_1806.03884.pdf`` §4.1. ``cutout`` is therefore structurally
   inert for MNIST rather than silently ignored.
+- **CIFAR-100** shares CIFAR-10's protocol exactly (same 32x32 3-channel images, same 45k/5k
+  split, same augmentation); only ``mean``/``std`` and the label cardinality differ. Its spec has
+  been here since step 1 — the CIFAR-100 benches added later only had to point ``build_data`` at
+  it.
+- **ImageNet-1K** is the one dataset that is *not* a torchvision archive: it is an ``ImageFolder``
+  tree (``<root>/imagenet/{train,val}/<wnid>/*.JPEG``) that has to be staged by hand, because
+  downloading it requires an accepted image-net.org agreement. Its transforms are AdaFisher's own
+  (``reference_repos/AdaFisher/Image_Classification/src/utils/data.py:157-194``:
+  ``RandomResizedCrop(224)`` + flip + ``Normalize(0.485/0.456/0.406, 0.229/0.224/0.225)``
+  + Cutout on train, ``Resize(256)`` + ``CenterCrop(224)`` on eval), and the official 50k
+  validation set plays the role the CIFAR test set plays — held out, evaluated once — with this
+  project's own seeded split carving the *validation* stream out of the 1.28 M training images.
+  See ``build_imagenet_loaders`` for the downsampled (``img_size=32``) variant and why it exists.
 
 ``download`` is opt-in (``allow_download``): Alliance Canada's compute nodes have no internet, and
 torchvision's ``download=True`` there fails as an opaque network timeout instead of a clear
@@ -25,6 +38,7 @@ torchvision's ``download=True`` there fails as an opaque network timeout instead
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -34,7 +48,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, Subset
 from torchvision import transforms
-from torchvision.datasets import CIFAR10, CIFAR100, MNIST
+from torchvision.datasets import CIFAR10, CIFAR100, MNIST, ImageFolder
 
 
 class Cutout:
@@ -140,6 +154,168 @@ def build_loaders(
     return train_loader, val_loader, test_loader
 
 
+# ----------------------------------------------------------------------------------------------
+# ImageNet-1K
+# ----------------------------------------------------------------------------------------------
+
+#: ``ImageFolder``, not a torchvision archive: ILSVRC-2012 cannot be fetched without an accepted
+#: image-net.org agreement, so ``allow_download`` is structurally inert here (a missing tree is a
+#: ``FileNotFoundError`` naming the expected layout, never a silent download attempt).
+#: ``val_size`` carves the *validation* stream out of the 1 281 167 training images — 25 000, i.e.
+#: 25 per class on average, uniformly at random rather than class-stratified, which is the same
+#: unstratified ``randperm`` the CIFAR/MNIST specs already use (``seeded_train_val_split``). The
+#: official 50 000-image validation set is never trained or model-selected on: it is this
+#: pipeline's *test* loader, evaluated once at the end of a run, exactly as the CIFAR test set is.
+IMAGENET_SPEC = DatasetSpec(
+    "imagenet", ImageFolder, (0.485, 0.456, 0.406), (0.229, 0.224, 0.225),
+    val_size=25_000, augment=True,
+)
+
+
+def build_imagenet_transforms(
+    spec: DatasetSpec, img_size: int, cutout: bool, cutout_length: int, n_holes: int = 1
+):
+    """Two regimes, selected by ``img_size``, because this repository's models are two families.
+
+    ``img_size >= 64`` — the **native** recipe, verbatim from AdaFisher's own pipeline
+    (``reference_repos/AdaFisher/Image_Classification/src/utils/data.py:157-194``, itself the
+    standard ILSVRC recipe of ``papers/resnet_1512.03385.pdf`` §3.4: "a 224x224 crop is randomly
+    sampled from an image or its horizontal flip"): ``RandomResizedCrop(img_size)`` + flip on
+    train, ``Resize(img_size * 256/224)`` + ``CenterCrop(img_size)`` on eval. Cutout is appended
+    when requested — AdaFisher appends it on ImageNet too, at the same ``cutout_length: 16`` its
+    CIFAR configs use (``configs/AdaFisherCNN.yaml``), so the length is not rescaled with the
+    resolution here either.
+
+    ``img_size < 64`` — **downsampled ImageNet**, the construction of Chrabaszcz, Loshchilov &
+    Hutter 2017 (arXiv:1707.08819) §2: the *whole* image is resized to ``img_size x img_size``
+    (aspect ratio not preserved, no crop), which is what makes a 32x32-native CIFAR architecture
+    applicable to ImageNet-1K unmodified. This project then reuses its own CIFAR train
+    augmentation on top (pad ``img_size/8`` + random crop + flip + optional Cutout), so that a
+    ``<model>_imagenet`` bench differs from its ``<model>_cifar`` counterpart in exactly two
+    things: the data and the width of the classification head. The pad-crop-flip choice is this
+    project's, not that paper's.
+    """
+    normalize = transforms.Normalize(spec.mean, spec.std)
+    if img_size >= 64:
+        train_ops = [
+            transforms.RandomResizedCrop(img_size),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            normalize,
+        ]
+        eval_ops = [
+            transforms.Resize(round(img_size * 256 / 224)),
+            transforms.CenterCrop(img_size),
+            transforms.ToTensor(),
+            normalize,
+        ]
+    else:
+        squash = transforms.Resize((img_size, img_size))
+        train_ops = [
+            squash,
+            transforms.RandomCrop(img_size, padding=img_size // 8),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            normalize,
+        ]
+        eval_ops = [squash, transforms.ToTensor(), normalize]
+    if cutout:
+        train_ops.append(Cutout(n_holes=n_holes, length=cutout_length))
+    return transforms.Compose(train_ops), transforms.Compose(eval_ops)
+
+
+def imagenet_root(data_root: str | Path, img_size: int = 224) -> Path:
+    """``<data_root>/imagenet``, or ``<data_root>/imagenet<img_size>`` when a pre-resized tree of
+    that resolution has been staged.
+
+    The two are numerically interchangeable: ``transforms.Resize((s, s))`` on an image that is
+    already ``s x s`` is the identity (PIL's ``Image.resize`` returns a copy when the requested
+    size matches), and ``stage_imagenet.sh resize`` builds the tree with that very transform. What
+    changes is the cost — 1.28 M full-resolution JPEG decodes per epoch, against 1.28 M 32x32
+    ones, for a model whose forward pass is a few hundred microseconds.
+    """
+    root = Path(data_root).expanduser()
+    if img_size < 64 and (root / f"imagenet{img_size}" / "train").is_dir():
+        return root / f"imagenet{img_size}"
+    return root / "imagenet"
+
+
+STAGING_HINT = """ImageNet-1K is not downloadable by torchvision (ILSVRC-2012 requires an accepted
+image-net.org agreement). Expected layout, one directory per WordNet id:
+
+    {root}/train/n01440764/*.JPEG   (1 281 167 images, 1000 classes)
+    {root}/val/n01440764/*.JPEG     (50 000 images, the official validation set)
+
+`benchmarks/slurm/imagenet/stage_imagenet.sh` builds exactly this tree from the two official
+tars; the generated jobs beside it stage the result into $SLURM_TMPDIR."""
+
+
+def build_imagenet_loaders(
+    spec: DatasetSpec,
+    data_root: str | Path,
+    *,
+    img_size: int = 224,
+    batch_size: int = 128,
+    seed: int = 0,
+    num_workers: int = 4,
+    cutout: bool = True,
+    cutout_length: int = 16,
+    allow_download: bool = True,
+    train_subset: Optional[int] = None,
+) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    """``(train_loader, val_loader, test_loader)``, same contract as ``build_loaders``.
+
+    ``allow_download`` is accepted and ignored — the runner passes it to every bench uniformly, and
+    there is nothing to download (see ``STAGING_HINT``). A missing tree raises immediately.
+    """
+    root = imagenet_root(data_root, img_size)
+    train_dir, test_dir = root / "train", root / "val"
+    for directory in (train_dir, test_dir):
+        if not directory.is_dir():
+            raise FileNotFoundError(
+                f"{directory} does not exist.\n\n" + STAGING_HINT.format(root=root)
+            )
+
+    train_tf, eval_tf = build_imagenet_transforms(spec, img_size, cutout, cutout_length)
+    train_full = ImageFolder(str(train_dir), transform=train_tf)
+    # The *same* scan, re-used with the eval transform. A second ``ImageFolder(train_dir, ...)``
+    # would re-walk 1.28 M files for nothing; a shallow copy shares ``samples``/``targets`` and
+    # owns its own ``transform`` attribute, which is the only thing that differs.
+    val_full = copy.copy(train_full)
+    val_full.transform = eval_tf
+    test_set = ImageFolder(str(test_dir), transform=eval_tf)
+    if train_full.class_to_idx != test_set.class_to_idx:
+        raise ValueError(
+            f"{train_dir} and {test_dir} disagree on the class -> index mapping; the validation "
+            "tree must use the same WordNet-id directory names as the training tree"
+        )
+
+    train_idx, val_idx = seeded_train_val_split(len(train_full), spec.val_size, seed)
+    if train_subset is not None:
+        train_idx = train_idx[:train_subset]
+
+    common = dict(num_workers=num_workers, pin_memory=torch.cuda.is_available())
+    # ``persistent_workers`` on the *training* loader only. Restarting 16 workers per epoch is pure
+    # overhead when each has to re-fork a 1.28 M-entry ``samples`` list, but keeping three sets of
+    # them alive at once would triple the copy-on-write cost of that same list for two loaders that
+    # each run once an epoch — and that cost is real, since CPython's refcounting writes to the
+    # pages it reads.
+    train_loader = DataLoader(Subset(train_full, train_idx), batch_size=batch_size, shuffle=True,
+                              drop_last=True, persistent_workers=num_workers > 0, **common)
+    val_loader = DataLoader(Subset(val_full, val_idx), batch_size=batch_size, shuffle=False,
+                            **common)
+    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, **common)
+    return train_loader, val_loader, test_loader
+
+
 mnist = partial(build_loaders, MNIST_SPEC)
 cifar10 = partial(build_loaders, CIFAR10_SPEC)
 cifar100 = partial(build_loaders, CIFAR100_SPEC)
+#: ImageNet-1K at its native 224 px — for the two architectures actually designed for it
+#: (``resnet50_imagenet``, ``vit_small_imagenet``).
+imagenet = partial(build_imagenet_loaders, IMAGENET_SPEC, img_size=224)
+#: ImageNet-1K downsampled to 32x32 (Chrabaszcz et al. 2017 §2) — for the four 32x32-native
+#: CIFAR architectures, which are then structurally unchanged apart from a 1000-way head. Without
+#: it, ``cct_2_3x2`` alone would emit a 3136-token sequence at 224 px and its attention map would
+#: not fit any GPU at a usable batch size.
+imagenet32 = partial(build_imagenet_loaders, IMAGENET_SPEC, img_size=32)

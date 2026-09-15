@@ -118,12 +118,25 @@ def main() -> None:
           f"metrics_version={conventions.METRICS_VERSION}", flush=True)
 
     bench = discover_benchmarks()[MODEL]
-    runs = discover_runs(OUTPUTS_ROOT, model=MODEL, arm=ARM)
+    # Filter on the seed explicitly. Since the extra-seed campaign landed, (model, arm) matches
+    # five runs — seed 0 under outputs/<group>/<model>/ and seeds 1-4 under outputs/seeds/ — and
+    # taking runs[0] would pick one by directory ordering ("mnist" < "seeds" today, but that is an
+    # accident of the group name, not a rule).
+    runs = discover_runs(OUTPUTS_ROOT, model=MODEL, arm=ARM, seed=SEED)
     if not runs:
-        raise SystemExit(f"no run found for {MODEL}/{ARM} under {OUTPUTS_ROOT}")
-    loaded = load_theta(runs[0], FRACTION, device="cpu")
+        available = sorted({r.seed for r in discover_runs(OUTPUTS_ROOT, model=MODEL, arm=ARM)})
+        raise SystemExit(
+            f"no run for {MODEL}/{ARM} at seed {SEED} under {OUTPUTS_ROOT}; seeds found: {available}"
+        )
+    if len(runs) > 1:
+        raise SystemExit(
+            f"{len(runs)} runs match {MODEL}/{ARM} seed {SEED}: "
+            f"{[str(r.directory) for r in runs]}. Refusing to guess which theta is meant."
+        )
+    run = runs[0]
+    loaded = load_theta(run, FRACTION, device="cpu")
     print(f"theta: {MODEL}/{ARM} ckpt {FRACTION}  step={loaded.step} epoch={loaded.epoch} "
-          f"progress={loaded.progress:.3f}  seed={runs[0].seed}", flush=True)
+          f"progress={loaded.progress:.3f}  seed={run.seed}  dir={run.directory}", flush=True)
 
     # The val split is the run's own held-out partition and is small: MNIST reserves 5 000 images
     # (benchmarks/common/data.py::MNIST_SPEC). Raising N — which §6 says the noise floor demands —
@@ -146,7 +159,7 @@ def main() -> None:
     x_val, y_val = val.as_model_batch(bench)
     x_test, y_test = test.as_model_batch(bench)
 
-    out = OUT_DIR / MODEL / ARM / f"seed{runs[0].seed}" / str(FRACTION)
+    out = OUT_DIR / MODEL / ARM / f"seed{run.seed}" / str(FRACTION)
     out.mkdir(parents=True, exist_ok=True)
 
     model = loaded.model
@@ -155,7 +168,7 @@ def main() -> None:
     empirical, t_empirical = build(model, x_train, y_train, "empirical", train.digest[:12])
 
     summary = {
-        "model": MODEL, "arm": ARM, "seed": runs[0].seed, "fraction": FRACTION,
+        "model": MODEL, "arm": ARM, "seed": run.seed, "fraction": FRACTION,
         "n_probes": N_PROBES, "n_val_probes": len(val), "P": fisher.P,
         "n_rows_type2": fisher.n_rows,
         "batch_size": BATCH, "device": DEVICE, "modules": MODULES,

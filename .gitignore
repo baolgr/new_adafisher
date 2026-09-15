@@ -13,6 +13,12 @@ reference_repos/
 dataset/
 # Job logs: the directory must exist (sbatch writes into it), its contents must not be tracked.
 benchmarks/slurm/logs/*.out
+fisher_ref/slurm/logs/*.out
+
+# The Fisher-drift campaign's own results. The summaries are the deliverable (plan_exp_draft.md
+# §13) and are small text, so they stay tracked; the spectra are binary blobs recomputable from
+# the checkpoint they came from, so they do not.
+fisher_ref/outputs/**/*.pt
 
 # Archived result trees moved aside between campaigns — gigabytes of checkpoints.
 benchmarks/archives/

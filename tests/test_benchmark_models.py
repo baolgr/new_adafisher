@@ -86,9 +86,70 @@ EXPECTED: Dict[str, Expected] = {
     "cct_2_3x2_cifar": Expected(
         283_723, {"Conv2d": 2, "LayerNorm": 5, "Linear": 10}, ["pos_embed"], (3, 32, 32),
     ),
+    # ------------------------------------------------------------------------------------------
+    # CIFAR-100: the six CIFAR-10 architectures, unchanged apart from a 100-way head. The hooked
+    # inventories and unhooked lists are therefore identical to their CIFAR-10 rows above, and the
+    # parameter deltas are exactly ``90 * (embed_dim + 1)`` for the head — the cheapest possible
+    # check that nothing else moved with the dataset.
+    # ------------------------------------------------------------------------------------------
+    "cnn_gn_cifar100": Expected(
+        30_308, {"Conv2d": 3, "Linear": 1},
+        ["features.1.weight", "features.1.bias", "features.5.weight", "features.5.bias",
+         "features.9.weight", "features.9.bias"],
+        (3, 32, 32),
+    ),
+    "vit_micro_cifar100": Expected(
+        24_068, {"Conv2d": 1, "LayerNorm": 5, "Linear": 9}, ["pos_embed"], (3, 32, 32),
+    ),
+    "resnet20_cifar100": Expected(
+        275_572, {"Conv2d": 19, "BatchNorm2d": 19, "Linear": 1}, [], (3, 32, 32),
+    ),
+    "cct_2_3x2_cifar100": Expected(
+        295_333, {"Conv2d": 2, "LayerNorm": 5, "Linear": 10}, ["pos_embed"], (3, 32, 32),
+    ),
+    "resnet50_cifar100": Expected(
+        23_705_252, {"Conv2d": 53, "BatchNorm2d": 53, "Linear": 1}, [], (3, 32, 32),
+    ),
+    "vit_small_cifar100": Expected(
+        2_710_948, {"Conv2d": 1, "LayerNorm": 13, "Linear": 25}, ["cls_token", "pos_embed"],
+        (3, 32, 32),
+    ),
+    # ------------------------------------------------------------------------------------------
+    # ImageNet-1K. Two resolutions, and ``input_shape`` is what distinguishes them: the four
+    # 32x32-native architectures run on downsampled ImageNet (``imagenet32``) and are again
+    # structurally unchanged, while ResNet-50 and ViT-S run at the native 224 px in their own
+    # ImageNet configurations — the 7x7/stride-2 + max-pool stem of resnet_1512.03385.pdf Table 1
+    # (25 557 032 parameters, the standard ResNet-50 count) and patch-16 / D=384 / depth 12
+    # (22 050 664). ``vit_small_imagenet``'s 25 LayerNorms and 49 Linears against
+    # ``vit_small_cifar``'s 13 and 25 are depth 12 against depth 6.
+    # ------------------------------------------------------------------------------------------
+    "cnn_gn_imagenet": Expected(
+        88_808, {"Conv2d": 3, "Linear": 1},
+        ["features.1.weight", "features.1.bias", "features.5.weight", "features.5.bias",
+         "features.9.weight", "features.9.bias"],
+        (3, 32, 32),
+    ),
+    "vit_micro_imagenet": Expected(
+        53_768, {"Conv2d": 1, "LayerNorm": 5, "Linear": 9}, ["pos_embed"], (3, 32, 32),
+    ),
+    "resnet20_imagenet": Expected(
+        334_072, {"Conv2d": 19, "BatchNorm2d": 19, "Linear": 1}, [], (3, 32, 32),
+    ),
+    "cct_2_3x2_imagenet": Expected(
+        411_433, {"Conv2d": 2, "LayerNorm": 5, "Linear": 10}, ["pos_embed"], (3, 32, 32),
+    ),
+    "resnet50_imagenet": Expected(
+        25_557_032, {"Conv2d": 53, "BatchNorm2d": 53, "Linear": 1}, [], (3, 224, 224),
+    ),
+    "vit_small_imagenet": Expected(
+        22_050_664, {"Conv2d": 1, "LayerNorm": 25, "Linear": 49}, ["cls_token", "pos_embed"],
+        (3, 224, 224),
+    ),
 }
 
-SLOW = {"resnet50_cifar"}
+#: Marked slow (``plan_exp_step1.md`` §6): 20 M+ parameters times five modes, and for the two
+#: ImageNet-224 rows a 224x224 forward on top. Run them with ``pytest --runslow``.
+SLOW = {"resnet50_cifar", "resnet50_cifar100", "resnet50_imagenet", "vit_small_imagenet"}
 MODEL_IDS = sorted(BENCHES)
 
 

@@ -40,6 +40,7 @@ BENCH = Benchmark(
     ),
     epochs=50,
     batch_size=128,
+    output_group="cifar10",
 )
 
 if __name__ == "__main__":

@@ -81,9 +81,22 @@ class Benchmark:
     # ``build_model`` as a keyword. A2's ``--norm {gn,bn}`` (plan_exp_step1.md §4) is its only
     # user; every other bench leaves it empty and ``build_model`` is called with no arguments.
     model_choices: Mapping[str, Tuple[str, ...]] = field(default_factory=dict)
+    # Optional one-level subdirectory grouping this bench's results and SLURM jobs, i.e.
+    # ``outputs/<output_group>/<name>/`` and ``slurm/<output_group>/``. Empty is still the flat
+    # ``outputs/<name>/`` layout, used by nothing today. The campaign's eight original models set
+    # it to ``"mnist"`` / ``"cifar10"`` and the CIFAR-100 / ImageNet-1K benches to ``"cifar100"`` /
+    # ``"imagenet"``, so every dataset's results and jobs sit together instead of colliding in one
+    # flat directory. ``fisher_ref/checkpoints.py`` discovers runs through each bench's own
+    # ``output_group`` (``CAMPAIGN_GROUPS``), not by walking arbitrary directory names — a group not
+    # in that set (``cifar100``, ``imagenet``) stays invisible to it, deliberately.
+    output_group: str = ""
 
     def title(self) -> str:
         return self.display_name or self.name
+
+    def output_root(self, outputs_dir: Path) -> Path:
+        return outputs_dir / self.output_group / self.name if self.output_group else \
+            outputs_dir / self.name
 
 
 def discover_benchmarks() -> Dict[str, Benchmark]:
@@ -303,7 +316,7 @@ def main(bench: Benchmark, argv: Sequence[str] | None = None) -> None:
     args = build_parser(bench).parse_args(argv)
     hp = resolve_hparams(bench, args)
     device = resolve_device(args.device)
-    root = args.output_dir or (BENCHMARKS_DIR / "outputs" / bench.name)
+    root = args.output_dir or bench.output_root(BENCHMARKS_DIR / "outputs")
     print(f"model={bench.name} arms={args.arms} device={device} hparams={hp}")
 
     results: List[ArmResult] = []
@@ -332,7 +345,17 @@ def main(bench: Benchmark, argv: Sequence[str] | None = None) -> None:
         write_step_csv(results, root / "records.csv")
         write_epoch_csv(results, root / "epochs.csv")
         text = write_summary(results, root / "summary.md")
-        write_manifest(results, vars(args) | {"hparams": asdict(hp)}, root / "manifest.json")
+        # ``model``/``output_group`` identify the *bench* that produced this run. They are not in
+        # ``vars(args)`` and cannot be recovered from the directory name: ``--output-dir`` is
+        # free-form, and A2's BatchNorm variant is deliberately written to
+        # ``outputs/cnn_gn_cifar_bn/`` by ``--norm bn``. Without them ``fisher_ref/checkpoints.py``
+        # cannot rebuild the network (it resolves ``benchmarks/<name>/bench.py`` by name).
+        write_manifest(
+            results,
+            vars(args) | {"model": bench.name, "output_group": bench.output_group,
+                          "hparams": asdict(hp)},
+            root / "manifest.json",
+        )
         return text
 
     if results:

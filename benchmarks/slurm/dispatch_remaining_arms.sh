@@ -10,8 +10,8 @@
 #   sbatch --export=ALL,MODELS="resnet20_cifar cct_2_3x2_cifar" ... dispatch_remaining_arms.sh
 #
 # Usage, right after submitting the two diag reference jobs:
-#   jid_resnet=$(sbatch --parsable benchmarks/slurm/train_resnet50_cifar_diag.sh)
-#   jid_vit=$(sbatch --parsable benchmarks/slurm/train_vit_small_cifar_diag.sh)
+#   jid_resnet=$(sbatch --parsable benchmarks/slurm/cifar10/train_resnet50_cifar_diag.sh)
+#   jid_vit=$(sbatch --parsable benchmarks/slurm/cifar10/train_vit_small_cifar_diag.sh)
 #   sbatch --dependency=afterok:$jid_resnet:$jid_vit benchmarks/slurm/dispatch_remaining_arms.sh
 #
 # --dependency=afterok holds this job in the queue until BOTH reference jobs finish with exit
@@ -36,14 +36,22 @@ IFS=' ' read -r -a MODELS <<< "${MODELS:-resnet50_cifar vit_small_cifar}"
 REMAINING_ARMS=(kfac ekfac tkfac tekfac adam adamw)
 
 for model in "${MODELS[@]}"; do
-  manifest="benchmarks/outputs/${model}/diag/manifest.json"
+  # Jobs and results are grouped by dataset (benchmarks/slurm/<group>/, outputs/<group>/<model>/).
+  # The group is read straight out of the bench's own `output_group=` line rather than imported,
+  # because this job loads a bare python module with no venv and no torch.
+  group=$(sed -n 's/.*output_group="\([^"]*\)".*/\1/p' "benchmarks/${model}/bench.py")
+  if [ -z "$group" ]; then
+    echo "benchmarks/${model}/bench.py declares no output_group — aborting" >&2
+    exit 1
+  fi
+  manifest="benchmarks/outputs/${group}/${model}/diag/manifest.json"
   if [ ! -f "$manifest" ]; then
     echo "missing $manifest — the diag reference job did not write it, aborting" >&2
     exit 1
   fi
   budget=$(python -c "import json;print(json.load(open('$manifest'))['arms']['diag']['total_s'])")
-  echo "$model diag reference total_s=$budget"
+  echo "$model ($group) diag reference total_s=$budget"
   for arm in "${REMAINING_ARMS[@]}"; do
-    sbatch --export=ALL,WCT_BUDGET="$budget" "benchmarks/slurm/train_${model}_${arm}.sh"
+    sbatch --export=ALL,WCT_BUDGET="$budget" "benchmarks/slurm/${group}/train_${model}_${arm}.sh"
   done
 done

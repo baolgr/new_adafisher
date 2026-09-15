@@ -31,6 +31,7 @@ BENCH = Benchmark(
     hparams=HParams(lr=1e-3, baseline_lr=1e-3, weight_decay=0.0, lam=1e-3),
     epochs=20,
     batch_size=128,
+    output_group="mnist",
 )
 
 if __name__ == "__main__":

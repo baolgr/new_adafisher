@@ -30,7 +30,7 @@ REFERENCE_ARM = "diag"
 
 # Per-model ``--time`` for one training job and for the calibration job, plus the basis of the
 # training figure. **Every row is measured from a completed run**, not extrapolated: the reference
-# arm's own ``total_s`` (``benchmarks/outputs/<model>/[<arm>/]manifest.json``, or its log for
+# arm's own ``total_s`` (``benchmarks/outputs/<group>/<model>/[<arm>/]manifest.json``, or its
 # ``resnet20_cifar``, whose grouped job died before writing one), on one ``h100_1g.10gb`` MIG slice.
 #
 # Three measurements bound the margin:
@@ -68,6 +68,63 @@ WALLTIME = {
     "vit_small_cifar": ("00:30:00", "00:10:00",
                         "MEASURED. T_diag = 987.8 s = 16.5 min per arm; ~18 min of job. This is"
                         " the PER-ARM figure; see GROUPED below for the default."),
+    # ------------------------------------------------------------------------------------------
+    # CIFAR-100. DERIVED, not measured, but on a firm basis: the images are the same 50 000
+    # 32x32x3 samples under the same 45k/5k split and the same augmentation, and the architecture
+    # is the CIFAR-10 one with a wider head (e.g. resnet20: 275 572 parameters against 269 722,
+    # +2.2%). Every row below is therefore its CIFAR-10 counterpart's MEASURED value, unchanged;
+    # the headroom already in those values covers the head. Run the calibration job first anyway.
+    # ------------------------------------------------------------------------------------------
+    "cnn_gn_cifar100": ("00:20:00", "00:10:00", "DERIVED from cnn_gn_cifar (MEASURED, 46.0 s)."),
+    "vit_micro_cifar100": ("00:25:00", "00:10:00",
+                           "DERIVED from vit_micro_cifar (MEASURED, 67.4 s)."),
+    "resnet20_cifar100": ("01:05:00", "00:10:00",
+                          "DERIVED from resnet20_cifar (MEASURED, 360.3 s)."),
+    "cct_2_3x2_cifar100": ("00:45:00", "00:10:00",
+                           "DERIVED from cct_2_3x2_cifar (MEASURED, 237.5 s)."),
+    "resnet50_cifar100": ("01:15:00", "00:15:00",
+                          "DERIVED from resnet50_cifar (MEASURED, 2822.8 s). PER-ARM figure."),
+    "vit_small_cifar100": ("00:30:00", "00:10:00",
+                           "DERIVED from vit_small_cifar (MEASURED, 987.8 s). PER-ARM figure."),
+    # ------------------------------------------------------------------------------------------
+    # ImageNet-1K. ESTIMATED — nothing here has been measured on this cluster, which is exactly
+    # why every one of these models also gets a calibration job, and why the estimates are
+    # deliberately generous. The reasoning, for the 32 px benches: 1 256 167 training images
+    # against CIFAR's 45 000 is 27.9x the samples per epoch, and 40 epochs against 30 or 50, so
+    # the GPU work is 22-37x its CIFAR counterpart's. That is NOT the binding constraint —
+    # decoding 1.28 M JPEGs per epoch is, even pre-resized to 32 px, which is what --cpus-per-task
+    # is raised for below. The figures assume the pre-resized `imagenet32` tree (stage_imagenet.sh
+    # resize); reading full-resolution JPEGs instead costs roughly another 5-10x and will not fit.
+    # For the two 224 px benches: ~1250 img/s fwd+bwd for fp32 ResNet-50 on one H100, i.e. ~17 min
+    # an epoch and ~8.5 h for the 30-epoch reference arm, hence 12 h per arm with headroom.
+    # ------------------------------------------------------------------------------------------
+    "cnn_gn_imagenet": ("03:30:00", "00:30:00",
+                        "ESTIMATED. Data-loader bound; ~2 h/arm expected at 40 epochs."),
+    "vit_micro_imagenet": ("03:30:00", "00:30:00",
+                           "ESTIMATED. Data-loader bound; ~2 h/arm expected at 40 epochs."),
+    "resnet20_imagenet": ("05:00:00", "00:30:00",
+                          "ESTIMATED. 27.9x resnet20_cifar's samples/epoch, 40 epochs."),
+    "cct_2_3x2_imagenet": ("05:00:00", "00:30:00",
+                           "ESTIMATED. 27.9x cct_2_3x2_cifar's samples/epoch, 40 epochs."),
+    "resnet50_imagenet": ("12:00:00", "01:00:00",
+                          "ESTIMATED. ~1250 img/s fp32 on one H100 = ~8.5 h for 30 epochs."),
+    "vit_small_imagenet": ("12:00:00", "01:00:00",
+                           "ESTIMATED. ViT-S/16 at 224 px, 197 tokens, fp32, 30 epochs."),
+}
+
+# ``(--gpus, --cpus-per-task, --mem)``. The default is the MIG slice every pre-existing job has
+# always used and is left untouched. ImageNet needs two things it does not give: CPU cores, because
+# 1.28 M JPEG decodes per epoch is the actual bottleneck for the small models, and — at 224 px — a
+# whole H100, since a 10 GB slice does not hold ResNet-50's activations at batch 256, let alone
+# ekfac's cached inputs on top.
+DEFAULT_RESOURCES = ("h100_1g.10gb:1", 8, "16G")
+RESOURCES = {
+    "cnn_gn_imagenet": ("h100_1g.10gb:1", 16, "64G"),
+    "vit_micro_imagenet": ("h100_1g.10gb:1", 16, "64G"),
+    "resnet20_imagenet": ("h100_1g.10gb:1", 16, "64G"),
+    "cct_2_3x2_imagenet": ("h100_1g.10gb:1", 16, "64G"),
+    "resnet50_imagenet": ("h100:1", 16, "96G"),
+    "vit_small_imagenet": ("h100:1", 16, "96G"),
 }
 
 # Models whose seven arms are ALSO emitted as a single job (``train_<model>_all.sh``), with the
@@ -101,6 +158,21 @@ GROUPED = {
     "vit_small_cifar": ("02:45:00",
                         "MEASURED. 7 x T_diag = 7 x 987.8 s = 1.92 h of training; +6% validation"
                         " and ~40 s setup = ~2.1 h."),
+    # CIFAR-100: 7 x the DERIVED per-arm figure, i.e. the CIFAR-10 grouped value unchanged.
+    "cnn_gn_cifar100": ("00:20:00", "DERIVED from cnn_gn_cifar (MEASURED)."),
+    "vit_micro_cifar100": ("00:25:00", "DERIVED from vit_micro_cifar (MEASURED)."),
+    "resnet20_cifar100": ("01:05:00", "DERIVED from resnet20_cifar (MEASURED)."),
+    "cct_2_3x2_cifar100": ("00:45:00", "DERIVED from cct_2_3x2_cifar (MEASURED)."),
+    "resnet50_cifar100": ("07:00:00", "DERIVED from resnet50_cifar (MEASURED)."),
+    "vit_small_cifar100": ("02:45:00", "DERIVED from vit_small_cifar (MEASURED)."),
+    # ImageNet-1K @32px: 7 arms in one job, which is what keeps the WCT budget derived in-process
+    # rather than hand-copied. The two 224 px models are deliberately absent — 7 x ~8.5 h does not
+    # fit any reasonable queue, so they run as seven per-arm jobs and the reference arm's measured
+    # total_s has to be passed to the other six by hand. See benchmarks/slurm/imagenet/README.md.
+    "cnn_gn_imagenet": ("16:00:00", "ESTIMATED. 7 x ~2 h, data-loader bound."),
+    "vit_micro_imagenet": ("16:00:00", "ESTIMATED. 7 x ~2 h, data-loader bound."),
+    "resnet20_imagenet": ("23:00:00", "ESTIMATED. 7 x ~3 h."),
+    "cct_2_3x2_imagenet": ("23:00:00", "ESTIMATED. 7 x ~3 h."),
 }
 
 # Hyperparameter sweeps: one job per swept model, running every arm once per value into
@@ -152,15 +224,16 @@ HEADER = """#!/bin/bash
 
 #SBATCH --account=def-msh-ab
 #SBATCH --job-name={job_name}
-#SBATCH --gpus=h100_1g.10gb:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=16G
+#SBATCH --gpus={gpus}
+#SBATCH --cpus-per-task={cpus}
+#SBATCH --mem={mem}
 #SBATCH --time={time}
 #SBATCH --output=benchmarks/slurm/logs/%x-%j.out
 
 # --time: {time_basis}
-# Dataset: {dataset} must be staged under $SLURM_SUBMIT_DIR/dataset (compute nodes have no
-# internet; --no-allow-download turns a missing dataset into a clear error, not a timeout).
+# Dataset: {dataset}, read from $DATA_ROOT (default $SLURM_SUBMIT_DIR/dataset; an ImageNet job
+# overrides it with the node-local copy it stages below). Compute nodes have no internet, and
+# --no-allow-download turns a missing dataset into a clear error rather than a network timeout.
 
 set -euo pipefail
 cd "$SLURM_SUBMIT_DIR"
@@ -174,7 +247,34 @@ pip install --no-index --upgrade pip
 pip install --no-index -r requirements-cluster.txt
 
 export PYTHONPATH="$SLURM_SUBMIT_DIR/src:$SLURM_SUBMIT_DIR"
+{data_staging}DATA_ROOT="${{DATA_ROOT:-$SLURM_SUBMIT_DIR/dataset}}"
 
+"""
+
+# Inserted into HEADER just before ``DATA_ROOT=``, per dataset. Only ImageNet needs one: a
+# torchvision archive is a handful of files read once, whereas ImageNet is 1.28 M small files
+# whose per-epoch random read pattern is what a shared parallel filesystem is worst at. Alliance
+# Canada's guidance is to keep such a dataset as one archive on /project and expand it into the
+# node-local $SLURM_TMPDIR at job start, which is what this does.
+IMAGENET_STAGING = """
+# ---------------------------------------------------------------------------------------------
+# Stage ImageNet into node-local storage. IMAGENET_ARCHIVE must point at a tar of the ImageFolder
+# tree stage_imagenet.sh (beside this script) produces: train/<wnid>/*.JPEG + val/<wnid>/*.JPEG
+# under a single `imagenet/` or `imagenet32/` directory. The 32 px benches want the pre-resized
+# `imagenet32` tar; the 224 px ones want the full-resolution `imagenet` tar.
+#   sbatch --export=ALL,IMAGENET_ARCHIVE=/project/def-msh-ab/blgr/{archive}.tar ...
+# Set IMAGENET_SKIP_STAGING=1 to read from $SLURM_SUBMIT_DIR/dataset instead (smoke runs).
+# ---------------------------------------------------------------------------------------------
+IMAGENET_ARCHIVE="${{IMAGENET_ARCHIVE:-}}"
+if [ -z "${{IMAGENET_SKIP_STAGING:-}}" ] && [ -n "$IMAGENET_ARCHIVE" ]; then
+  echo "staging $IMAGENET_ARCHIVE into $SLURM_TMPDIR/dataset ..."
+  mkdir -p "$SLURM_TMPDIR/dataset"
+  time tar -xf "$IMAGENET_ARCHIVE" -C "$SLURM_TMPDIR/dataset"
+  export DATA_ROOT="$SLURM_TMPDIR/dataset"
+  echo "staged: $(ls "$SLURM_TMPDIR/dataset")"
+elif [ -z "${{IMAGENET_SKIP_STAGING:-}}" ]; then
+  echo "IMAGENET_ARCHIVE unset - reading from the submit directory; slow. See the header." >&2
+fi
 """
 
 CALIBRATION_BODY = """# Calibration: 2 short epochs of every arm on a 5000-example training subset, printing per-arm
@@ -186,25 +286,25 @@ python -m benchmarks.{model}.bench \\
   --epochs 2 \\
   --budget-mode epochs \\
   --train-subset 5000 \\
-  --num-workers 8 \\
+  --num-workers {workers} \\
   --no-allow-download \\
-  --data-root "$SLURM_SUBMIT_DIR/dataset" \\
-  --output-dir "$SLURM_SUBMIT_DIR/benchmarks/outputs/{model}/_calibration"
+  --data-root "$DATA_ROOT" \\
+  --output-dir "$SLURM_SUBMIT_DIR/benchmarks/outputs/{out}/_calibration"
 """
 
 REFERENCE_BODY = """# Reference arm (plan_lot8.md §0.7): a fixed {epochs}-epoch run whose measured elapsed time is
 # every other arm's wall-clock budget. Read it back from the run's manifest.json:
-#   python -c "import json;print(json.load(open('benchmarks/outputs/{model}/{arm}/manifest.json'))['arms']['{arm}']['total_s'])"
+#   python -c "import json;print(json.load(open('benchmarks/outputs/{out}/{arm}/manifest.json'))['arms']['{arm}']['total_s'])"
 # and pass it to the other jobs as --wct-budget (they default to WCT_BUDGET below).
 python -m benchmarks.{model}.bench \\
   --arms {arm} \\
   --epochs {epochs} \\
   --budget-mode epochs \\
-  --num-workers 8 \\
+  --num-workers {workers} \\
   --no-allow-download \\
-  --data-root "$SLURM_SUBMIT_DIR/dataset" \\
+  --data-root "$DATA_ROOT" \\
   --checkpoints 0,0.01,0.1,0.5,1 \\
-  --output-dir "$SLURM_SUBMIT_DIR/benchmarks/outputs/{model}/{arm}"
+  --output-dir "$SLURM_SUBMIT_DIR/benchmarks/outputs/{out}/{arm}"
 """
 
 BUDGETED_BODY = """# One WCT-budgeted arm (plan_lot8.md §0.7). WCT_BUDGET is the reference arm's measured elapsed
@@ -225,11 +325,11 @@ python -m benchmarks.{model}.bench \\
   --arms {arm} \\
   --epochs {epochs} \\
   "${{BUDGET_ARGS[@]}}" \\
-  --num-workers 8 \\
+  --num-workers {workers} \\
   --no-allow-download \\
-  --data-root "$SLURM_SUBMIT_DIR/dataset" \\
+  --data-root "$DATA_ROOT" \\
   --checkpoints 0,0.01,0.1,0.5,1 \\
-  --output-dir "$SLURM_SUBMIT_DIR/benchmarks/outputs/{model}/{arm}"
+  --output-dir "$SLURM_SUBMIT_DIR/benchmarks/outputs/{out}/{arm}"
 """
 
 
@@ -238,7 +338,7 @@ GROUPED_BODY = """# All {n_arms} arms of one model, in ONE job (plan_exp_step1.m
 # time becomes every other arm's budget, and one combined report is written at the end. No
 # WCT_BUDGET to pass, no dispatcher, no --dependency.
 #
-# The per-arm alternative is benchmarks/slurm/train_{model}_<arm>.sh, one job each; use it if you
+# The per-arm alternative is benchmarks/slurm/{jobdir}train_{model}_<arm>.sh, one job each; use it if you
 # need the arms to run concurrently. A crash in one arm no longer costs the others either way:
 # main() rewrites records.csv/epochs.csv/summary.md/manifest.json after every completed arm.
 #
@@ -255,11 +355,11 @@ python -m benchmarks.{model}.bench \\
   --reference-arm {reference} \\
   --max-epoch-factor 3 \\
   --lr-schedule budget \\
-  --num-workers 8 \\
+  --num-workers {workers} \\
   --no-allow-download \\
-  --data-root "$SLURM_SUBMIT_DIR/dataset" \\
+  --data-root "$DATA_ROOT" \\
   --checkpoints 0,0.01,0.1,0.5,1 \\
-  --output-dir "$SLURM_SUBMIT_DIR/benchmarks/outputs/{model}"
+  --output-dir "$SLURM_SUBMIT_DIR/benchmarks/outputs/{out}"
 """
 
 
@@ -279,9 +379,9 @@ for VALUE in {values}; do
     --max-epoch-factor 3 \\
     --lr-schedule budget \\
     --{flag} "$VALUE" \\
-    --num-workers 8 \\
+    --num-workers {workers} \\
     --no-allow-download \\
-    --data-root "$SLURM_SUBMIT_DIR/dataset" \\
+    --data-root "$DATA_ROOT" \\
     --checkpoints 0,0.01,0.1,0.5,1 \\
     --output-dir "$SLURM_SUBMIT_DIR/benchmarks/outputs/sweeps/{model}_{flag}/$VALUE"
 done
@@ -296,7 +396,8 @@ V0_SEEDS_BODY = """# Extra training seeds for the Fisher-drift campaign (plan_ex
 # No --lr-schedule flag on purpose: seed 0 ran under the default 'nominal' schedule and these must
 # match it to be comparable, which is the whole point. Do not add --lr-schedule budget here.
 #
-# Writes to benchmarks/outputs/seeds/<model>/seed<n>/, leaving outputs/<model>/ (seed 0) untouched.
+# Writes to benchmarks/outputs/seeds/<model>/seed<n>/ -- deliberately ungrouped, its axis being
+# the seed -- leaving outputs/<group>/<model>/ (seed 0) untouched.
 # One failing run does not abort the rest; the job exits non-zero at the end if any failed.
 FAILED=()
 run_one () {{  # $1 = model, $2 = seed
@@ -307,9 +408,9 @@ run_one () {{  # $1 = model, $2 = seed
     --budget-mode wct \\
     --reference-arm {reference} \\
     --max-epoch-factor 3 \\
-    --num-workers 8 \\
+    --num-workers {workers} \\
     --no-allow-download \\
-    --data-root "$SLURM_SUBMIT_DIR/dataset" \\
+    --data-root "$DATA_ROOT" \\
     --checkpoints 0,0.01,0.1,0.5,1 \\
     --no-plot \\
     --output-dir "$SLURM_SUBMIT_DIR/benchmarks/outputs/seeds/$1/seed$2" \\
@@ -333,76 +434,120 @@ def dataset_of(bench) -> str:
 
 
 def write(filename: str, text: str) -> None:
+    """``filename`` may carry a one-level prefix (``cifar100/train_x_diag.sh``) — the bench's
+    ``output_group``, so the jobs of a dataset sit together exactly as its results do.
+    """
     path = SLURM_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     path.chmod(0o755)
     print(f"wrote {path.relative_to(SLURM_DIR.parents[1])}")
+
+
+def workers_of(bench) -> int:
+    """``--num-workers`` = ``--cpus-per-task``: the dataloader is the only multi-process consumer
+    in these jobs, and on ImageNet it is the binding one (1.28 M JPEG decodes per epoch).
+    """
+    return RESOURCES.get(bench.name, DEFAULT_RESOURCES)[1]
+
+
+def header(bench, dataset: str = "", **kwargs) -> str:
+    """``HEADER`` with this bench's resource profile and dataset staging filled in.
+
+    ``dataset`` overrides the name printed in the header comment, for the one job that spans
+    several benches (``train_v0_seeds.sh``); the staging block still follows ``bench``.
+    """
+    gpus, cpus, mem = RESOURCES.get(bench.name, DEFAULT_RESOURCES)
+    dataset = dataset or dataset_of(bench)
+    staging = ""
+    if dataset_of(bench) == "imagenet":
+        # ``imagenet32`` for the downsampled benches, ``imagenet`` for the native ones — the same
+        # directory name ``common.data.imagenet_root`` looks for, derived from the bench's own
+        # configured resolution rather than from its name.
+        img_size = bench.build_data.keywords["img_size"]
+        staging = IMAGENET_STAGING.format(
+            archive="imagenet" if img_size >= 64 else f"imagenet{img_size}"
+        )
+    return HEADER.format(gpus=gpus, cpus=cpus, mem=mem, dataset=dataset,
+                         data_staging=staging, **kwargs)
 
 
 def main() -> None:
     benches = discover_benchmarks()
     for name, bench in sorted(benches.items()):
         train_time, calib_time, basis = WALLTIME[name]
-        dataset = dataset_of(bench)
+        # ``output_group`` is one string used three times: the job subdirectory, the results
+        # subdirectory, and nothing else. Empty for every CIFAR-10/MNIST bench, which therefore
+        # keeps the flat layout its existing results and jobs already use.
+        jobdir = f"{bench.output_group}/" if bench.output_group else ""
+        out = f"{bench.output_group}/{name}" if bench.output_group else name
+
+        filename = f"{jobdir}calibrate_{name}.sh"
         write(
-            f"calibrate_{name}.sh",
-            HEADER.format(
+            filename,
+            header(
+                bench,
                 title=f"{bench.title()}: calibration pass, all arms, 2 epochs on a 5k subset.",
-                filename=f"calibrate_{name}.sh", job_name=f"cal_{name}", time=calib_time,
-                dataset=dataset,
+                filename=filename, job_name=f"cal_{name}", time=calib_time,
                 time_basis=("2 epochs x %d arms on a 5000-example subset; dominated by env setup "
                             "and the first-step hook/eigendecomposition warm-up, not by training. "
                             "Generous on purpose." % len(bench.arms)),
             )
-            + CALIBRATION_BODY.format(model=name, arms=" ".join(bench.arms)),
+            + CALIBRATION_BODY.format(model=name, out=out, workers=workers_of(bench),
+                                     arms=" ".join(bench.arms)),
         )
         if name in GROUPED:
             grouped_time, grouped_basis = GROUPED[name]
-            filename = f"train_{name}_all.sh"
+            filename = f"{jobdir}train_{name}_all.sh"
             write(
                 filename,
-                HEADER.format(
+                header(
+                    bench,
                     title=(f"{bench.title()}, all {len(bench.arms)} arms in one job. "
-                           f"Writes to benchmarks/outputs/{name}/."),
+                           f"Writes to benchmarks/outputs/{out}/."),
                     filename=filename, job_name=f"{name}_all", time=grouped_time,
-                    time_basis=grouped_basis, dataset=dataset,
+                    time_basis=grouped_basis,
                 )
-                + GROUPED_BODY.format(model=name, arms=" ".join(bench.arms),
-                                      epochs=bench.epochs, reference=REFERENCE_ARM,
-                                      n_arms=len(bench.arms)),
+                + GROUPED_BODY.format(model=name, out=out, jobdir=jobdir,
+                                      arms=" ".join(bench.arms), epochs=bench.epochs,
+                                      workers=workers_of(bench),
+                                      reference=REFERENCE_ARM, n_arms=len(bench.arms)),
             )
 
         for flag, values, sweep_time in SWEEPS.get(name, []):
-            filename = f"sweep_{name}_{flag}.sh"
+            filename = f"{jobdir}sweep_{name}_{flag}.sh"
             write(
                 filename,
-                HEADER.format(
+                header(
+                    bench,
                     title=(f"{bench.title()}: --{flag} sweep over {values}, all "
                            f"{len(bench.arms)} arms per value. Writes to "
                            f"benchmarks/outputs/sweeps/{name}_{flag}/<value>/."),
                     filename=filename, job_name=f"{name}_{flag}_sweep", time=sweep_time,
                     time_basis=(f"{len(values)} values x {len(bench.arms)} arms x T_reference; "
                                 f"see SWEEPS in generate_jobs.py for the per-value measurement."),
-                    dataset=dataset,
                 )
                 + SWEEP_BODY.format(model=name, flag=flag, values=" ".join(values),
                                     arms=" ".join(bench.arms), epochs=bench.epochs,
+                                    workers=workers_of(bench),
                                     reference=REFERENCE_ARM, n_arms=len(bench.arms)),
             )
 
         for arm in bench.arms:
-            filename = f"train_{name}_{arm}.sh"
+            filename = f"{jobdir}train_{name}_{arm}.sh"
             body = (REFERENCE_BODY if arm == REFERENCE_ARM else BUDGETED_BODY).format(
-                model=name, arm=arm, epochs=bench.epochs, filename=filename
+                model=name, out=out, arm=arm, epochs=bench.epochs, filename=filename,
+                workers=workers_of(bench),
             )
             write(
                 filename,
-                HEADER.format(
+                header(
+                    bench,
                     title=(f"{bench.title()}, arm={arm}"
                            + (" (WCT reference arm)" if arm == REFERENCE_ARM else "")
-                           + f". Writes to benchmarks/outputs/{name}/{arm}/."),
+                           + f". Writes to benchmarks/outputs/{out}/{arm}/."),
                     filename=filename, job_name=f"{name}_{arm}", time=train_time,
-                    time_basis=basis, dataset=dataset,
+                    time_basis=basis,
                 ) + body,
             )
 
@@ -416,12 +561,13 @@ def write_v0_seeds(benches) -> None:
         for model in V0_SEEDS
         for seed in V0_SEEDS[model]
     )
-    datasets = sorted({dataset_of(benches[m]) for m in V0_SEEDS})
     filename = "train_v0_seeds.sh"
     total = sum(len(v) for v in V0_SEEDS.values())
     write(
         filename,
-        HEADER.format(
+        header(
+            benches["mlp_ln_mnist"],  # every model in V0_SEEDS shares the default MIG profile
+            dataset=" and ".join(sorted({dataset_of(benches[m]) for m in V0_SEEDS})),
             title=(f"Fisher-drift campaign: {total} extra training seeds over "
                    f"{len(V0_SEEDS)} models, arms={'+'.join(V0_SEED_ARMS)} only. "
                    f"Writes to benchmarks/outputs/seeds/<model>/seed<n>/."),
@@ -429,10 +575,9 @@ def write_v0_seeds(benches) -> None:
             time_basis=("MEASURED. 2 x T_diag per (model, seed): 24.4 min for one full sweep of "
                         "the five models; 4 regime-A seeds + 2 regime-B seeds = 62 min of "
                         "training, plus ~2 min of eval and ~40 s of setup."),
-            dataset=" and ".join(datasets),
         )
         + V0_SEEDS_BODY.format(arms=" ".join(V0_SEED_ARMS), reference=REFERENCE_ARM,
-                               invocations=invocations),
+                               workers=DEFAULT_RESOURCES[1], invocations=invocations),
     )
 
 

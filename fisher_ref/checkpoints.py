@@ -2,12 +2,18 @@
 (``docs/reports/plan_exp_draft.md`` §3.5; lot 0 of its §9).
 
 The campaign does not train anything. Its θ axis is the trajectory checkpoints the benchmark
-harness already writes, in two layouts:
+harness already writes, in three layouts:
 
 ```
-benchmarks/outputs/<model>/<arm>/ckpt_{0,0.01,0.1,0.5,1}.pt        # seed 0, up to 7 arms
-benchmarks/outputs/seeds/<model>/seed<n>/<arm>/ckpt_*.pt           # extra seeds, arms diag + adamw
+benchmarks/outputs/<model>/<arm>/ckpt_{0,0.01,0.1,0.5,1}.pt          # seed 0, up to 7 arms
+benchmarks/outputs/<group>/<model>/<arm>/ckpt_*.pt                   # ... grouped by dataset
+benchmarks/outputs/seeds/<model>/seed<n>/<arm>/ckpt_*.pt             # extra seeds, diag + adamw
 ```
+
+``<group>`` is a bench's ``output_group`` (``mnist``, ``cifar10``, ``cifar100``, ``imagenet``), and
+only a directory named after a *declared* group is descended into — never a bare guess, so
+``_calibration`` and legacy trees such as ``outputs/lot8_cifar10/`` cannot be mistaken for one.
+Both layouts coexist on purpose: a model's results do not move when its bench gains a group.
 
 Three rules, all of them consequences of the wall-clock-time protocol, and all enforced here rather
 than left to each consumer:
@@ -26,7 +32,11 @@ than left to each consumer:
 
 The network is rebuilt through its own ``bench.build_model``, with the architecture variants
 (``cnn_gn_cifar``'s ``--norm``) taken from the run's ``manifest.json`` — so a ``bn`` run cannot be
-silently reloaded into a ``gn`` network.
+silently reloaded into a ``gn`` network. Which bench that is comes from the manifest too
+(``config["model"]``), **not** from the run directory's name: ``--output-dir`` is free-form, and
+A2's BatchNorm variant lives in ``outputs/cifar10/cnn_gn_cifar_bn/`` with no folder of that name
+``benchmarks/``. :attr:`RunRef.model` remains the directory label a consumer groups by;
+:attr:`RunRef.bench_name` is what rebuilds the network.
 
 A run launched with ``--checkpoint-optimizer-state`` also carries the optimizer's own state
 (``LoadedCheckpoint.optimizer_state``: its ``state_dict`` plus, for ``AdaFisherMulti``, the EMA'd
@@ -50,10 +60,32 @@ from benchmarks.common.runner import BENCHMARKS_DIR, Benchmark, discover_benchma
 
 DEFAULT_OUTPUTS_ROOT = BENCHMARKS_DIR / "outputs"
 SEEDS_DIRNAME = "seeds"
+
+
+def _output_groups() -> frozenset:
+    """The ``output_group`` values the benches declare — the only directory names ``discover_runs``
+    will treat as a dataset grouping rather than as a model.
+    """
+    if not _BENCH_CACHE:
+        _BENCH_CACHE.update(discover_benchmarks())
+    return frozenset(b.output_group for b in _BENCH_CACHE.values() if b.output_group)
+
 _CKPT_RE = re.compile(r"^ckpt_(?P<fraction>[0-9]*\.?[0-9]+)\.pt$")
 _SEED_RE = re.compile(r"^seed(?P<seed>\d+)$")
 #: Keys only the post-denominator-fix writer emits (``plan_exp_draft.md`` §3.5, rule 3).
 REQUIRED_PAYLOAD_KEYS = ("total_steps", "scheduled")
+
+#: Run directories whose name is not a ``benchmarks/<name>/`` folder, written before
+#: ``manifest.json`` recorded the bench that produced it. ``cnn_gn_cifar_bn`` is A2's BatchNorm
+#: variant — ``--norm bn --output-dir outputs/cifar10/cnn_gn_cifar_bn`` — and it is precisely the
+#: protocol P2 (``plan_exp_draft.md`` §7) compares the GroupNorm one against, so leaving its 28
+#: checkpoints unloadable was not an option. Its manifest already carries ``norm: "bn"``, so
+#: :meth:`RunRef.model_kwargs` rebuilds it correctly once the *bench* is resolved.
+#:
+#: **New runs need no entry here**: ``runner.main`` writes ``config["model"]``. This map is a
+#: compatibility shim for result trees that already exist, not a naming convention to extend — a
+#: new architecture variant is a ``model_choices`` entry on its bench, not a new directory name.
+_LEGACY_BENCH_OF_DIRECTORY = {"cnn_gn_cifar_bn": "cnn_gn_cifar"}
 
 
 @dataclass(frozen=True)
@@ -71,11 +103,29 @@ class RunRef:
     def fractions(self) -> Tuple[float, ...]:
         return tuple(sorted(self.checkpoints))
 
+    @property
+    def config(self) -> Mapping[str, Any]:
+        return ((self.manifest or {}).get("config", {}) or {}) if self.manifest else {}
+
+    @property
+    def bench_name(self) -> str:
+        """The ``benchmarks/<name>/bench.py`` that produced this run.
+
+        **Not** the same thing as :attr:`model`, which is the run *directory*'s name and stays the
+        label a consumer groups and plots by (``cnn_gn_cifar`` and ``cnn_gn_cifar_bn`` are two
+        different runs and must not collapse into one). ``--output-dir`` is free-form, so the
+        directory name is a label, never an identifier: the manifest is the authority, and
+        :data:`_LEGACY_BENCH_OF_DIRECTORY` covers the trees written before it recorded this.
+        """
+        recorded = self.config.get("model")
+        if recorded:
+            return str(recorded)
+        return _LEGACY_BENCH_OF_DIRECTORY.get(self.model, self.model)
+
     def model_kwargs(self) -> Dict[str, Any]:
         """The architecture variants this run was built with, read from its manifest."""
-        bench = _bench(self.model)
-        config = (self.manifest or {}).get("config", {}) if self.manifest else {}
-        return {key: config[key] for key in bench.model_choices if key in config}
+        bench = _bench(self.bench_name)
+        return {key: self.config[key] for key in bench.model_choices if key in self.config}
 
     def summary(self) -> Mapping[str, Any]:
         """This arm's entry in the run's ``manifest.json`` (steps, epochs, test accuracy, ...)."""
@@ -122,7 +172,11 @@ def _bench(model: str) -> Benchmark:
     if not _BENCH_CACHE:
         _BENCH_CACHE.update(discover_benchmarks())
     if model not in _BENCH_CACHE:
-        raise KeyError(f"no benchmarks/{model}/bench.py; known models: {sorted(_BENCH_CACHE)}")
+        raise KeyError(
+            f"no benchmarks/{model}/bench.py; known models: {sorted(_BENCH_CACHE)}. If this is a "
+            f"run directory name rather than a bench name, its manifest.json predates "
+            f"config['model'] — add it to fisher_ref.checkpoints._LEGACY_BENCH_OF_DIRECTORY."
+        )
     return _BENCH_CACHE[model]
 
 
@@ -189,6 +243,10 @@ def discover_runs(
                         continue
                     runs += _runs_under(seed_dir, seeded_model_dir.name, int(match.group("seed")))
             continue
+        if model_dir.name in _output_groups():
+            for grouped in sorted(p for p in model_dir.iterdir() if p.is_dir()):
+                runs += _runs_under(grouped, grouped.name, None)
+            continue
         runs += _runs_under(model_dir, model_dir.name, None)
 
     def keep(run: RunRef) -> bool:
@@ -235,7 +293,7 @@ def load_theta(
 
     model: nn.Module
     if build_model:
-        bench = _bench(run.model)
+        bench = _bench(run.bench_name)
         model = bench.build_model(**run.model_kwargs())
         model.load_state_dict(payload["model_state_dict"])
         model.to(device)

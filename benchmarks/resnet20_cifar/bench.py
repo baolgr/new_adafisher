@@ -31,6 +31,7 @@ BENCH = Benchmark(
     hparams=HParams(lr=1e-3, baseline_lr=1e-3, weight_decay=5e-4, lam=1e-3, conv_sua=False),
     epochs=50,
     batch_size=128,
+    output_group="cifar10",
 )
 
 if __name__ == "__main__":

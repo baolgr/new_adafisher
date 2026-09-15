@@ -48,9 +48,15 @@
 #                                                            total ~57 min
 #                          Set A1_BLOCK_SPECTRA=0 to drop the last 970 s and keep the trace shares.
 #
-# Prerequisites, both verified present on rorqual:/home/blgr/new_adafisher —
-#   dataset/MNIST                                    (compute nodes have no internet)
-#   benchmarks/outputs/mlp_ln_mnist/diag/ckpt_0.5.pt (campaign 1, post-denominator-fix)
+# Prerequisites on rorqual:/home/blgr/new_adafisher —
+#   dataset/MNIST   (compute nodes have no internet)
+#   a post-denominator-fix mlp_ln_mnist/diag checkpoint at fraction 0.5 (campaign 1), in EITHER
+#   layout: benchmarks/outputs/mnist/mlp_ln_mnist/diag/ or the pre-migration
+#   benchmarks/outputs/mlp_ln_mnist/diag/. Stated as a requirement rather than a path because the
+#   driver locates it through fisher_ref.checkpoints.discover_runs, which reads both layouts —
+#   so this line does not have to be resynchronised the day the cluster's outputs/ tree is
+#   grouped by dataset, and cannot silently claim to have "verified" a path on the wrong side of
+#   that migration. A missing checkpoint is a clear SystemExit from the driver, not a wrong result.
 # ---------------------------------------------------------------------------------------------
 
 set -euo pipefail

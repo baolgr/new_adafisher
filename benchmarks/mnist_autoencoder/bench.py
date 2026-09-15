@@ -36,6 +36,7 @@ BENCH = Benchmark(
     hparams=HParams(),  # CLAUDE.md's "Selecting a mode" defaults, untuned (plan_lot7.md §6)
     epochs=20,
     batch_size=500,  # lots 1 and 7's batch size
+    output_group="mnist",
 )
 
 if __name__ == "__main__":
