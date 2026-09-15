@@ -24,3 +24,6 @@ fisher_ref/outputs/**/*.pt
 benchmarks/archives/
 
 .DS_Store
+
+# LaTeX reports: sources and build artefacts both live on disk, never in the repo.
+docs/latex/
