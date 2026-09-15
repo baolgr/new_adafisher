@@ -53,6 +53,8 @@ if str(_SRC) not in sys.path:  # the editable install's .pth is inert in this sa
 
 from adafisher_modes.factors import extract_patches  # noqa: E402
 
+from .conventions import assert_sample_independent, reference_mode  # noqa: E402
+
 KINDS: Tuple[str, ...] = ("linear", "conv", "norm")
 
 _CHANNEL_FIRST_NORMS = (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.GroupNorm)
@@ -319,6 +321,82 @@ def capture(model: nn.Module,
 # ----------------------------------------------------------------------------------------------
 # Per-sample gradients
 # ----------------------------------------------------------------------------------------------
+
+
+@dataclass
+class ProbeColumn:
+    """One ``(micro-batch, root column)`` step of a traversal, with the capture live.
+
+    ``capturer`` holds every selected layer's ``(a, g)`` for exactly the examples ``start:stop`` and
+    exactly this column of ``Lambda^{1/2}``; it is reused on the next iteration, so a consumer that
+    needs the tensors beyond the current step must copy them.
+    """
+
+    capturer: "Capture"
+    start: int
+    stop: int
+    column: int
+    n_columns: int
+    outputs: Tensor
+
+    @property
+    def n_examples(self) -> int:
+        return self.stop - self.start
+
+
+def iter_probe_columns(
+    model: nn.Module,
+    inputs: Tensor,
+    targets: Tensor,
+    *,
+    source: str,
+    modules: Mapping[str, nn.Module],
+    loss: str = "cross_entropy",
+    k: int = 1,
+    batch_size: int = 256,
+    dtype: torch.dtype = torch.float64,
+    device: object = "cpu",
+    generator: Optional[torch.Generator] = None,
+    check_independence: bool = True,
+) -> Iterator[ProbeColumn]:
+    """Walk the probe set once, yielding the live capture per ``(micro-batch, root column)``.
+
+    The single definition of "how a reference or a structure is accumulated": one forward per
+    micro-batch under :func:`~fisher_ref.conventions.reference_mode`, one backward per column of the
+    root, seeded with ``inputs=[batch]`` — never ``inputs=params``, which silently prunes the first
+    module's statistic (this module's header, point 1).
+
+    It is a generator because two consumers need it and one of them needs it **twice**: EKFAC's
+    eigenvalues ``s_ij`` can only be accumulated once ``Q_A`` and ``Q_G`` are known, i.e. after a
+    first pass has built ``A`` and ``G``. And because both consumers must see the *same* probes and
+    the same Monte-Carlo draws — with two independent loops, ``‖R − K‖`` would carry a sampling
+    difference between reference and approximation that no metric could tell from structure error
+    (``plan_exp_lot2.md`` §0.2).
+    """
+    from .sources import output_root  # noqa: PLC0415 - avoids a cycle at import time
+
+    n_probes = int(inputs.shape[0])
+    checked = not check_independence
+    with reference_mode(model), Capture(model, modules) as capturer:
+        for start in range(0, n_probes, batch_size):
+            stop = min(start + batch_size, n_probes)
+            batch = inputs[start:stop].to(device=device, dtype=dtype).detach().requires_grad_(True)
+            batch_targets = targets[start:stop].to(device=device)
+            if not checked and stop - start > 2:
+                assert_sample_independent(model, batch.detach(), k=2)
+                checked = True
+
+            capturer.reset()
+            outputs = model(batch)
+            root = output_root(outputs.detach(), batch_targets, source=source, loss=loss, k=k,
+                               generator=generator)
+            for column in range(root.n_columns):
+                torch.autograd.grad(
+                    outputs, [batch], grad_outputs=root.column(column),
+                    retain_graph=(column < root.n_columns - 1),
+                )
+                yield ProbeColumn(capturer=capturer, start=start, stop=stop, column=column,
+                                  n_columns=root.n_columns, outputs=outputs)
 
 
 def per_sample_gradients(layer: CapturedLayer) -> Dict[str, Tensor]:

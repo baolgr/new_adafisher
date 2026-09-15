@@ -34,9 +34,8 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from ..capture import Capture, capturable_modules, coverage, per_sample_gradients
-from ..conventions import REFERENCE_DTYPE, assert_sample_independent, reference_mode, run_metadata
-from ..sources import output_root
+from ..capture import capturable_modules, coverage, iter_probe_columns, per_sample_gradients
+from ..conventions import REFERENCE_DTYPE, run_metadata
 
 
 @dataclass(frozen=True)
@@ -87,6 +86,49 @@ class ParamLayout:
             )
         return slice(start, stop)
 
+    def augmented_permutation(self, module_name: str) -> Tensor:
+        """Index vector taking this module's block from ``named_parameters()`` order into the
+        bias-augmented ``rvec([W | b])`` order the Kronecker formulas are written in.
+
+        ``block_augmented = block_named[perm][:, perm]``. This is the permutation
+        ``plan_exp_lot1.md`` §0.5 deferred to "the lot that has a K-FAC to compare against": a
+        reference stacks ``rvec(W)`` then ``b``, two contiguous parameters, while ``G (x) A`` with a
+        bias-augmented ``A`` interleaves the bias as the last *column* of every output row. Same
+        entries, different order — which is exactly how T3 failed on its first run.
+
+        Identity when the module has no bias. Raises for a normalisation layer, whose
+        ``(gamma, beta)`` block is Hadamard-structured and has no ``[W | b]`` reading at all
+        (``plan_lot5.md`` §0.1).
+        """
+        prefix = f"{module_name}." if module_name else ""
+        weight_shape = self.shapes.get(prefix + "weight")
+        if weight_shape is None:
+            raise KeyError(f"module {module_name!r} has no weight in this layout")
+        if len(weight_shape) < 2:
+            raise NotImplementedError(
+                f"{module_name!r} has a 1-D weight {tuple(weight_shape)}: a normalisation layer's "
+                "block is Hadamard-structured, not rvec([W | b]) (plan_lot5.md §0.1)"
+            )
+        d_out = int(weight_shape[0])
+        d_in = int(weight_shape.numel() // d_out)
+        base = self.block_slice(module_name).start
+        offset = self.slices[prefix + "weight"].start - base
+        bias_slice = self.slices.get(prefix + "bias")
+        if bias_slice is None:
+            return torch.arange(offset, offset + d_out * d_in)
+        bias_offset = bias_slice.start - base
+        perm = torch.empty(d_out * (d_in + 1), dtype=torch.long)
+        for row in range(d_out):
+            span = slice(row * (d_in + 1), row * (d_in + 1) + d_in)
+            perm[span] = torch.arange(offset + row * d_in, offset + (row + 1) * d_in)
+            perm[row * (d_in + 1) + d_in] = bias_offset + row
+        return perm
+
+
+def to_augmented(block: Tensor, perm: Tensor) -> Tensor:
+    """Reorder a block from ``named_parameters()`` order into ``rvec([W | b])`` order."""
+    return block[perm][:, perm]
+
 
 @dataclass
 class DenseReference:
@@ -129,11 +171,20 @@ class DenseReference:
     def diag(self) -> Tensor:
         return self.matrix.diagonal()
 
+    def fro(self) -> Tensor:
+        """``‖·‖_F``. Recorded in :meth:`metadata` for a reason: ``plan_exp_lot1.md`` §6.3 left HF1
+        unresolved because three gaps were reported against two different denominators and only the
+        train-side norm was stored, so no reader could re-normalise them. Every reference now
+        carries its own trace and norm (``plan_exp_lot2.md`` §0.1).
+        """
+        return self.fro2().sqrt()
+
     def metadata(self, extra: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
         meta = run_metadata({
             "protocol": "P1", "regime": "A", "source": self.source, "loss": self.loss,
             "n_probes": self.n_probes, "n_columns": self.n_columns, "n_rows": self.n_rows,
             "P": self.P, "probe_digest": self.probe_digest,
+            "trace": float(self.trace()), "fro": float(self.fro()),
         })
         if extra:
             meta.update(dict(extra))
@@ -235,42 +286,28 @@ def build_dense_reference(
     matrix = torch.zeros(layout.P, layout.P, dtype=dtype, device=device)
     n_probes = int(inputs.shape[0])
     n_columns = 0
-    checked = not check_independence
+    rows: Optional[Tensor] = None
 
-    with reference_mode(model), Capture(model, selected) as capturer:
-        for start in range(0, n_probes, batch_size):
-            stop = min(start + batch_size, n_probes)
-            batch = inputs[start:stop].to(device=device, dtype=dtype).detach().requires_grad_(True)
-            batch_targets = targets[start:stop].to(device=device)
-            if not checked and stop - start > 2:
-                assert_sample_independent(model, batch.detach(), k=2)
-                checked = True
-
-            capturer.reset()
-            outputs = model(batch)
-            root = output_root(outputs.detach(), batch_targets, source=source, loss=loss, k=k,
-                               generator=generator)
-            n_columns = root.n_columns
-
-            rows = torch.empty(stop - start, layout.P, dtype=dtype, device=device)
-            for column in range(root.n_columns):
-                torch.autograd.grad(
-                    outputs, [batch], grad_outputs=root.column(column),
-                    retain_graph=(column < root.n_columns - 1),
-                )
-                written = []
-                for layer in capturer:
-                    for p_name, gradient in per_sample_gradients(layer).items():
-                        full = f"{layer.name}.{p_name}" if layer.name else p_name
-                        rows[:, layout.slices[full]] = gradient.reshape(stop - start, -1)
-                        written.append(full)
-                if set(written) != set(layout.names):
-                    raise RuntimeError(
-                        "the capture did not fill every column of U — missing "
-                        f"{sorted(set(layout.names) - set(written))}, unexpected "
-                        f"{sorted(set(written) - set(layout.names))}"
-                    )
-                matrix.addmm_(rows.T, rows)
+    for step in iter_probe_columns(model, inputs, targets, source=source, modules=selected,
+                                   loss=loss, k=k, batch_size=batch_size, dtype=dtype,
+                                   device=device, generator=generator,
+                                   check_independence=check_independence):
+        n_columns = step.n_columns
+        if rows is None or rows.shape[0] != step.n_examples:
+            rows = torch.empty(step.n_examples, layout.P, dtype=dtype, device=device)
+        written = []
+        for layer in step.capturer:
+            for p_name, gradient in per_sample_gradients(layer).items():
+                full = f"{layer.name}.{p_name}" if layer.name else p_name
+                rows[:, layout.slices[full]] = gradient.reshape(step.n_examples, -1)
+                written.append(full)
+        if set(written) != set(layout.names):
+            raise RuntimeError(
+                "the capture did not fill every column of U — missing "
+                f"{sorted(set(layout.names) - set(written))}, unexpected "
+                f"{sorted(set(written) - set(layout.names))}"
+            )
+        matrix.addmm_(rows.T, rows)
 
     matrix /= n_probes
     symmetrize_(matrix)

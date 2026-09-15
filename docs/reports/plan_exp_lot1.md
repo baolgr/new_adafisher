@@ -478,6 +478,15 @@ should be inflated by only ~12 %, not 60 %.
 record `trace` and `‖·‖_F` for *every* reference built — plus reporting all three gaps against a
 common denominator. Until then, do **not** quote the val/test result as licence to pool.
 
+> **Resolved at lot 2 — see `plan_exp_lot2.md` §5.1.** The guess above ("a `‖F_val‖` about 1.6×
+> `‖F_train‖` would reconcile all three") was **right**, and the reason it was rejected here was
+> wrong: the inflation is not noise, it is signal. The model is more confident on the points it
+> trained on, so `Λ_n` and with it the whole Fisher are *smaller* there — measured
+> `‖F_val‖ = 1.30 ‖F_train‖` and `‖F_test‖ = 1.59 ‖F_train‖`. Against a symmetric denominator the
+> three gaps order coherently (`val/test 0.380 < train/val 0.408 < train/test 0.561`). The lasting
+> consequence is that **HF1 has a scale component and a direction component**, so it is settled by
+> M1's `cos_F` and not by the raw Frobenius gaps reported above.
+
 ### 6.4 Spectra and the per-layer blocks
 
 | | `λ_max` | `rank(1e-12)` | `κ` |

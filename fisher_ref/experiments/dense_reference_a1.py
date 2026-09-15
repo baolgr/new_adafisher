@@ -105,6 +105,11 @@ def relative(a: torch.Tensor, b: torch.Tensor, block: int = 4096) -> float:
     The one-liner would allocate a third ``P x P`` tensor (5.68 GB here) at the exact moment four
     references are already live — the host-side twin of the device-side trap ``symmetrize_`` closes.
     """
+    difference_sq, reference_sq = _gap_sums(a, b, block)
+    return (difference_sq / reference_sq) ** 0.5
+
+
+def _gap_sums(a: torch.Tensor, b: torch.Tensor, block: int) -> "tuple":
     difference_sq = 0.0
     reference_sq = 0.0
     for start in range(0, a.shape[0], block):
@@ -112,10 +117,33 @@ def relative(a: torch.Tensor, b: torch.Tensor, block: int = 4096) -> float:
         rows_b = b[start:stop]
         difference_sq += float((a[start:stop] - rows_b).pow(2).sum())
         reference_sq += float(rows_b.pow(2).sum())
-    return (difference_sq / reference_sq) ** 0.5
+    return difference_sq, reference_sq
 
 
-def build(model, inputs, targets, source: str, tag: str) -> "tuple":
+def gap(a: torch.Tensor, b: torch.Tensor, block: int = 4096) -> dict:
+    """``||a - b||_F`` with **both** operands' norms, not just a ratio.
+
+    ``plan_exp_lot1.md`` §6.3 reported three gaps against two different denominators and stored
+    only one of them, which is why its val/test result could not be reconciled with its train/test
+    one. Recording the absolute distance and both norms makes every ratio recoverable after the
+    fact (``plan_exp_lot2.md`` §0.1).
+    """
+    difference_sq, b_sq = _gap_sums(a, b, block)
+    a_sq = float(sum(a[s:s + block].pow(2).sum() for s in range(0, a.shape[0], block)))
+    return {"abs": difference_sq ** 0.5, "fro_a": a_sq ** 0.5, "fro_b": b_sq ** 0.5,
+            "rel_to_b": (difference_sq / b_sq) ** 0.5,
+            "rel_to_a": (difference_sq / a_sq) ** 0.5,
+            "rel_to_geom": difference_sq ** 0.5 / (a_sq * b_sq) ** 0.25}
+
+
+#: Trace and Frobenius norm of every reference this script builds, keyed by the name the gaps use.
+#: ``plan_exp_lot1.md`` §6.3 could not be resolved because only the train-side norms were kept, so
+#: the three held-out gaps sat on two different denominators with no way to re-normalise them
+#: (``plan_exp_lot2.md`` §0.1).
+NORMS: dict = {}
+
+
+def build(model, inputs, targets, source: str, tag: str, name: str) -> "tuple":
     started = time.perf_counter()
     reference = build_dense_reference(model, inputs, targets, source=source, batch_size=BATCH,
                                       device=DEVICE, probe_digest=tag, modules=MODULES)
@@ -126,9 +154,11 @@ def build(model, inputs, targets, source: str, tag: str) -> "tuple":
     reference.matrix = matrix                      # free the device copy before the next build
     if DEVICE.startswith("cuda"):
         torch.cuda.empty_cache()
-    print(f"  {source:<10} {tag:<12} P={reference.P}  rows={reference.n_rows:<7} "
-          f"{elapsed:7.1f}s  {gigabytes(matrix):5.2f} GB  peak device {peak_device_gb():5.2f} GB",
-          flush=True)
+    NORMS[name] = {"trace": float(reference.trace()), "fro": float(reference.fro()),
+                   "n_probes": reference.n_probes, "source": source, "probe_digest": tag}
+    print(f"  {name:<10} {source:<10} {tag:<12} P={reference.P}  rows={reference.n_rows:<7} "
+          f"{elapsed:7.1f}s  ||.||_F={NORMS[name]['fro']:.4f}  "
+          f"peak device {peak_device_gb():5.2f} GB", flush=True)
     return reference, elapsed
 
 
@@ -185,8 +215,8 @@ def main() -> None:
 
     model = loaded.model
     print("\nbuilds:", flush=True)
-    fisher, t_fisher = build(model, x_train, y_train, "type2", train.digest[:12])
-    empirical, t_empirical = build(model, x_train, y_train, "empirical", train.digest[:12])
+    fisher, t_fisher = build(model, x_train, y_train, "type2", train.digest[:12], "F_train")
+    empirical, t_empirical = build(model, x_train, y_train, "empirical", train.digest[:12], "E_hat")
 
     summary = {
         "model": MODEL, "arm": ARM, "seed": run.seed, "fraction": FRACTION,
@@ -195,10 +225,10 @@ def main() -> None:
         "batch_size": BATCH, "device": DEVICE, "modules": MODULES,
         "seconds": {"type2": t_fisher, "empirical": t_empirical},
         "peak_device_gb": peak_device_gb(),
-        "probe_digest": {"train": train.digest, "val": val.digest},
-        "trace": {"F": float(fisher.trace()), "E_hat": float(empirical.trace())},
-        "fro": {"F": float(torch.linalg.matrix_norm(fisher.matrix)),
-                "E_hat": float(torch.linalg.matrix_norm(empirical.matrix))},
+        "probe_digest": {"train": train.digest, "val": val.digest, "test": test.digest},
+        # Every reference's own trace and norm, so any gap below can be re-normalised by a reader:
+        # the failure plan_exp_lot1.md §6.3 could not diagnose (plan_exp_lot2.md §0.1).
+        "norms": NORMS,
         "checkpoint": loaded.metadata(),
     }
 
@@ -213,13 +243,16 @@ def main() -> None:
         (out / "reference_summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True))
 
     # Q1: the source error, with no structure involved.
-    summary["source_gap"] = relative(empirical.matrix, fisher.matrix)
+    summary["gaps"] = {}
+    summary["gaps"]["source"] = gap(empirical.matrix, fisher.matrix)
+    summary["source_gap"] = summary["gaps"]["source"]["rel_to_b"]
     print(f"\nsource gap  ||E_hat - F||_F / ||F||_F = {summary['source_gap']:.4f}", flush=True)
     checkpoint_summary()
 
     # HF1: the same reference on probes the run never trained on.
-    val_fisher, _ = build(model, x_val, y_val, "type2", val.digest[:12])
-    summary["train_val_gap"] = relative(val_fisher.matrix, fisher.matrix)
+    val_fisher, _ = build(model, x_val, y_val, "type2", val.digest[:12], "F_val")
+    summary["gaps"]["train_val"] = gap(val_fisher.matrix, fisher.matrix)
+    summary["train_val_gap"] = summary["gaps"]["train_val"]["rel_to_b"]
     print(f"train/val   ||F_val - F_train||_F / ||F_train||_F = "
           f"{summary['train_val_gap']:.4f}", flush=True)
 
@@ -227,9 +260,11 @@ def main() -> None:
     # neither to select anything), but val is a slice of the training set while the test set is a
     # separate collection. Same n on both sides, so this gap is read against the same floor as the
     # train/val one. Pooling them for a lower HF1 floor is justified only if it is small.
-    test_fisher, _ = build(model, x_test, y_test, "type2", test.digest[:12])
-    summary["val_test_gap"] = relative(test_fisher.matrix, val_fisher.matrix)
-    summary["train_test_gap"] = relative(test_fisher.matrix, fisher.matrix)
+    test_fisher, _ = build(model, x_test, y_test, "type2", test.digest[:12], "F_test")
+    summary["gaps"]["val_test"] = gap(test_fisher.matrix, val_fisher.matrix)
+    summary["val_test_gap"] = summary["gaps"]["val_test"]["rel_to_b"]
+    summary["gaps"]["train_test"] = gap(test_fisher.matrix, fisher.matrix)
+    summary["train_test_gap"] = summary["gaps"]["train_test"]["rel_to_b"]
     print(f"val/test    ||F_test - F_val||_F / ||F_val||_F = {summary['val_test_gap']:.4f}"
           f"   (train/test = {summary['train_test_gap']:.4f})", flush=True)
     del val_fisher, test_fisher
@@ -237,9 +272,10 @@ def main() -> None:
 
     # The noise floor of F itself (plan_exp_draft.md §3.4): one two-way split gives its scale.
     half = N_PROBES // 2
-    first, _ = build(model, x_train[:half], y_train[:half], "type2", "half1")
-    second, _ = build(model, x_train[half:], y_train[half:], "type2", "half2")
-    summary["noise_floor"] = relative(first.matrix, second.matrix)
+    first, _ = build(model, x_train[:half], y_train[:half], "type2", "half1", "F_half1")
+    second, _ = build(model, x_train[half:], y_train[half:], "type2", "half2", "F_half2")
+    summary["gaps"]["noise_floor"] = gap(first.matrix, second.matrix)
+    summary["noise_floor"] = summary["gaps"]["noise_floor"]["rel_to_b"]
     # sigma_N, the error of a single N-probe estimate: F^(1) - F^(2) is the difference of two
     # independent N/2 estimates, so it is sqrt(2) * sigma_{N/2} = 2 * sigma_N. Two *independent*
     # N-probe estimates (train vs val) would differ by sqrt(2) * sigma_N under the null.

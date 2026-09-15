@@ -6,6 +6,7 @@ matrix in fp64); ``factor`` (regime B, per-layer Grams) is lot 4 and ``matfree``
 
 from __future__ import annotations
 
-from .dense import DenseReference, ParamLayout, build_dense_reference, symmetrize_
+from .dense import DenseReference, ParamLayout, build_dense_reference, symmetrize_, to_augmented
 
-__all__ = ["DenseReference", "ParamLayout", "build_dense_reference", "symmetrize_"]
+__all__ = ["DenseReference", "ParamLayout", "build_dense_reference", "symmetrize_",
+           "to_augmented"]
