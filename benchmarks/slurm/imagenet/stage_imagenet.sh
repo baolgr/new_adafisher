@@ -42,13 +42,25 @@ if [ "$MODE" = "full" ]; then
   echo "== val: flat, needs the ground truth to become an ImageFolder tree =="
   tar -xf "$TAR_DIR/ILSVRC2012_img_val.tar" -C "$OUT/val"
   # torchvision ships the official val ground truth as part of its ImageNet meta handling; the
-  # standard standalone way is the reference shell script from the PyTorch examples repository:
-  wget -qO- https://raw.githubusercontent.com/soumith/imagenetloader.torch/master/valprep.sh \
-    | bash -s -- || {
-      echo "valprep.sh could not be fetched. Any script that moves ILSVRC2012_val_*.JPEG into" >&2
-      echo "per-wnid directories works; the class names must match the train tree's." >&2
-      exit 1
-    }
+  # standard standalone way is the reference shell script from the PyTorch examples repository.
+  # It must run FROM the flat JPEG directory it reorganises in place. VALPREP_SCRIPT lets a
+  # compute node with no internet use a copy fetched ahead of time on the login node instead of
+  # wget-ing it at run time.
+  (
+    cd "$OUT/val"
+    if [ -n "${VALPREP_SCRIPT:-}" ]; then
+      bash "$VALPREP_SCRIPT"
+    else
+      wget -qO- https://raw.githubusercontent.com/soumith/imagenetloader.torch/master/valprep.sh \
+        | bash -s --
+    fi
+  ) || {
+    echo "valprep failed. Fetch it once on the login node and pass VALPREP_SCRIPT=<path> when" >&2
+    echo "running on a compute node with no internet. Any script that moves" >&2
+    echo "ILSVRC2012_val_*.JPEG into per-wnid directories works; the class names must match the" >&2
+    echo "train tree's." >&2
+    exit 1
+  }
   echo "done: $OUT"
   echo "tar it for the cluster:  tar -cf imagenet.tar -C '$(dirname "$OUT")' imagenet"
 
