@@ -16,7 +16,7 @@ use.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import torch
 import torch.nn as nn
@@ -58,11 +58,30 @@ def probe_gradient(model: nn.Module, inputs: Tensor, targets: Tensor,
     return gradient
 
 
-def rho(R: Tensor, K: BlockOps, gradient: Tensor, lam: float) -> NgdReport:
-    """M5. ``R_lam^{-1} g`` is solved once by Cholesky and reused for both denominator terms."""
-    size = R.shape[0]
-    identity = torch.eye(size, dtype=R.dtype, device=R.device)
-    factor = torch.linalg.cholesky(R + lam * identity)
+def damped_cholesky(R: Tensor, lam: float) -> Tensor:
+    """The Cholesky factor of ``R + lam I``, without materialising the identity.
+
+    ``R + lam * torch.eye(P)`` allocates a whole second ``P x P`` on top of the sum it returns; at
+    A1's first layer (``P = 25 120``, fp64) that is 5.05 GB of pure waste. Adding ``lam`` to the
+    diagonal of a clone is **bit-identical** — every off-diagonal entry of ``lam I`` is exactly
+    ``0.0``, and ``x + 0.0 == x`` for every finite ``x``.
+    """
+    damped = R.clone()
+    damped.diagonal().add_(lam)
+    return torch.linalg.cholesky(damped)
+
+
+def rho(R: Tensor, K: BlockOps, gradient: Tensor, lam: float, *,
+        factor: Optional[Tensor] = None) -> NgdReport:
+    """M5. ``R_lam^{-1} g`` is solved once by Cholesky and reused for both denominator terms.
+
+    ``factor`` is that Cholesky, when the caller already holds it. It depends on ``(R, lam)``
+    alone, so a caller sweeping the structures at a fixed ``lam`` otherwise re-factorises the same
+    matrix once per structure — six times over at A1's first layer, where one factorisation is
+    ``P^3/3 = 5.3e12`` flops and 5.05 GB.
+    """
+    if factor is None:
+        factor = damped_cholesky(R, lam)
     exact_direction = torch.cholesky_solve(gradient.reshape(-1, 1), factor).reshape(-1)
 
     direction = K.solve(gradient, lam)
@@ -76,4 +95,4 @@ def rho(R: Tensor, K: BlockOps, gradient: Tensor, lam: float) -> NgdReport:
     return NgdReport(rho=value, lam=lam, cos_directions=cos)
 
 
-__all__ = ["NgdReport", "probe_gradient", "rho"]
+__all__ = ["NgdReport", "damped_cholesky", "probe_gradient", "rho"]

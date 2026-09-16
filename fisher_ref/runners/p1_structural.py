@@ -67,9 +67,19 @@ def _layer_types(model: torch.nn.Module, example: torch.Tensor) -> Dict[str, str
 
 def analyse_layer(name: str, exact: torch.Tensor, entry, ekfac, kinds: Dict[str, str],
                   alphas: Sequence[float], source: str, defaults: Dict[str, Any],
-                  stein_max_p: int = 4096,
+                  stein_max_p: int = 4096, rho_max_p: Optional[int] = None,
                   gradient: Optional[torch.Tensor] = None) -> List[Dict[str, Any]]:
-    """Every structure available for one layer, at every damping — M1 always, M3/M5 per ``lambda``."""
+    """Every structure available for one layer, at every damping — M1 always, M3/M5 per ``lambda``.
+
+    M3 and M5 have **separate** size gates, because they cost separate things. M3 densifies ``K``
+    and solves ``R_lam X = K_lam`` with a ``P x P`` right-hand side — ``2 P^3`` flops and five live
+    ``P x P`` buffers per ``(structure, lambda)``. M5 solves against a *vector*, and its only
+    ``P x P`` work is one factorisation per ``lambda``, shared by every structure. At A1's first
+    layer that is ~9.5e14 flops against ~2.6e13. A job that cannot afford M3 can still afford M5,
+    and lot 2's first cluster run conflated the two and so skipped both on the block carrying 63 %
+    of ``tr(F)``. ``rho_max_p`` defaults to ``stein_max_p``, leaving that run's behaviour unchanged.
+    """
+    rho_max_p = stein_max_p if rho_max_p is None else rho_max_p
     rows: List[Dict[str, Any]] = []
     common = {**defaults, "layer": name, "layer_type": kinds.get(name, "other"), "source": source}
 
@@ -99,6 +109,7 @@ def analyse_layer(name: str, exact: torch.Tensor, entry, ekfac, kinds: Dict[str,
                        {"metric": "cross_term_share_diagonal", "value": diagonal_share}],
                       **common, structure="exact_block")
 
+    grid = metrics.lambda_grid(exact, alphas)
     for structure_name, block in structures.items():
         rows += _rows(metrics.frobenius(exact, block).as_rows(), **common,
                       structure=structure_name)
@@ -109,12 +120,26 @@ def analyse_layer(name: str, exact: torch.Tensor, entry, ekfac, kinds: Dict[str,
             rows += _rows([{"metric": "stein_kl_skipped_P", "value": float(exact.shape[0])}],
                           **common, structure=structure_name)
             continue
-        for alpha, lam in metrics.lambda_grid(exact, alphas).items():
+        for alpha, lam in grid.items():
             rows += _rows(metrics.stein_kl(exact, block, lam).as_rows(), **common,
                           structure=structure_name, lambda_alpha=alpha)
-            if gradient is not None:
-                rows += _rows(metrics.rho(exact, block, gradient, lam).as_rows(), **common,
-                              structure=structure_name, lambda_alpha=alpha)
+
+    # M5 sweeps lambda on the *outside*: R_lam's Cholesky depends on (R, lam) alone, so one
+    # factorisation serves every structure at that lambda -- five instead of thirty at A1's first
+    # layer, with only ever one 5.05 GB factor live.
+    if gradient is not None:
+        if exact.shape[0] > rho_max_p:
+            for structure_name in structures:
+                rows += _rows([{"metric": "rho_skipped_P", "value": float(exact.shape[0])}],
+                              **common, structure=structure_name)
+        else:
+            for alpha, lam in grid.items():
+                factor = metrics.damped_cholesky(exact, lam)
+                for structure_name, block in structures.items():
+                    rows += _rows(
+                        metrics.rho(exact, block, gradient, lam, factor=factor).as_rows(),
+                        **common, structure=structure_name, lambda_alpha=alpha)
+                del factor
     return rows
 
 
@@ -169,7 +194,8 @@ def run_fraction(bench, run, fraction: float, args, meta: Dict[str, Any]) -> Lis
                 layer_gradient = layer_gradient[perm]
             rows += analyse_layer(name, block, entry, ekfacs.get(name), kinds, args.alphas,
                                   source, {**defaults, "reference": reference_name},
-                                  stein_max_p=args.stein_max_p, gradient=layer_gradient)
+                                  stein_max_p=args.stein_max_p, rho_max_p=args.rho_max_p,
+                                  gradient=layer_gradient)
 
         ranges = [(name, reference.layout.block_slice(name)) for name in factors]
         names, coupling = metrics.coupling_matrix(reference.matrix, ranges)
@@ -220,6 +246,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stein-max-p", type=int, default=4096,
                         help="skip M3 on blocks wider than this: its Cholesky is P^3/3 per "
                              "(structure, lambda) and would dominate the job at A1's first layer")
+    parser.add_argument("--rho-max-p", type=int, default=None,
+                        help="skip M5 on blocks wider than this (default: --stein-max-p). M5 is "
+                             "far cheaper than M3 -- one Cholesky per lambda, shared by every "
+                             "structure, and vector solves -- so raise this alone to reach a block "
+                             "M3 cannot afford")
     parser.add_argument("--modules", nargs="*", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--data-root", default=str(ROOT / "benchmarks" / "data"))

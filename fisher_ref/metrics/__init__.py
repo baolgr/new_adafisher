@@ -14,11 +14,11 @@ from __future__ import annotations
 from .coupling import coupling_matrix, offdiagonal_mass
 from .frobenius import FrobeniusReport, dense_gap, frobenius
 from .kron_diag import KroneckerReport, best_kronecker_fit, kronecker_structure
-from .ngd import NgdReport, probe_gradient, rho
+from .ngd import NgdReport, damped_cholesky, probe_gradient, rho
 from .noise_floor import NoiseFloor, convergence_curve, noise_floor
 from .stein import SteinReport, dense_logdet, lambda_grid, stein_kl
 
 __all__ = ["FrobeniusReport", "KroneckerReport", "NgdReport", "NoiseFloor", "SteinReport",
-           "best_kronecker_fit", "convergence_curve", "coupling_matrix", "dense_gap",
-           "dense_logdet", "frobenius", "kronecker_structure", "lambda_grid", "noise_floor",
-           "offdiagonal_mass", "probe_gradient", "rho", "stein_kl"]
+           "best_kronecker_fit", "convergence_curve", "coupling_matrix", "damped_cholesky",
+           "dense_gap", "dense_logdet", "frobenius", "kronecker_structure", "lambda_grid",
+           "noise_floor", "offdiagonal_mass", "probe_gradient", "rho", "stein_kl"]
