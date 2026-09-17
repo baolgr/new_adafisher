@@ -1,7 +1,10 @@
 # Auditing one AdaFisher step, and justifying every constant in it
 
 **Status.** §4 is a **finding**, verified against the paper and both reference implementations while
-writing this report. §5-§11 are a **proposal**: none of it has been run.
+writing this report. §4.7's five isolation experiments have since been **run** (§4.8, job 21274380);
+one genuinely new mechanism came out of it (the corrected average freezing `kfac` specifically under
+`TCov=100`), but none of the five variants breaks the primary benchmark's stall. §5-§11 remain a
+**proposal**: none of it has been run.
 
 ## 1. Why this report exists
 
@@ -297,6 +300,88 @@ because until they are done the quantity being swept is not well defined.
 Also worth doing while at it: re-tune `γ` over the paper's own grid `{0.1, …, 0.99}` under the
 corrected rule, since the published optimum belongs to the uncorrected one (§4.3).
 
+### 4.8 Results of §4.7's experiments: none of them break the stall, and one new mechanism
+
+**Run.** `benchmarks/slurm/mnist/audit_step_ema_correction.sh`, job 21274380 on `rorqual`
+(`h100_1g.10gb`, 00:10:04, exit 0). Implementation: `AdaFisherMulti(gamma=...)` overrides `gammas`
+with `(1-gamma, 1-gamma)`, which collapses the existing `update_running_avg(new, current, gammas)`
+formula to Eq. (3) exactly — no change to `ema.py` or any `approximations/*.py` file, and it applies
+uniformly to all five modes; `DiagApproximation(minmax_after_average=True)` moves the min-max call
+from each instantaneous `H_D_i`/`S_D_i` to the EMA'd accumulator read in `f_tilde()`. Both default
+to today's exact behaviour (`src/adafisher_modes/optimizer.py`, `approximations/diag.py`). Six
+configs, `--epochs 20 --budget-mode epochs` (fixed step count, no WCT confound, so every arm of
+every config gets exactly the same 2 200 steps and configs are directly comparable):
+
+| config | modes | `gamma` | `minmax_after_average` | `TCov` |
+|---|---|---|---|---|
+| A (baseline) | all 5 | none (`0.92/0.008`) | off | 100 |
+| B | all 5 | 0.8 | off | 100 |
+| C | diag | none | on | 100 |
+| D | diag | 0.8 | on | 100 |
+| E | all 5 | 0.8 | off | 1 |
+| F | all 5 | none | off | 1 |
+
+**Headline result: every config's `diag`/`ekfac`/`tkfac`/`tekfac` converges to the same final
+training loss, `0.7083`**, the exact value this benchmark's stall has been recorded at since lot 7.
+Neither the corrected average alone (B), the reordered min-max alone (C), both together (D), nor
+`TCov=1` (E, F) move the endpoint. **This is a third, independent line of evidence — after
+`lambda_vs_curvature.json`'s spectrum measurement and `warmup_sgd_baseline.json`'s SGD-placebo test
+(§0 above, `docs/reports/validation_noise_investigation.md` Steps 7-9) — that the EMA-scale defect
+of §4.2-§4.3 is not what causes this benchmark's stall.** Correcting it changes *how fast* training
+approaches the stuck point, not *whether* it gets stuck.
+
+**Two real, measured effects short of the endpoint, both on `diag`:**
+
+- **Under the default ("before") order, the corrected average slows the approach to the stall by
+  roughly 7 epochs.** `diag`'s first-epoch loss is `0.7252` in A (uncorrected) against `1.0306` in B
+  (corrected) — B does not reach `0.708x` until epoch 7-8, A reaches it by epoch 1. Both land on
+  `0.7083` by epoch 19. Consequence 2 of §4.3 (loss of effective averaging) is visible and real here;
+  consequence 1 (mis-scaled `F~_D`) is not, since the endpoint is unchanged.
+- **Under `minmax_after_average=True`, `gamma` has *no* measurable effect at all.** C and D are
+  bit-identical to 4 significant figures at every one of 20 epochs (`records.csv`'s per-step losses
+  match beyond 1e-7 for 2 197 of 2 200 steps, diverging by ~6e-8 relative at one step — floating-point
+  noise, not signal). This is the clean, direct confirmation of §4.4's own mechanism claim: once
+  min-max is read at the end of the pipeline, it is (up to the `epsilon` floor) invariant to whatever
+  absolute scale the EMA left its accumulator at, so the EMA's own coefficients stop mattering. It is
+  exactly the property that makes the *current* ("before") order the one where the EMA defect can
+  bite at all.
+
+**A new, previously undocumented mechanism: the corrected average alone freezes `kfac` (only
+`kfac`) under `TCov=100`.** In config B, `kfac`'s loss opens at `1.0665` and crawls to `1.0482` over
+the full 20 epochs (`records.csv`: `1.040/1.038` at the last two logged steps) — it never reaches the
+`0.708x` plateau every other mode (including `tkfac`, which also inverts two Kronecker factors)
+reaches by epoch 12-14. Config E (same `gamma=0.8`, `TCov=1`) rules out `gamma` itself as the cause:
+there `kfac` is back to `0.7058/0.7131`, indistinguishable from the `TCov=1` baseline (F) and from A.
+**Mechanism, read off the existing code rather than re-measured:** `kfac` seeds `A`/`B` with the
+identity at step 0 (`kfac.py:77`); after `k` `TCov`-cadence refreshes the seed's residual weight is
+`(1-gammas[0])^k` (`ema.py`). Under the implemented rule that is `0.08^k`, already established
+(`docs/reports/plan_exp_lot1.md`'s re-warm study) to need `k~10` refreshes (1 000 steps) to fall below
+`Lambda`. Under the *corrected* rule that exponent's base is `0.8`, not `0.08`: reaching the same
+`~1e-9` residual needs `k = ln(1e-9)/ln(0.8) ~ 93` refreshes, i.e. **~9 300 steps at `TCov=100`** —
+over four times this run's entire 2 200-step budget. So in config B, `kfac`'s `A`/`B` never leave the
+neighbourhood of the identity for the whole run, and its damped-and-inverted preconditioner stays
+close to a near-identity operator throughout — a *different, and here worse*, failure mode from the
+stall, not a step towards fixing it. `tkfac` is immune to the same slowdown for a structural reason,
+not luck: it always reads `Phi = Phi_raw/delta`, `Psi = Psi_raw/delta` (`tkfac.py`), which is exactly
+as scale-invariant to the EMA's absolute magnitude as `diag`'s read-time min-max is (§4.4's own
+argument, one level removed) — an identity-dominated `Phi_raw`/`Psi_raw`/`delta` triple still
+divides out to `tr(Phi)=tr(Psi)=1` by construction, so `tkfac` only slows down (like `ekfac`/
+`tekfac`, whose eigenbasis-projected `s*`/`Theta` estimator plays a similar, if less exact,
+normalising role), it does not freeze. Under `TCov=1` the same `0.8^k` seed decays over ~93 *real
+steps* instead of ~9 300, comfortably inside the 2 200-step budget either way — which is exactly why
+E does not show the freeze. **Read together with the re-warm study's own rule ("do not shorten a
+re-warm below `10*TCov`"): that rule itself is `gammas`-dependent, and would need to become
+`93*TCov` under a corrected average.** Not otherwise pursued here — it is a real, mechanistically
+understood effect, but a different question from the one this run was built to answer.
+
+**What this settles, and what it does not.** Settled: the EMA-scale/ordering defect identified in
+§4.2-§4.4 is not the primary benchmark's stall mechanism, corroborating
+`validation_noise_investigation.md`'s independent conclusion by a third method. Not settled: what
+*is* the stall's mechanism (still the saturated-sigmoid/overshoot hypothesis of §4.6 point 4, itself
+not directly tested here); whether the corrected average changes anything on a benchmark that does
+not already stall (only `mnist_autoencoder` was run); and whether `kfac`'s new freeze reproduces on
+another model or is specific to this bench's `TCov=100`/20-epoch/2 200-step combination.
+
 ## 5. Auditing the step by probing it, instead of reading it
 
 From here on, the report is method. The central idea is to stop reading the code and start measuring
@@ -474,8 +559,8 @@ empirical and the "type-2" Fisher at the stall point — both are implemented in
 
 | # | Action | Cost | Why here |
 |---|---|---|---|
-| 1 | Spectrum of the stored factors and where `lambda` falls in it, per layer, at existing checkpoints, all five modes | laptop, hours | confirms §4.4 by measurement and explains the `lambda` sweep's asymmetry |
-| 2 | §4.7's variants: Eq. (3)'s average, Algorithm 1's min-max order, the 2x2, `TCov = 1` | one benchmark, a handful of arms | the actual finding, turned into numbers |
+| 1 | **Done**, and then some: `lambda_vs_curvature.json`/`curvature_max_per_layer.json` (`docs/reports/validation_noise_investigation.md` Steps 7/10) cover all seven benchmark networks, all five modes, confirming `frac_damp_dom=1.0000` everywhere | laptop, hours | confirms §4.4 by measurement and explains the `lambda` sweep's asymmetry |
+| 2 | **Done** (§4.8, job 21274380): none of §4.7's variants break the primary benchmark's stall; one new mechanism found (the corrected average freezes `kfac` under `TCov=100`) | one benchmark, a handful of arms | the actual finding, turned into numbers |
 | 3 | Extract `M` by probing; compare against `A ⊗ B + lambda I` and against the exact dense `F` | laptop | audits S4-S7 exactly, without reading code |
 | 4 | One-step Newton and the prescribed-Hessian quadratic | laptop, minutes | correctness, currently untested |
 | 5 | Loss-scale test (`c = 0.1, 1, 10`) | one benchmark, seven arms | validates or invalidates every `lr`-based comparison so far |
