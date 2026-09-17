@@ -7,6 +7,13 @@ the EMA of Eq. (3). Reference: ``reference_repos/FisherAdapTune/scripts/adafishe
 (``AdaFisherBackbone._get_F_tilde``, lines 209-223) for the Kronecker/damping construction, and
 ``reference_repos/AdaFisher/optimizers/AdaFisher.py:412,431`` for where min-max is applied relative
 to the EMA. See docs/reports/plan.md §5.1 for why min-max defaults to on here.
+
+``minmax_after_average`` (``docs/reports/audit_step.md`` §2, §4.4, §4.7): Algorithm 1 of the paper
+normalises *after* averaging (line 4 computes the EMA of H_D/S_D, line 5 applies Eq. (4)'s min-max
+to the result), the opposite of the official code's order this class follows by default. Since
+min-max destroys any overall scale, the two orders are not equivalent when the EMA itself is
+mis-scaled (§4.3): "before" erases that mis-scaling, "after" does not. ``minmax_after_average=False``
+(default) is bit-identical to today's behaviour.
 """
 
 from __future__ import annotations
@@ -29,18 +36,20 @@ class DiagApproximation(FisherApproximation):
         Lambda: float = 1e-3,
         gammas: Sequence[float] = (0.92, 0.008),
         minmax_normalization: bool = True,
+        minmax_after_average: bool = False,
         epsilon: float = 1e-6,
     ) -> None:
         self.Lambda = Lambda
         self.gammas = gammas
         self.minmax_normalization = minmax_normalization
+        self.minmax_after_average = minmax_after_average
         self.epsilon = epsilon
         self._H: Dict[Module, Tensor] = {}
         self._S: Dict[Module, Tensor] = {}
 
     def update_input_factor(self, module: Module, h: Tensor, step: int) -> None:
         H_i = compute_h_diag(h, module)
-        if self.minmax_normalization:
+        if self.minmax_normalization and not self.minmax_after_average:
             H_i = min_max_normalization(H_i, self.epsilon)
         if step == 0:
             self._H[module] = H_i.new_ones(H_i.size(0))
@@ -48,7 +57,7 @@ class DiagApproximation(FisherApproximation):
 
     def update_output_factor(self, module: Module, s: Tensor, step: int) -> None:
         S_i = compute_s_diag(s, module)
-        if self.minmax_normalization:
+        if self.minmax_normalization and not self.minmax_after_average:
             S_i = min_max_normalization(S_i, self.epsilon)
         if step == 0:
             self._S[module] = S_i.new_ones(S_i.size(0))
@@ -67,6 +76,9 @@ class DiagApproximation(FisherApproximation):
         Frobenius-dominance tests of lot 2/3 (docs/reports/plan.md §6.1) will compare across modes.
         """
         H, S = self._H[module], self._S[module]
+        if self.minmax_normalization and self.minmax_after_average:
+            H = min_max_normalization(H, self.epsilon)
+            S = min_max_normalization(S, self.epsilon)
         return kron(H.unsqueeze(1), S.unsqueeze(0)).t() + self.Lambda
 
     def precondition(

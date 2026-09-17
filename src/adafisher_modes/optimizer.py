@@ -39,6 +39,21 @@ Lot 8 (docs/reports/plan_lot8.md §0.3, §0.4, §0.6) makes three changes here, 
 Lot-1 scope: no ``dist_training`` support yet (the original's distributed all-reduce over H, S,
 adafisher.py:210-214, has no equivalent here) — silently accepting and ignoring that flag would be
 worse than omitting it, so it is simply not part of this constructor yet.
+
+``gamma`` (``docs/reports/audit_step.md`` §4, §4.7): the published Eq. (3) time-average is
+``H^(t) = gamma*H^(t-1) + (1-gamma)*H_new``, one scalar with coefficients summing to 1. Both
+reference repositories instead compute ``0.08*old + 0.008*new`` at their own tuned
+``gammas=(0.92, 0.008)`` default — a discrepancy with the paper, not a porting bug (§4.2-§4.3).
+Passing ``gamma`` here reproduces Eq. (3) exactly through the existing ``update_running_avg(new,
+current, gammas)`` machinery unchanged: that function computes ``(1-gammas[0])*current +
+gammas[1]*new``, so ``gammas=(1-gamma, 1-gamma)`` collapses it to Eq. (3)'s single-coefficient
+form. ``gamma=None`` (default) leaves ``gammas`` exactly as passed — bit-identical to today's
+behaviour. When both are given, ``gamma`` wins.
+
+``minmax_after_average`` (``diag`` mode only, ``docs/reports/audit_step.md`` §4.4, §4.7): Algorithm
+1 applies Eq. (4)'s min-max normalisation after the EMA (its line 4 then line 5); the official code
+-- and this port's default -- does it before. Passed straight through to ``DiagApproximation``; see
+its own docstring for why the two orders are not equivalent.
 """
 
 from __future__ import annotations
@@ -67,10 +82,12 @@ class AdaFisherMulti(Optimizer):
         beta: float = 0.9,
         Lambda: float = 1e-3,
         gammas: Sequence[float] = (0.92, 0.008),
+        gamma: Optional[float] = None,
         TCov: int = 100,
         weight_decay: float = 0.0,
         fisher_mode: str = "diag",
         minmax_normalization: bool = True,
+        minmax_after_average: bool = False,
         fisher_batch_samples: Optional[int] = None,
         decoupled_weight_decay: bool = False,
         **mode_kwargs,
@@ -79,6 +96,8 @@ class AdaFisherMulti(Optimizer):
             raise ValueError(f"Unknown fisher_mode {fisher_mode!r}; available: {sorted(MODES)}")
         if fisher_batch_samples is not None and fisher_batch_samples < 1:
             raise ValueError(f"fisher_batch_samples must be >= 1 or None; got {fisher_batch_samples}")
+        if gamma is not None:
+            gammas = (1 - gamma, 1 - gamma)
         defaults = dict(lr=lr, beta=beta, weight_decay=weight_decay)
         self.model = model
         self.TCov = TCov
@@ -88,7 +107,11 @@ class AdaFisherMulti(Optimizer):
         self.modules: List[Module] = []
         self._owner: Dict[int, Module] = {}
         if fisher_mode == "diag":
-            mode_kwargs = {"minmax_normalization": minmax_normalization, **mode_kwargs}
+            mode_kwargs = {
+                "minmax_normalization": minmax_normalization,
+                "minmax_after_average": minmax_after_average,
+                **mode_kwargs,
+            }
         self.approx = MODES[fisher_mode](Lambda=Lambda, gammas=gammas, **mode_kwargs)
         self._prepare_model()
         super().__init__(model.parameters(), defaults)

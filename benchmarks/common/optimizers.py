@@ -42,11 +42,14 @@ class HParams:
     lam: float = 1e-3  # AdaFisherMulti's ``Lambda``
     beta: float = 0.9  # AdaFisher's beta_1, the momentum of m^(t)
     gammas: Tuple[float, float] = (0.92, 0.008)
+    gamma: Optional[float] = None  # overrides gammas with Eq. (3)'s published single-gamma rule
     tcov: int = 100
     t_inv: int = 100  # kfac, tkfac
     t_eig: int = 100  # ekfac, tekfac
     t_re: int = 1  # tekfac, T_RE of Alg. 1
     minmax: bool = True  # diag only; True = faithful to AdaFisher Eq. (4)
+    minmax_after_average: bool = False  # diag only; True = Algorithm 1's order instead of the
+                                         # official code's (audit_step.md §4.7)
     conv_sua: bool = False  # the four Kronecker modes, Conv2d only
     fisher_batch_samples: Optional[int] = None
     decoupled_wd: bool = False  # True = AdaFisherW / AdamW convention
@@ -89,6 +92,7 @@ def build_optimizer(arm: str, model: nn.Module, hp: HParams) -> Any:
         beta=hp.beta,
         Lambda=hp.lam,
         gammas=list(hp.gammas),
+        gamma=hp.gamma,
         TCov=hp.tcov,
         weight_decay=hp.weight_decay,
         fisher_mode=arm,
@@ -97,6 +101,7 @@ def build_optimizer(arm: str, model: nn.Module, hp: HParams) -> Any:
     )
     if arm == "diag":
         kwargs["minmax_normalization"] = hp.minmax
+        kwargs["minmax_after_average"] = hp.minmax_after_average
     else:
         kwargs["conv_sua"] = hp.conv_sua
         if arm in ("kfac", "tkfac"):
