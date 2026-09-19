@@ -15,10 +15,13 @@ dataset/
 benchmarks/slurm/logs/*.out
 fisher_ref/slurm/logs/*.out
 
-# The Fisher-drift campaign's own results. The summaries are the deliverable (plan_exp_draft.md
-# §13) and are small text, so they stay tracked; the spectra are binary blobs recomputable from
-# the checkpoint they came from, so they do not.
-fisher_ref/outputs/**/*.pt
+# The Fisher-drift campaign's own results: not tracked at all. The summaries were once kept in
+# the repository on the grounds that they are small text, but they are not — the measurement
+# drivers write per-step JSON, and on 2026-09-19 the tracked part of this directory measured
+# 899 MB across 121 files, three of them over GitHub's 100 MB per-file hard limit
+# (252.7, 163.2 and 118.3 MB). Everything here is recomputable from the checkpoint it came from.
+# Report-ready summaries belong in docs/reports/, which is tracked.
+fisher_ref/outputs/
 
 # Archived result trees moved aside between campaigns — gigabytes of checkpoints.
 benchmarks/archives/
