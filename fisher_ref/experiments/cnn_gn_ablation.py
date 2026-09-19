@@ -1,29 +1,33 @@
-"""Separates ``warmup_sgd_baseline.py``'s two Step-11 corrections on ``cnn_gn_cifar`` -- the one
-network where fixing both together made the mismatch between real ``kfac`` and the plain-momentum
-stand-in *worse*, not better (docs handoff: "il faut resoudre cette anomalie").
+"""Which of two corrections to the plain-momentum stand-in helped, and which hurt?
 
-Two independent changes went into that rerun, bundled into one job:
+On one network of three, ``cnn_gn_cifar``, fixing both together made the mismatch between real
+``kfac`` and the stand-in *worse*. Two independent changes went into that rerun, bundled into one
+job:
 
-  (a) the stand-in's schedule: ``Lambda + decay^k`` (a guess at the general shape) ->
-      ``(decay^k + sqrt(Lambda))^2`` (derived from kfac's actual two-factor formula, Step 11).
-  (b) the hooked/unhooked boundary: every parameter used to get the schedule's divisor -> only
-      parameters belonging to a module type ``AdaFisherMulti`` actually hooks get it. GroupNorm
-      (the one unhooked type among these three networks) now gets divisor 1, matching real
-      ``kfac``'s own fallback path, instead of the same shrinking divisor as everything else.
+(a) the stand-in's schedule: ``lam + decay^k`` (a guess at the general shape) became
+    ``(decay^k + sqrt(lam))^2``, which is derived from ``kfac``'s actual two-factor damping;
+(b) the hooked/unhooked boundary: every parameter used to get the schedule's divisor; now only
+    parameters belonging to a module type ``AdaFisherMulti`` actually hooks get it. ``GroupNorm``
+    -- the one unhooked type among these networks -- now gets divisor one, matching real ``kfac``'s
+    own fallback path, instead of the same shrinking divisor as everything else.
 
-This script runs the two combinations neither Step 9 nor Step 11 ran: corrected schedule with NO
-hooked boundary (isolates (a) alone), and the old schedule WITH the hooked boundary respected
-(isolates (b) alone) -- alongside the two combinations already measured (Step 9's original stand-
-in, and Step 11's corrected one), so all four cells of the 2x2 print side by side from one run.
+This script runs the two combinations neither earlier run covered -- corrected schedule with no
+hooked boundary (which isolates (a)), and the old schedule with the hooked boundary respected
+(which isolates (b)) -- alongside the two already measured, so all four cells of the two-by-two
+print side by side from one run.
 
-Reuses ``warmup_sgd_baseline.py``'s own ``WarmupMomentumSGD``/``hooked_param_ids`` unchanged --
-this script only supplies the ``hooked_ids`` argument that module's own ``run_variant()`` does not
-expose as a toggle. The real ``kfac`` baseline and the seed-noise floor are read back from its
-already-written ``warmup_sgd_baseline.json`` rather than re-run: neither one involves the stand-in,
-so nothing here can change them.
+It reuses ``warmup_sgd_baseline.py``'s own stand-in and hooked-parameter helper unchanged; this
+script only supplies the ``hooked_ids`` argument that module's ``run_variant()`` does not expose as
+a toggle. The real ``kfac`` baseline and the seed-noise floor are read back from that script's
+already-written JSON rather than re-run: neither involves the stand-in, so nothing here can change
+them.
 
-Env vars: same as ``warmup_sgd_baseline.py`` (WARMUP_SGD_EPOCHS, WARMUP_SGD_SEEDS,
-WARMUP_SGD_DEVICE, WARMUP_SGD_DATA_ROOT, WARMUP_SGD_NUM_WORKERS, WARMUP_SGD_ALLOW_DOWNLOAD).
+Environment variables: the same as ``warmup_sgd_baseline.py`` -- ``WARMUP_SGD_EPOCHS``,
+``WARMUP_SGD_SEEDS``, ``WARMUP_SGD_DEVICE``, ``WARMUP_SGD_DATA_ROOT``, ``WARMUP_SGD_NUM_WORKERS``,
+``WARMUP_SGD_ALLOW_DOWNLOAD``.
+
+Reads: ``fisher_ref/outputs/warmup_sgd_baseline.json``.
+Writes: ``fisher_ref/outputs/cnn_gn_ablation.json`` plus a table on standard output.
 """
 from __future__ import annotations
 

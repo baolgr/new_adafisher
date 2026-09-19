@@ -168,6 +168,89 @@ def test_loop_drives_budget_cosine_to_the_floor_by_the_budget() -> None:
     # one batch of the floor rather than exactly at it.
     assert _lr(optimizer) < BASE_LR * 0.02
 
+    # That bound is 4 to 10 orders of magnitude above the measured value (1e-11 to 1e-9 against
+    # 2e-5), so on its own it cannot fail. Sandwich it instead, from the records themselves.
+    #
+    # The hook fires between the previous step's record and this step's forward pass, so the
+    # elapsed time it was handed lies in
+    #     [ steps[-2].elapsed_s , steps[-1].elapsed_s - fwd_bwd_s - step_s ].
+    # The cosine decreases in that argument, so the final LR is pinned to within one batch's worth
+    # of the schedule — a two-sided bound with no constant in it.
+    assert len(steps) >= 2, "the fixture must take enough steps to bracket the last one"
+    last = steps[-1]
+    earliest = steps[-2].elapsed_s / 0.30
+    latest = (last.elapsed_s - last.fwd_bwd_s - last.step_s) / 0.30
+
+    def cosine(progress: float) -> float:
+        return BASE_LR * 0.5 * (1.0 + math.cos(math.pi * min(max(progress, 0.0), 1.0)))
+
+    assert cosine(latest) <= _lr(optimizer) <= cosine(earliest), (
+        f"final lr {_lr(optimizer):.3e} outside [{cosine(latest):.3e}, {cosine(earliest):.3e}]"
+    )
+    # Non-vacuous: the bracket is narrow, not the whole [0, BASE_LR] range.
+    assert cosine(earliest) < BASE_LR * 1e-3
+
+
+# ---------------------------------------------------------------------------------------------
+# What the `lr` column of epochs.csv means
+#
+# It used to mean three different things depending on how the epoch ended. Now it means one: the
+# rate that epoch's first step ran at.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_lr_column_is_the_rate_a_truncated_final_epoch_ran_at() -> None:
+    """The third meaning, and the hardest one to spot.
+
+    A budget- or step-truncated final epoch never steps the scheduler, so the value recorded for
+    it used to be whatever the *previous* epoch's ``scheduler.step()`` had left behind. With
+    ``lr=1.0`` halved per completed epoch and a run cut in the middle of epoch 1, the column read
+    ``[0.5, 0.5]`` — the same number twice, once meaning "the rate epoch 1 will use" and once
+    meaning "the rate epoch 1 did use". It now reads ``[1.0, 0.5]``: what each epoch was trained
+    at, with no reading required.
+    """
+    model = nn.Linear(2, 2)
+    optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.5)
+    steps, epochs = train_under_budget(
+        model, optimizer, _tiny_loader(batches=8), nn.MSELoss(),
+        budget_s=float("inf"), max_epochs=5, max_steps=12, scheduler=scheduler,
+        log_fn=lambda _m: None,
+    )
+    assert len(steps) == 12 and [e.steps for e in epochs] == [8, 12]  # epoch 1 cut at 4 of 8
+    assert [e.lr for e in epochs] == [1.0, 0.5]
+    # The scheduler stepped once, for the one completed epoch; the truncated one did not step it.
+    assert _lr(optimizer) == 0.5
+
+
+def test_lr_column_under_a_budget_schedule_is_the_rate_the_epoch_started_at() -> None:
+    """Under ``--lr-schedule budget`` the rate moves every batch, so one number per epoch can only
+    be one of them. The column holds the rate in force for that epoch's first step — the same rule
+    the per-epoch scheduler case obeys, where it happens to be the rate of every batch.
+
+    It used to hold the *last* batch's rate, which is a fourth meaning again.
+    """
+    model = nn.Linear(2, 2)
+    optimizer = torch.optim.SGD(model.parameters(), lr=BASE_LR)
+    inner = BudgetCosine(optimizer, budget_s=0.20)
+    seen: list = []
+
+    def recording_schedule(elapsed_s: float) -> None:
+        inner(elapsed_s)
+        seen.append(_lr(optimizer))
+
+    steps, epochs = train_under_budget(
+        model, optimizer, _tiny_loader(batches=8), nn.MSELoss(),
+        budget_s=0.20, max_epochs=10**9, lr_schedule=recording_schedule, log_fn=lambda _m: None,
+    )
+    # The hook fires once per processed batch, in order, so call i belongs to step i.
+    assert len(seen) == len(steps) >= 8 and len(epochs) >= 2
+    first_step_of_epoch = [0] + [e.steps for e in epochs[:-1]]
+    assert [e.lr for e in epochs] == [seen[i] for i in first_step_of_epoch]
+    # Non-vacuous: within an epoch the rate really does move, so "first" and "last" differ.
+    assert seen[0] > seen[epochs[0].steps - 1], "the LR is constant across an epoch here"
+    assert epochs[0].lr != seen[epochs[0].steps - 1], "the column holds the last batch's rate"
+
 
 def test_loop_without_lr_schedule_leaves_the_lr_untouched() -> None:
     """``lr_schedule=None`` is the default and must stay inert — every pre-existing test relies
@@ -263,5 +346,15 @@ def test_runner_anneals_the_unbudgeted_reference_arm_under_budget_mode(tmp_path)
 
     reference = _epoch_lrs(tmp_path / "epochs.csv")["diag"]
     assert len(reference) == epochs, "the reference arm runs exactly the nominal epoch count"
-    assert reference[-1] == pytest.approx(0.0, abs=1e-18), "it must reach the annealing floor"
-    assert reference[0] > 0.0
+    # ``lr`` is the rate each epoch actually ran at, so the four recorded values are the first four
+    # points of the nominal cosine — asserted exactly, which is strictly more than the two spot
+    # checks ("> 0" at the start, "== 0" at the end) this used to make.
+    #
+    # The floor itself is reached *after* the fourth epoch and therefore trains nothing, which is
+    # why it is not in the column any more. The property that matters — the arm is annealed, not
+    # parked at ``base_lr`` — is the whole shape.
+    base = 1e-2  # _synthetic_bench's HParams(lr=1e-2); the diag arm is the reference arm
+    expected = [base * 0.5 * (1.0 + math.cos(math.pi * k / epochs)) for k in range(epochs)]
+    assert reference == pytest.approx(expected, rel=1e-12, abs=1e-18)
+    assert reference[0] == pytest.approx(base), "epoch 0 trains at the base rate"
+    assert reference[-1] < base * 0.2, "and the last epoch well below it"

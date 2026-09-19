@@ -64,7 +64,7 @@ else
   BUDGET_ARGS=(--budget-mode epochs)
 fi
 
-python -m benchmarks.cnn_gn_imagenet.bench \
+python -m benchmarks.models.cnn_gn_imagenet.bench \
   --arms kfac \
   --epochs 40 \
   "${BUDGET_ARGS[@]}" \

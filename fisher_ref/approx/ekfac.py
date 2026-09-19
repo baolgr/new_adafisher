@@ -1,19 +1,42 @@
-"""EKFAC: K-FAC's eigenbasis with the **optimal** diagonal in it (``plan_exp_draft.md`` §4).
+"""EKFAC: K-FAC's eigenbasis with the **optimal** diagonal in it.
 
 ``K = (Q_G (x) Q_A) diag(s) (Q_G (x) Q_A)^T`` with
-``s_ij = (1/N) sum_{n,c} [(Q_G^T G_{n,c} Q_A)_ij]^2`` — the exact second moment of the per-sample
-gradients *projected into* K-FAC's eigenbasis, which is why it is the best diagonal approximation
-in that basis and why it dominates K-FAC in Frobenius norm.
+``s_ij = (1/N) sum_{n,c} [(Q_G^T G_{n,c} Q_A)_ij]^2`` -- the exact second moment of the per-sample
+gradients *projected into* K-FAC's eigenbasis. That is why it is the best diagonal approximation in
+that basis and why it dominates K-FAC in Frobenius norm (``papers/ekfac_1806.03884.pdf`` §3.2,
+Lemma 1, Thm 2 and 3).
 
-Two consequences the campaign uses:
+Two consequences the campaign uses.
 
-* **It preserves the trace by construction** (T9). ``sum_ij s_ij`` is the mean of
+* **It preserves the trace by construction.** ``sum_ij s_ij`` is the mean of
   ``||Q_G^T G Q_A||_F^2``, and an orthogonal change of basis leaves the Frobenius norm alone, so it
-  equals the mean of ``||G||_F^2 = tr(B_l)``. No estimator quality enters — if T9 fails, the
-  eigenbases are not orthonormal.
-* **It needs a second pass over the probes.** ``Q_A`` and ``Q_G`` are only known once ``A`` and
-  ``G`` have been accumulated, so ``s`` cannot be built in the same sweep. That is why
-  ``capture.iter_probe_columns`` is a generator (``plan_exp_lot2.md`` §0.2).
+  equals the mean of ``||G||_F^2``, which is the exact block's trace. No estimator quality enters:
+  if that check fails, the eigenbases are not orthonormal.
+* **It needs a second pass over the probes.** ``Q_A`` and ``Q_G`` only exist once ``A`` and ``G``
+  have been accumulated, so ``s`` cannot be built in the same sweep. That is why the probe
+  traversal is a generator.
+
+A caution for any layer followed by a normalisation: the reduce-mode output factor is exactly
+rank-deficient there, because a normalisation's backward makes the gradient sum to zero within each
+group and reduce sums over exactly those positions. Inside that null space the eigenvectors are
+numerically arbitrary. K-FAC is invariant to the choice (it assigns one constant eigenvalue);
+EKFAC is not, because it assigns a data-estimated ``s``. Measured: a 3.2e-16 perturbation rotates
+the null-space eigenvectors by 0.53 and moves EKFAC-reduce's step by 0.144, against 1.2e-12 for
+K-FAC-reduce. Do not quote an inverse-based number for EKFAC-reduce to better than about 10 %.
+
+Public API
+----------
+
+:class:`EKFAC`  the structure, never materialised. ``solve`` and ``matmat`` project into the basis,
+rescale and project back; ``diag``, ``trace``, ``fro2`` and ``logdet`` are closed forms in ``s``;
+``inner_rearranged`` contracts against an already-rearranged reference in two steps, which keeps the
+intermediate at ``d_out * d_in^2`` instead of ``d_in * d_in^2``.
+
+:func:`ekfac_eigenbases`  ``(Q_A, Q_G)`` from the two factors. ``torch.linalg.eigh`` fixes neither
+the sign nor the ordering of eigenvectors, so never compare two bases: compare the applied
+operators.
+
+Dependencies: :mod:`fisher_ref.approx.base`.
 """
 
 from __future__ import annotations
@@ -82,8 +105,11 @@ class EKFAC(BlockOps):
         widest layer — instead of the ``d_in * d_in^2`` (3.9 GB) a one-shot bilinear form would need,
         and never forms the ``P x P`` eigenbasis.
         """
-        tensor = rearrange(R, self.d_out, self.d_in).reshape(self.d_out, self.d_out,
-                                                             self.d_in, self.d_in)
+        return self.inner_rearranged(rearrange(R, self.d_out, self.d_in))
+
+    def inner_rearranged(self, rearranged: Tensor) -> Tensor:
+        """``<R, K>`` from an already-rearranged ``R(R)`` (see :meth:`Kron.inner_rearranged`)."""
+        tensor = rearranged.reshape(self.d_out, self.d_out, self.d_in, self.d_in)
         partial = torch.einsum("ki,mi,kmlp->ilp", self.QG, self.QG, tensor)
         projected = torch.einsum("ilp,lj,pj->ij", partial, self.QA, self.QA)
         return (self.s * projected).sum()

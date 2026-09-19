@@ -1,32 +1,41 @@
-"""Trajectory checkpointing (``plan_exp_step1.md`` D5) — the input steps 2-5 of
-``plan_exp_draft.md`` consume: ``theta`` at ``t in {0, 1%, 10%, 50%, 100%}`` of a run's steps
-(``plan_exp_draft.md`` §7, "Checkpoints").
+"""Trajectory checkpointing: the model weights at fixed fractions of a run.
 
-Off by default. ``--checkpoints 0,0.01,0.1,0.5,1`` writes ``<arm dir>/ckpt_<frac>.pt``, each a
-``dict`` carrying the model state, the step and epoch it was taken at, the run's seed, and the
-fraction — everything needed to reload it into a fresh model and to label it in a result table.
+Off by default. ``--checkpoints 0,0.01,0.1,0.5,1`` writes ``<arm dir>/ckpt_<fraction>.pt``, each a
+``dict`` carrying the model state, the step and epoch it was taken at, the run's seed, the
+fraction, the denominator that fraction is relative to, and whether it landed on schedule. That is
+everything needed to reload it into a fresh model and to label it unambiguously in a result table.
+These files are the input the curvature analysis in ``fisher_ref/`` consumes.
 
-The schedule is expressed in *completed steps* against the run's **nominal** length (``--epochs``
-times the batches per epoch), which under the WCT protocol is shared by every arm of a model — so
-``ckpt_0.5`` means the same amount of training in every arm, and the fractions are comparable
-across them. ``t=0`` is the initialization (the loop calls ``on_step`` once with ``0`` before the
-first batch).
+:class:`CheckpointWriter` is the ``on_step`` callback of ``benchmarks/common/loop.py``: it fires
+after every optimizer step and writes whichever fractions fall due. ``t=0`` is the initialization,
+because the loop calls ``on_step`` once with zero completed steps before the first batch.
 
-``--checkpoint-optimizer-state`` (opt-in, **off by default**, so today's payloads are unchanged
-byte for byte) adds the optimizer's own state next to ``theta``: ``torch.optim``'s ``state_dict()``
-for any optimizer, plus — for ``AdaFisherMulti`` — its EMA'd per-module Fisher factors re-keyed by
-**module name** (the live dicts are keyed by ``nn.Module`` objects, which do not survive a reload).
-This is what protocol P2 of ``plan_exp_draft.md`` §3.2 would otherwise have to re-warm from
-``theta``. The transient ``_cached_*`` entries are excluded: they are one batch's layer inputs, not
-state — 3.37 GB across ResNet-50 at batch 128 (``plan_lot8.md`` §0.4) — and they are rebuilt by the
-next ``TCov`` step anyway.
+The denominator is the nominal trajectory, not the arm's own
+------------------------------------------------------------
 
-A wall-clock-budgeted arm need not reach the nominal length: an expensive mode stops short, a cheap
-one overshoots it. ``save_final`` therefore pins the largest requested fraction to wherever the arm
-actually ended, *if* it never fired on schedule — and marks that payload ``scheduled=False``, so a
-consumer can tell "the 100% point of the nominal trajectory" from "this arm's own last step". Every
-payload carries its ``step``, ``epoch`` and the ``total_steps`` denominator, so no fraction is ever
-ambiguous.
+The schedule is expressed in completed steps against ``--epochs`` times the batches per epoch.
+Under the wall-clock-time protocol every arm of a model shares that one nominal length, so
+``ckpt_0.5`` means the same amount of training in every arm and the fractions are comparable
+across arms — which is the whole point of the dumps. Do not change this to the arm's own maximum
+epoch count: doing so once put a budgeted arm's ``ckpt_0.1`` at about 31% of its own run and made
+``ckpt_0.5`` unreachable on six arms out of seven.
+
+A wall-clock-budgeted arm need not reach the nominal length: an expensive mode stops short, a
+cheap one overshoots. ``save_final`` therefore pins the largest requested fraction to wherever the
+arm actually ended, but only if it never fired on schedule, and marks that payload
+``scheduled=False``. A consumer can then tell "the 100% point of the nominal trajectory" from
+"this arm's own last step".
+
+The optimizer's state, optionally
+---------------------------------
+
+``--checkpoint-optimizer-state`` (opt-in, off by default, so today's payloads are unchanged byte
+for byte) adds the optimizer's own state next to the weights: ``torch.optim``'s ``state_dict()``
+for any optimizer, plus — for ``AdaFisherMulti`` — its running-average per-module Fisher factors
+re-keyed by module name, since the live dicts are keyed by ``nn.Module`` objects, which do not
+survive a reload. Entries whose name starts with ``_cached`` are excluded: they hold one batch's
+layer inputs, not state (3.37 GB across ResNet-50 at batch 128), and the next factor update
+rebuilds them anyway.
 """
 
 from __future__ import annotations

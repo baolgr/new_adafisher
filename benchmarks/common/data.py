@@ -1,39 +1,43 @@
-"""The single data pipeline (``plan_exp_step1.md`` §5): MNIST, CIFAR-10, CIFAR-100.
+"""The single data pipeline: MNIST, CIFAR-10, CIFAR-100 and ImageNet-1K.
 
-Protocol, from the papers rather than from habit:
+Five ready-made builders, each returning ``(train_loader, val_loader, test_loader)`` from one
+call: ``mnist``, ``cifar10``, ``cifar100``, ``imagenet`` (native 224 px) and ``imagenet32``
+(ImageNet-1K downsampled to 32x32). A bench names one of them as its ``build_data``.
 
-- **A seeded train/val split** of the official train set (45k/5k on CIFAR, 55k/5k on MNIST); the
-  official test set is held out entirely and evaluated once, at the end of a run. This is the
+Protocol, from the papers rather than from habit
+------------------------------------------------
+
+- **A seeded train/val split** of the official training set — 45k/5k on CIFAR, 55k/5k on MNIST.
+  The official test set is held out entirely and evaluated once, at the end of a run. This is the
   ResNet paper's own CIFAR protocol (``papers/resnet_1512.03385.pdf`` §4.2, p. 7: the schedule is
-  "determined on a 45k/5k train/val split").
+  "determined on a 45k/5k train/val split"). ``seeded_train_val_split`` draws one permutation from
+  its own generator, so the split depends on the run's ``--seed`` and on nothing else.
 - **CIFAR train augmentation**: "4 pixels are padded on each side, and a 32x32 crop is randomly
   sampled from the padded image or its horizontal flip" (§4.2, verbatim), then per-channel
-  normalization, then optionally **Cutout** (DeVries & Taylor, 2017) with 1 hole of 16 px — not in
-  the ResNet paper, but set in every shipped AdaFisher config
+  normalization, then optionally :class:`Cutout` (DeVries & Taylor, 2017) with one 16 px hole.
+  Cutout is not in the ResNet paper; it is set in every shipped AdaFisher config
   (``reference_repos/AdaFisher/Image_Classification/configs/*.yaml``: ``cutout: True, n_holes: 1,
-  cutout_length: 16``), hence on by default and switchable (``plan_lot8.md`` §0.9).
+  cutout_length: 16``), hence on by default and switchable with ``--no-cutout``.
 - **CIFAR eval**: normalization only — §4.2's "we only evaluate the single view of the original
-  32x32 image".
-- **MNIST**: no augmentation at all, train or eval (``augment=False`` in its spec), the historical
-  auto-encoder protocol of ``ekfac_1806.03884.pdf`` §4.1. ``cutout`` is therefore structurally
-  inert for MNIST rather than silently ignored.
-- **CIFAR-100** shares CIFAR-10's protocol exactly (same 32x32 3-channel images, same 45k/5k
-  split, same augmentation); only ``mean``/``std`` and the label cardinality differ. Its spec has
-  been here since step 1 — the CIFAR-100 benches added later only had to point ``build_data`` at
-  it.
-- **ImageNet-1K** is the one dataset that is *not* a torchvision archive: it is an ``ImageFolder``
+  32x32 image". The validation loader uses this eval transform, never the train augmentation.
+- **MNIST**: no augmentation at all, train or eval, the historical auto-encoder protocol of
+  ``papers/ekfac_1806.03884.pdf`` §4.1. ``cutout`` is therefore structurally inert for MNIST
+  rather than silently ignored.
+- **CIFAR-100** shares CIFAR-10's protocol exactly — same 32x32 3-channel images, same split, same
+  augmentation. Only the normalization constants and the label cardinality differ.
+- **ImageNet-1K** is the one dataset that is not a torchvision archive: it is an ``ImageFolder``
   tree (``<root>/imagenet/{train,val}/<wnid>/*.JPEG``) that has to be staged by hand, because
-  downloading it requires an accepted image-net.org agreement. Its transforms are AdaFisher's own
-  (``reference_repos/AdaFisher/Image_Classification/src/utils/data.py:157-194``:
-  ``RandomResizedCrop(224)`` + flip + ``Normalize(0.485/0.456/0.406, 0.229/0.224/0.225)``
-  + Cutout on train, ``Resize(256)`` + ``CenterCrop(224)`` on eval), and the official 50k
-  validation set plays the role the CIFAR test set plays — held out, evaluated once — with this
-  project's own seeded split carving the *validation* stream out of the 1.28 M training images.
-  See ``build_imagenet_loaders`` for the downsampled (``img_size=32``) variant and why it exists.
+  downloading it requires an accepted image-net.org agreement. Its 224 px transforms are
+  AdaFisher's own (``reference_repos/AdaFisher/Image_Classification/src/utils/data.py:157-194``:
+  ``RandomResizedCrop(224)`` + flip + ``Normalize(0.485/0.456/0.406, 0.229/0.224/0.225)`` +
+  Cutout on train, ``Resize(256)`` + ``CenterCrop(224)`` on eval). The official 50k validation set
+  plays the role the CIFAR test set plays — held out, evaluated once — and this project's own
+  seeded split carves a *validation* stream out of the 1.28 M training images.
+  ``build_imagenet_loaders`` documents the downsampled ``img_size=32`` variant and why it exists.
 
-``download`` is opt-in (``allow_download``): Alliance Canada's compute nodes have no internet, and
-torchvision's ``download=True`` there fails as an opaque network timeout instead of a clear
-"dataset not staged" error (``plan_lot8.md`` §0.9, §0.11).
+Downloading is opt-in (``allow_download``): compute nodes on the cluster this project runs on have
+no internet, and torchvision's ``download=True`` there fails as an opaque network timeout instead
+of a clear "dataset not staged" error.
 """
 
 from __future__ import annotations
@@ -228,11 +232,13 @@ def imagenet_root(data_root: str | Path, img_size: int = 224) -> Path:
     """``<data_root>/imagenet``, or ``<data_root>/imagenet<img_size>`` when a pre-resized tree of
     that resolution has been staged.
 
-    The two are numerically interchangeable: ``transforms.Resize((s, s))`` on an image that is
-    already ``s x s`` is the identity (PIL's ``Image.resize`` returns a copy when the requested
-    size matches), and ``stage_imagenet.sh resize`` builds the tree with that very transform. What
-    changes is the cost — 1.28 M full-resolution JPEG decodes per epoch, against 1.28 M 32x32
-    ones, for a model whose forward pass is a few hundred microseconds.
+    The two apply the same geometry: ``transforms.Resize((s, s))`` on an image that is already
+    ``s x s`` is the identity, and ``stage_imagenet.sh resize`` builds the tree with that very
+    transform. They are *not* pixel-identical, because the staged tree is re-encoded as JPEG:
+    measured on a synthetic smooth image, a quality-95 round trip moves about 61% of the pixels,
+    by 0.8/255 on average and 5/255 at worst. What the staged tree buys is cost — 1.28 M 32x32
+    JPEG decodes per epoch instead of 1.28 M full-resolution ones, for a model whose forward pass
+    is a few hundred microseconds.
     """
     root = Path(data_root).expanduser()
     if img_size < 64 and (root / f"imagenet{img_size}" / "train").is_dir():

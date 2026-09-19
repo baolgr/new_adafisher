@@ -1,25 +1,42 @@
-"""M1 — entry-wise fidelity (``plan_exp_draft.md`` §5).
+"""Entry-wise fidelity between a reference ``R`` and a structure ``K``.
 
-``e_F = ||R - K||_F / ||R||_F`` is the headline, but on its own it conflates two different errors,
-and ``plan_exp_lot2.md`` §5.1 is why that matters: two references built on different probe sets
-differ in *norm* by 30-60 % before any structure is involved. So M1 reports three numbers:
+``e_F = ||R - K||_F / ||R||_F`` is the headline, but on its own it conflates two different errors.
+Two references built on different probe sets differ in *norm* by tens of percent before any
+structure is involved. So three numbers are reported:
 
-* ``e_F``     — the raw relative gap, scale included;
-* ``cos_F``   — ``<R, K> / (||R||_F ||K||_F)``, pure direction, scale removed;
-* ``e_F_star``— ``sqrt(1 - cos_F^2)``, the gap that survives the best rescaling ``c*``, i.e.
+* ``e_F``      the raw relative gap, scale included;
+* ``cos_F``    ``<R, K> / (||R||_F ||K||_F)``, pure direction, scale removed;
+* ``e_F_star`` ``sqrt(1 - cos_F^2)``, the gap that survives the best rescaling ``c*``, i.e.
   ``min_c ||R - cK||_F / ||R||_F``.
 
-``e_F`` large with ``cos_F`` near 1 means "the right shape, the wrong size" — a damping or scaling
-question. ``e_F ~ e_F_star`` means the structure genuinely points elsewhere. **HF1 is settled by
-this distinction**, not by ``e_F`` (``plan_exp_lot2.md`` §5.1).
+A large ``e_F`` with ``cos_F`` near one means "the right shape, the wrong size" -- a damping or
+scaling question. ``e_F`` close to ``e_F_star`` means the structure genuinely points elsewhere.
 
-**One numerical caveat, and it bites exactly where the campaign looks.** ``e_F_star`` is
-``sqrt(1 - cos_F^2)``, which loses half its significant digits as ``cos_F -> 1``: a ``1e-16``
-relative error in ``cos_F`` becomes ``1.5e-8`` in ``e_F_star``. So **fp64 floors ``e_F_star`` at
-about ``sqrt(eps) ~ 1.5e-8``**, and a reported value below ``1e-7`` means "indistinguishable from a
-pure rescaling", not a measurement. The cancellation is intrinsic to the quantity — writing it as
-``sqrt(||R||^2 - <R,K>^2/||K||^2)/||R||`` is algebraically identical and cancels identically — so it
-is documented rather than worked around.
+**One numerical caveat, and it bites exactly where this is used.** ``e_F_star`` is
+``sqrt(1 - cos_F^2)``, which loses half its significant digits as ``cos_F`` approaches one: a
+1e-16 relative error in ``cos_F`` becomes 1.5e-8 in ``e_F_star``. So float64 floors ``e_F_star`` at
+about the square root of machine epsilon, roughly 1.5e-8, and a reported value below 1e-7 means
+"indistinguishable from a pure rescaling", not a measurement. The cancellation is intrinsic to the
+quantity -- writing it as ``sqrt(||R||^2 - <R,K>^2/||K||^2)/||R||`` is algebraically identical and
+cancels identically -- so it is documented rather than worked around.
+
+Public API
+----------
+
+:class:`FrobeniusReport`  the three numbers plus ``c*``, both norms and the inner product, with
+``as_rows()`` for the long-format result file.
+
+:func:`frobenius`  computes them from ``||R - K||^2 = ||R||^2 - 2<R,K> + ||K||^2``, three
+quantities every block exposes in closed form -- which is the whole reason ``inner_dense`` is part
+of the block protocol. Pass ``rearranged`` when the caller already holds ``R(R)``: a Kronecker or
+eigenbasis structure then contracts against it instead of building its own.
+
+:func:`dense_gap`  ``||A - B||_F`` between two dense matrices with **both** norms and three
+normalisations of the gap (by each operand and by their geometric mean), accumulated over row
+blocks. It never returns a bare ratio, because a set of gaps reported against different
+denominators cannot be re-read afterwards.
+
+Dependencies: :mod:`fisher_ref.approx.base`.
 """
 
 from __future__ import annotations
@@ -50,13 +67,19 @@ class FrobeniusReport:
                  ("c_star", self.c_star), ("fro_R", self.fro_R), ("fro_K", self.fro_K))]
 
 
-def frobenius(R: Tensor, K: BlockOps, *, fro_R: Optional[float] = None) -> FrobeniusReport:
+def frobenius(R: Tensor, K: BlockOps, *, fro_R: Optional[float] = None,
+              rearranged: Optional[Tensor] = None) -> FrobeniusReport:
     """M1, without materialising ``K``.
 
     ``||R - K||_F^2 = ||R||^2 - 2<R,K> + ||K||^2`` — three quantities every ``CurvatureBlock``
     exposes in closed form, which is the whole reason ``inner_dense`` is part of the protocol.
+    ``rearranged`` is ``R(R)`` when the caller already holds it; structures that can contract against
+    it (``Kron``, ``EKFAC``) then skip their own rearrangement.
     """
-    inner = float(K.inner_dense(R))
+    if rearranged is not None and hasattr(K, "inner_rearranged"):
+        inner = float(K.inner_rearranged(rearranged))
+    else:
+        inner = float(K.inner_dense(R))
     fro_k2 = float(K.fro2())
     fro_r2 = float((R * R).sum()) if fro_R is None else fro_R ** 2
     gap2 = max(fro_r2 - 2.0 * inner + fro_k2, 0.0)

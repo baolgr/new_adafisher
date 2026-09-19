@@ -36,8 +36,11 @@ DATA_ROOT="${DATA_ROOT:-$SLURM_SUBMIT_DIR/dataset}"
 # 2 x T_diag per (model, seed), not 7. Regime A gets seeds 1-4 (5 with the existing seed 0), regime
 # B seeds 1-2 (3 with seed 0).
 #
-# No --lr-schedule flag on purpose: seed 0 ran under the default 'nominal' schedule and these must
-# match it to be comparable, which is the whole point. Do not add --lr-schedule budget here.
+# --lr-schedule is stated explicitly (see V0_SEEDS_LR_SCHEDULE in generate_jobs.py) so this job is
+# self-describing: 'nominal' is what it has always run, and a future reader does not have to know
+# the CLI default to know what these checkpoints sit on. Seed 0 is NOT one protocol -- mlp_ln_mnist
+# ran 'budget' and the other four pre-date schedules.py entirely -- so read each run's own
+# manifest.json before comparing a seed against it.
 #
 # Writes to benchmarks/outputs/seeds/<model>/seed<n>/ -- deliberately ungrouped, its axis being
 # the seed -- leaving outputs/<group>/<model>/ (seed 0) untouched.
@@ -45,12 +48,13 @@ DATA_ROOT="${DATA_ROOT:-$SLURM_SUBMIT_DIR/dataset}"
 FAILED=()
 run_one () {  # $1 = model, $2 = seed
   echo "=== $1  seed $2 ==="
-  python -m "benchmarks.$1.bench" \
+  python -m "benchmarks.models.$1.bench" \
     --arms diag adamw \
     --seed "$2" \
     --budget-mode wct \
     --reference-arm diag \
     --max-epoch-factor 3 \
+    --lr-schedule nominal \
     --num-workers 8 \
     --no-allow-download \
     --data-root "$DATA_ROOT" \

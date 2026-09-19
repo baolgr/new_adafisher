@@ -1,12 +1,26 @@
-"""Exact curvature references for the Fisher-drift campaign (``plan_exp_draft.md`` §2, §7).
+"""Exact curvature references, one module per computational regime.
 
-One module per computational regime. Lot 1 ships ``dense`` (regime A, a materialised ``P x P``
-matrix in fp64); ``factor`` (regime B, per-layer Grams) is lot 4 and ``matfree`` (regime C) lot 6.
+``dense`` is the small-model regime: a materialised ``P x P`` matrix in float64, built as
+``F = U^T U`` from per-sample parameter gradients. Regimes that never form ``P x P`` -- per-layer
+Gram matrices, and a matrix-free operator -- are not implemented here yet.
+
+Re-exports the dense builder and its supporting types; see :mod:`fisher_ref.reference.dense`.
 """
 
 from __future__ import annotations
 
-from .dense import DenseReference, ParamLayout, build_dense_reference, symmetrize_, to_augmented
+from .dense import (
+    DenseAccumulator,
+    DenseReference,
+    ParamLayout,
+    RowCheckError,
+    build_dense_reference,
+    check_rows_against_autograd,
+    reference_parameter_names,
+    symmetrize_,
+    to_augmented,
+)
 
-__all__ = ["DenseReference", "ParamLayout", "build_dense_reference", "symmetrize_",
+__all__ = ["DenseAccumulator", "DenseReference", "ParamLayout", "RowCheckError", "build_dense_reference",
+           "check_rows_against_autograd", "reference_parameter_names", "symmetrize_",
            "to_augmented"]

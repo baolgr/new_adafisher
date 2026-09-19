@@ -39,7 +39,7 @@ DATA_ROOT="${DATA_ROOT:-$SLURM_SUBMIT_DIR/dataset}"
 # Why this sweep exists: see SWEEPS in benchmarks/slurm/generate_jobs.py.
 for VALUE in 1e-5 1e-3 1e-1; do
   echo "=== --lam $VALUE ==="
-  python -m benchmarks.mnist_autoencoder.bench \
+  python -m benchmarks.models.mnist_autoencoder.bench \
     --arms diag kfac ekfac tkfac tekfac adam adamw \
     --epochs 20 \
     --budget-mode wct \

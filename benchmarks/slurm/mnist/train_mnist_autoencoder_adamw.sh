@@ -45,7 +45,7 @@ else
   BUDGET_ARGS=(--budget-mode epochs)
 fi
 
-python -m benchmarks.mnist_autoencoder.bench \
+python -m benchmarks.models.mnist_autoencoder.bench \
   --arms adamw \
   --epochs 20 \
   "${BUDGET_ARGS[@]}" \

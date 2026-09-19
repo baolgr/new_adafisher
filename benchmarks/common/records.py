@@ -1,12 +1,38 @@
-"""Per-step / per-epoch records and the report writers (``plan_exp_step1.md`` §5).
+"""The record types every bench produces, and the four report writers that consume them.
 
-Merge of ``equal_wallclock_bench.{StepRecord,_median,write_csv,write_summary,write_plots}`` and
-``cifar10_classification.{EpochRecord,ArmResult,write_*}``: the lot-7 names lose their underscore
-and the writers keep lot 8's column schema verbatim, so a CSV produced here is column-identical to
-``benchmarks/outputs/lot8_cifar10/*``'s.
+Three dataclasses: :class:`StepRecord` (one optimizer step), :class:`EpochRecord` (one epoch) and
+:class:`ArmResult` (one arm's whole run, plus its final test numbers, its total wall-clock time,
+the checkpoints it wrote and its peak device memory).
 
-A reconstruction task (``metric_fn=None``) leaves the accuracy columns at ``nan``; the schema is
-the same either way, so one reader handles every bench.
+Four writers, all taking a sequence of :class:`ArmResult` and a path:
+
+* ``write_step_csv`` -> ``records.csv``: ``arm, step, epoch, elapsed_s, loss, fwd_bwd_s, step_s,
+  data_s``. New columns are appended on the right, never inserted, so a reader that looks columns
+  up by name keeps working unchanged.
+* ``write_epoch_csv`` -> ``epochs.csv``: ``arm, epoch, steps, elapsed_s, train_loss, val_loss,
+  val_acc, lr``.
+* ``write_summary`` -> ``summary.md``: one Markdown row per arm — steps, epochs, the mean loss over
+  the last 50 steps, best validation accuracy, test accuracy, the median forward+backward and
+  optimizer-step times, their ratio, total wall-clock time, peak device memory and the *compute
+  share*. The timing medians skip each run's first few steps, which carry one-time hook and
+  lazy-initialization cost.
+
+  The compute share is ``sum(fwd_bwd_s + step_s) / total_s``: how much of an arm's wall-clock
+  budget was spent optimizing rather than fetching and copying batches. Under the wall-clock-time
+  protocol every arm of a model gets the same budget, but the non-compute cost is paid once per
+  *epoch* and the arms deliberately complete different epoch counts — so the cheap arms pay it
+  most often. Measured on ``mnist_autoencoder``: 47.4% for ``adam`` against 78.5% for ``ekfac``,
+  i.e. ``ekfac`` received 1.67x the optimization time inside an "equal" budget. On
+  ``resnet50_cifar`` every arm is at 99.5-99.6% and the effect is negligible. The column does not
+  change the protocol; it makes the bias readable off each run.
+* ``write_manifest`` -> ``manifest.json``: the full run configuration plus the headline numbers,
+  which is what lets another tool rebuild the network a checkpoint belongs to.
+
+``write_plots`` additionally writes loss and validation curves with matplotlib, and returns
+``False`` without failing when matplotlib is not installed — plotting is an optional dependency.
+
+A reconstruction task has no accuracy: its bench passes ``metric_fn=None`` and the accuracy columns
+are ``nan``. The schema is the same either way, so one reader handles every bench.
 """
 
 from __future__ import annotations
@@ -27,6 +53,11 @@ class StepRecord:
     loss: float
     fwd_bwd_s: float
     step_s: float
+    # Time from the end of the previous optimizer step to the start of this step's forward pass:
+    # the batch fetch, the host-to-device copy, and whatever ``on_step`` did after the previous
+    # step. Charged to the wall-clock budget like everything else, and invisible until now.
+    # Defaulted, so a record built without it (an older caller, a test fixture) still constructs.
+    data_s: float = 0.0
 
 
 @dataclass
@@ -76,11 +107,17 @@ def write_step_csv(results: Sequence[ArmResult], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["arm", "step", "epoch", "elapsed_s", "loss", "fwd_bwd_s", "step_s"])
+        # ``data_s`` is appended on the right: a reader that resolves columns by name (the only
+        # kind in this repository) is unaffected, and one that reads by position still finds the
+        # seven columns it knew where it expected them.
+        writer.writerow(
+            ["arm", "step", "epoch", "elapsed_s", "loss", "fwd_bwd_s", "step_s", "data_s"]
+        )
         for result in results:
             for r in result.steps:
                 writer.writerow(
-                    [result.arm, r.step, r.epoch, r.elapsed_s, r.loss, r.fwd_bwd_s, r.step_s]
+                    [result.arm, r.step, r.epoch, r.elapsed_s, r.loss, r.fwd_bwd_s, r.step_s,
+                     r.data_s]
                 )
 
 
@@ -100,18 +137,24 @@ def write_epoch_csv(results: Sequence[ArmResult], path: Path) -> None:
 
 
 def write_summary(results: Sequence[ArmResult], path: Path, skip_first: int = 5) -> str:
-    """Lot 7's timing table (steps, epochs, final loss, median fwd+bwd, median step, their ratio)
-    plus lot 8's classification columns. Timing medians skip each run's first ``skip_first`` steps,
-    excluding one-time hook / lazy-initialization cost.
+    """One Markdown row per arm: steps, epochs, the mean loss over the last 50 steps, best
+    validation accuracy, test accuracy, the median forward+backward and optimizer-step times, their
+    ratio, total wall-clock time, peak device memory and the compute share. The timing medians skip
+    each run's first ``skip_first`` steps, which carry one-time hook and lazy-initialization cost.
+
+    ``compute share`` is ``sum(fwd_bwd_s + step_s) / total_s`` over *all* of the arm's steps: the
+    fraction of its wall-clock budget spent optimizing rather than fetching and copying batches.
+    Nothing skipped there — the question is how the whole budget was spent, first step included.
     """
     lines = [
         "| arm | steps | epochs | final train loss | best val acc | test acc | "
-        "median fwd+bwd | median step | step/fwd+bwd | total wall-clock | peak VRAM |",
-        "|---|---|---|---|---|---|---|---|---|---|---|",
+        "median fwd+bwd | median step | step/fwd+bwd | total wall-clock | peak VRAM | "
+        "compute share |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for result in results:
         if not result.steps:
-            lines.append(f"| {result.arm} | 0 | - | - | - | - | - | - | - | - | - |")
+            lines.append(f"| {result.arm} | 0 | - | - | - | - | - | - | - | - | - | - |")
             continue
         steady = result.steps[skip_first:] if len(result.steps) > skip_first else result.steps
         fwd_bwd = median([r.fwd_bwd_s for r in steady])
@@ -119,11 +162,13 @@ def write_summary(results: Sequence[ArmResult], path: Path, skip_first: int = 5)
         ratio = step / fwd_bwd if fwd_bwd > 0 else float("nan")
         final_loss = sum(r.loss for r in result.steps[-50:]) / min(50, len(result.steps))
         best_val = max((e.val_acc for e in result.epochs), default=float("nan"))
+        compute_s = sum(r.fwd_bwd_s + r.step_s for r in result.steps)
+        share = compute_s / result.total_s if result.total_s > 0 else float("nan")
         lines.append(
             f"| {result.arm} | {len(result.steps)} | {len(result.epochs)} | {final_loss:.4f} | "
             f"{best_val * 100:.2f}% | {result.test_acc * 100:.2f}% | {fwd_bwd * 1e3:.2f} ms | "
             f"{step * 1e3:.2f} ms | {ratio:.2f}x | {result.total_s:.1f}s | "
-            f"{format_bytes(result.peak_vram_bytes)} |"
+            f"{format_bytes(result.peak_vram_bytes)} | {share * 100:.1f}% |"
         )
     text = "\n".join(lines) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -138,7 +183,7 @@ def write_plots(
     validation per arm (error when the task has an accuracy, loss otherwise); plus, when the task
     has an accuracy, validation error against both epoch and wall-clock time. Returns ``False``
     (skipping plots, never failing) if matplotlib is missing: plotting is an optional bench
-    dependency (``plan_lot7.md`` §0.9).
+    dependency.
     """
     try:
         import matplotlib

@@ -1,30 +1,50 @@
-"""Probe sets: the fixed, augmentation-free, versioned inputs every reference is computed on
-(``docs/reports/plan_exp_draft.md`` §1.1, §3.4; lot 0 of its §9).
+"""Probe sets: the fixed, augmentation-free, versioned inputs every reference is computed on.
 
-A probe set is an *invariant* of the campaign (``plan_exp_draft.md`` §8): change it and every
-earlier comparison is void. Hence three properties, each of them the reason for a design choice:
+A probe set is an invariant of the campaign: change it and every earlier comparison is void. Hence
+three properties, each of which is the reason for a design choice.
 
-* **No augmentation.** ``benchmarks/common/data.py::build_loaders`` applies the *train* transform
-  to the train split, and on CIFAR that is ``RandomCrop(32, padding=4)`` + ``RandomHorizontalFlip``
-  + optional ``Cutout`` — i.e. a probe built through it would be a different image on every call.
-  Probes are built from the **eval** transform on both splits.
-* **The run's own split.** The train/val partition is re-derived with the same
-  ``seeded_train_val_split(n_total, val_size, seed)`` the training run used, so a "train probe" is a
-  point that run actually trained on and a "val probe" is one it never saw — which is the whole
-  content of HF1. A third split, ``test``, draws on the dataset's own held-out set: ``val`` holds
-  only 5 000 images and the HF1 noise floor is dominated by the out-of-sample side. Read
-  :func:`build_probe_set`'s docstring before pooling the two — it is justified only if a measured
-  check says so.
-* **Hashed over its content.** The digest covers the tensor bytes, not just the recipe: a
-  torchvision transform change or a different copy of the dataset on the cluster would otherwise
-  pass unnoticed (``plan_exp_lot0.md`` §0.4).
+* **No augmentation.** The training harness applies its *train* transform to the train split, and
+  on CIFAR that is a random crop, a random horizontal flip and an optional Cutout mask. A probe
+  built through it would be a different image on every call. Probes are built from the **eval**
+  transform on both splits.
+* **The run's own split.** The train/validation partition is re-derived with the same seeded
+  permutation the training run used, so a "train probe" is a point that run actually trained on and
+  a "val probe" is one it never saw. That distinction is the whole content of the
+  generalisation-gap question the campaign asks.
+* **Hashed over its content.** The digest covers the tensor bytes, not just the recipe. A
+  torchvision transform change, or a different copy of the dataset on the cluster, would otherwise
+  pass unnoticed.
 
-Probes are the **first ``n`` indices** of the seeded permutation's split, so a 256-probe set is a
-prefix of a 1 000-probe set (:meth:`ProbeSet.head`). That is what makes the ``N' < N`` noise-floor
-curve of §3.4 free rather than a separate sweep.
+Probes are the **first n indices** of the seeded permutation's split, so a 256-probe set is a
+prefix of a 1000-probe set (:meth:`ProbeSet.head`). That prefix property is what makes the
+"how does the error fall with more probes" curve free rather than a separate sweep.
 
-The dataset is not re-declared here: each bench's ``build_data`` is a
-``functools.partial(build_loaders, SPEC)``, and :func:`dataset_spec_of` reads the spec off it.
+Splits
+------
+
+``train`` and ``val`` are the two halves of the run's own seeded partition of the official
+*training* set. ``test`` is the dataset's own held-out set, which the training harness loads only
+to report a final number; it exists here because ``val`` is small (5 000 images on MNIST and
+CIFAR) and the out-of-sample side dominates the noise. :func:`build_probe_set` states the two
+conditions under which ``test`` is a legitimate second out-of-sample source, and why the two must
+not be pooled before a measured check says so.
+
+Public API
+----------
+
+:class:`ProbeSet`  the ``n`` inputs, their true labels, the dataset indices, and everything needed
+to reproduce and verify them (``head``, ``to``, ``as_model_batch``, ``save``, ``load``,
+``metadata``).
+
+:func:`build_probe_set`, :func:`build_probe_pair`  build one set, or the train/val pair of the same
+size and seed.
+
+:func:`dataset_spec_of`  recovers a benchmark's dataset specification from its ``build_data``,
+rather than keeping a second model-to-dataset table that could drift from the harness's own.
+
+Dependencies: ``benchmarks.common.data`` (the dataset specs, the transforms and the seeded split)
+and ``benchmarks.common.runner`` (the ``Benchmark`` record and the benchmarks directory). Nothing
+from the rest of ``fisher_ref``.
 """
 
 from __future__ import annotations

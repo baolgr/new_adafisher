@@ -1,38 +1,78 @@
-"""Per-example layer statistics: the inputs ``a``, the output gradients ``g``, and the *normalised*
-input ``x_hat`` of a normalisation layer (``docs/reports/plan_exp_draft.md`` §7, lot 1 of its §9).
+"""Per-example layer statistics: the inputs ``a``, the output gradients ``g``, and a normalisation
+layer's *normalised* input ``x_hat``.
 
-Everything the campaign builds — the exact references of regime A, the per-layer Grams of regime B,
-the whole approximation zoo — is a contraction of ``(a, g)`` with the **example axis intact**. One
-forward pass captures ``a``; one backward pass per root column of ``Lambda_n`` (``sources.py``)
-captures ``g``, and the ``N`` probes of a batch share that pass (``plan_exp_draft.md`` §2.1).
+Everything the campaign builds -- the exact dense references, the per-layer Gram matrices, the
+whole approximation zoo -- is a contraction of ``(a, g)`` with the **example axis intact**. One
+forward pass captures ``a``; one backward pass per root column of ``Lambda_n``
+(:mod:`fisher_ref.sources`) captures ``g``, and the ``N`` probes of a micro-batch share that pass.
 
 Three things here are deliberate, and each of them was a bug first.
 
 1. **No module backward hook.** ``register_full_backward_hook`` fires from the module's *input*-side
    node, so a module whose ``grad_input`` is not needed by the requested ``inputs=`` is pruned out
    of the backward graph and its hook silently never fires. Measured on a
-   ``Linear -> LayerNorm -> ReLU -> Linear`` in fp64: ``autograd.grad(out, params, grad_outputs=V)``
-   fires all three modules when nothing requires grad (with a ``UserWarning``), but only the last
-   two as soon as the input requires grad. On ``mlp_ln_mnist`` the missing module is the first
-   ``Linear``, i.e. **25 120 of 26 634 parameters** — whose ``U`` columns would simply be zero, with
-   ``F`` still symmetric PSD and every exactness test still passing on the layers that did fire.
-   So ``g`` is taken from a **tensor** hook on the module's output (``output.register_hook``), which
-   is exactly ``grad_output[0]``, fires unconditionally, and survives both an in-place
-   ``ReLU(inplace=True)`` on that output and a residual reuse of it (both checked). This is a
-   deliberate divergence from ``adafisher_modes/optimizer.py``'s ``_save_grad_output``; do not
-   "align" it back.
-2. **``x_hat`` is recomputed, not hooked.** ``d/d gamma = sum_t g_t * x_hat_t`` needs the
-   *normalised* activation, while a forward hook on ``nn.LayerNorm`` / ``nn.BatchNorm2d`` /
-   ``nn.GroupNorm`` sees the input **before** normalisation. In :func:`~fisher_ref.conventions.
-   reference_mode` (eval) all three are closed-form from the captured input plus the module's own
-   ``eps`` and buffers, and the result is exact: ``(g * x_hat).sum(t)`` reproduces ``weight.grad``
-   to ``1e-15`` on LayerNorm (2-D and 3-D input), BatchNorm2d-eval and GroupNorm. A ``BatchNorm*``
-   in **train** mode is refused: ``x_hat`` would then depend on the rest of the batch and per-sample
-   gradients would not exist at all (``plan_exp_draft.md`` §2.5).
+   ``Linear -> LayerNorm -> ReLU -> Linear`` network in float64:
+   ``autograd.grad(out, params, grad_outputs=V)`` fires all three modules when nothing requires
+   grad (with a ``UserWarning``), but only the last two as soon as the input requires grad. On the
+   campaign's smallest MLP the missing module is the first ``Linear``, 25 120 of 26 634 parameters,
+   whose ``U`` columns would simply be zero -- leaving ``F`` symmetric, positive semi-definite and
+   wrong, with every exactness test still passing on the layers that did fire. So ``g`` is taken
+   from a **tensor** hook on the module's output (``output.register_hook``), which is exactly
+   ``grad_output[0]``, fires unconditionally, and survives both an in-place ``ReLU(inplace=True)``
+   on that output and a residual reuse of it. This is a deliberate divergence from the optimizer's
+   own hook in ``adafisher_modes/optimizer.py``; do not align it back.
+2. **``x_hat`` is recomputed, not hooked.** The gradient with respect to ``gamma`` is
+   ``sum_t g_t * x_hat_t``, which needs the *normalised* activation, while a forward hook on
+   ``nn.LayerNorm`` / ``nn.BatchNorm2d`` / ``nn.GroupNorm`` sees the input **before**
+   normalisation. In eval mode all three normalisations are closed-form from the captured input
+   plus the module's own ``eps`` and buffers, and the result is exact: ``(g * x_hat).sum(t)``
+   reproduces ``weight.grad`` to about 1e-15 on LayerNorm (2-D and 3-D input), BatchNorm2d in eval
+   mode and GroupNorm. A ``BatchNorm*`` in **train** mode is refused: ``x_hat`` would then depend on
+   the rest of the batch and per-sample gradients would not exist at all.
 3. **``a`` is not bias-augmented.** The column layout of ``U`` is ``model.named_parameters()``
-   order (see ``reference/dense.py``), in which the bias gradient is ``g.sum(t)`` in its own slice.
-   The appended ones column of ``factors.augment_*`` belongs to the ``rvec([W | b])`` layout, which
-   this package does not use; ``factors.extract_patches`` is the one helper reused from there.
+   order (see :mod:`fisher_ref.reference.dense`), in which the bias gradient is ``g.sum(t)`` in its
+   own slice. The appended ones column belongs to the bias-augmented ``rvec([W | b])`` layout, which
+   this module does not use; ``adafisher_modes.factors.extract_patches`` is the one helper reused
+   from the optimizer package.
+
+Public API
+----------
+
+:func:`layer_kind`, :func:`capturable_modules`  which modules carry a statistic, and as what
+(``"linear"``, ``"conv"``, ``"norm"``).
+
+:func:`coverage`, :func:`raw_parameter_names`  which parameters a capture covers, and which
+uncovered ones are batch-broadcast raw parameters (``pos_embed``, ``cls_token``) whose per-sample
+gradient can still be formed by substituting a batch-expanded leaf.
+
+:func:`normalized_input`  ``x_hat`` in closed form.
+
+:func:`pool_input`, :func:`pool_output_grad`  the layer's input and output gradient as
+``(N, T, d)``, with ``T`` row-major over the shared positions and the two row-aligned by
+construction.
+
+:class:`Capture` / :func:`capture`  the context manager holding the hooks. It raises if a module is
+called twice in one forward pass, because a reused module overwrites its own statistic.
+``Capture.paused()`` runs an extra forward or backward (a check, an oracle) without touching what
+has been captured.
+
+:func:`iter_probe_columns`  the single definition of how a reference or a structure is accumulated:
+one forward per micro-batch in eval mode, one backward per root column, seeded with
+``inputs=[batch]`` -- never ``inputs=params``, which triggers the pruning trap above. It is a
+generator because two consumers need it and one of them needs it twice: EKFAC's eigenvalues can
+only be accumulated once the eigenbases exist, i.e. after a first pass has built the factors.
+
+:func:`per_sample_gradients`  ``{"weight": ..., "bias": ...}`` for one captured layer. A
+``linear``/``conv`` layer contracts the position axis into an outer product,
+``G_n = sum_t g_{n,t} a_{n,t}^T``. A normalisation layer does **not**: its exact per-sample
+gradients are ``d/d gamma = sum_t g_t * x_hat_t`` and ``d/d beta = sum_t g_t``, element-wise.
+
+:func:`prepare_model`  the model in the reference dtype on the reference device, deep-copied only
+when a cast is actually needed. Every consumer must be handed the same prepared object: the
+traversal casts the *batch*, not the network.
+
+Dependencies: :mod:`fisher_ref.conventions` and :mod:`fisher_ref.sources`, plus
+``adafisher_modes.factors.extract_patches``.
 """
 
 from __future__ import annotations
@@ -40,13 +80,14 @@ from __future__ import annotations
 import copy
 import sys
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterator, List, Mapping, Optional, Tuple
+from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
 from torch import Tensor
+from torch.func import functional_call
 
 _SRC = Path(__file__).resolve().parents[1] / "src"
 if str(_SRC) not in sys.path:  # the editable install's .pth is inert in this sandbox (CLAUDE.md)
@@ -104,6 +145,22 @@ def coverage(model: nn.Module) -> Tuple[List[str], List[str]]:
         covered_set.update(prefix + p_name for p_name, _ in module.named_parameters(recurse=False))
     names = [name for name, _ in model.named_parameters()]
     return ([n for n in names if n in covered_set], [n for n in names if n not in covered_set])
+
+
+def raw_parameter_names(model: nn.Module) -> List[str]:
+    """Uncovered parameters whose per-sample gradient :func:`iter_probe_columns` can still form.
+
+    A raw ``Parameter`` with a leading singleton dimension that broadcasts over the batch
+    (``pos_embed`` of shape ``(1, T, D)``, ``cls_token`` of shape ``(1, 1, D)``) can be replaced, for
+    the traversal only, by a batch-expanded copy: the gradient w.r.t. row ``n`` of that copy is
+    example ``n``'s per-sample gradient (``plan_exp_lot3.md`` §0.6). The shape condition is necessary,
+    not sufficient — a parameter reduced over its batch copies would still pass it — which is why
+    ``reference/dense.py``'s sum rule and single-example check exist.
+    """
+    _, uncovered = coverage(model)
+    parameters = dict(model.named_parameters())
+    return [name for name in uncovered
+            if parameters[name].ndim >= 2 and parameters[name].shape[0] == 1]
 
 
 # ----------------------------------------------------------------------------------------------
@@ -252,6 +309,7 @@ class Capture:
         self._grads: Dict[str, Tensor] = {}
         self._calls: Dict[str, int] = {}
         self._handles: List[torch.utils.hooks.RemovableHandle] = []
+        self._paused = False
 
     # -- lifecycle ------------------------------------------------------------------------------
 
@@ -259,7 +317,7 @@ class Capture:
         kind = self.kinds[name]
 
         def forward_hook(module: nn.Module, inputs: Tuple, output: Tensor) -> None:
-            if not torch.is_grad_enabled():  # a no_grad probe forward captures nothing
+            if not torch.is_grad_enabled() or self._paused:  # captures nothing
                 return
             self._calls[name] = self._calls.get(name, 0) + 1
             if self._calls[name] > 1:
@@ -287,6 +345,22 @@ class Capture:
         for handle in self._handles:
             handle.remove()
         self._handles.clear()
+
+    @contextmanager
+    def paused(self) -> Iterator["Capture"]:
+        """Run extra forwards/backwards (a check, an oracle) without touching the capture.
+
+        Without it, a second forward of the same module inside one micro-batch raises the reuse
+        guard, and — worse — its tensor hooks overwrite ``g`` with a *different* gradient that the
+        next consumer of the same step would read as the probe's (``plan_exp_lot3.md`` §0.6).
+        Tensor hooks registered before the pause still fire on the traversal's own graph only.
+        """
+        previous = self._paused
+        self._paused = True
+        try:
+            yield self
+        finally:
+            self._paused = previous
 
     def reset(self) -> None:
         """Drop everything captured so far — call between probe micro-batches."""
@@ -339,6 +413,12 @@ class ProbeColumn:
     column: int
     n_columns: int
     outputs: Tensor
+    #: The micro-batch the forward ran on (traversal dtype and device) and this column's backprop
+    #: vector ``(n, d_out)`` — what an independent check needs to recompute the same gradient.
+    inputs: Optional[Tensor] = None
+    grad_output: Optional[Tensor] = None
+    #: Per-sample gradients of the raw parameters, ``(n, *shape[1:])`` (``raw_parameters=``).
+    raw_grads: Dict[str, Tensor] = field(default_factory=dict)
 
     @property
     def n_examples(self) -> int:
@@ -375,6 +455,7 @@ def iter_probe_columns(
     device: object = "cpu",
     generator: Optional[torch.Generator] = None,
     check_independence: bool = True,
+    raw_parameters: Sequence[str] = (),
 ) -> Iterator[ProbeColumn]:
     """Walk the probe set once, yielding the live capture per ``(micro-batch, root column)``.
 
@@ -389,6 +470,12 @@ def iter_probe_columns(
     the same Monte-Carlo draws — with two independent loops, ``‖R − K‖`` would carry a sampling
     difference between reference and approximation that no metric could tell from structure error
     (``plan_exp_lot2.md`` §0.2).
+
+    ``raw_parameters`` (:func:`raw_parameter_names`) are replaced by batch-expanded leaves for the
+    forward, and **listed in** ``inputs=`` of every backward: a leaf that is not on the path to
+    ``batch``'s gradient is otherwise pruned by the engine and never receives one — the lot-1
+    pruning trap in a new place (``plan_exp_lot3.md`` §0.6). With none, the code path is exactly
+    lot 2's.
     """
     from .sources import output_root  # noqa: PLC0415 - avoids a cycle at import time
 
@@ -411,16 +498,33 @@ def iter_probe_columns(
                 checked = True
 
             capturer.reset()
-            outputs = model(batch)
+            leaves: Dict[str, Tensor] = {}
+            if raw_parameters:
+                parameters = dict(model.named_parameters())
+                leaves = {name: parameters[name].detach()
+                          .expand(stop - start, *parameters[name].shape[1:])
+                          .clone().requires_grad_(True) for name in raw_parameters}
+                outputs = functional_call(model, leaves, (batch,))
+            else:
+                outputs = model(batch)
             root = output_root(outputs.detach(), batch_targets, source=source, loss=loss, k=k,
                                generator=generator)
             for column in range(root.n_columns):
-                torch.autograd.grad(
-                    outputs, [batch], grad_outputs=root.column(column),
-                    retain_graph=(column < root.n_columns - 1),
-                )
+                if leaves:
+                    grads = torch.autograd.grad(
+                        outputs, [batch, *leaves.values()], grad_outputs=root.column(column),
+                        retain_graph=(column < root.n_columns - 1),
+                    )
+                    raw_grads = {name: grad.detach() for name, grad in zip(leaves, grads[1:])}
+                else:
+                    torch.autograd.grad(
+                        outputs, [batch], grad_outputs=root.column(column),
+                        retain_graph=(column < root.n_columns - 1),
+                    )
+                    raw_grads = {}
                 yield ProbeColumn(capturer=capturer, start=start, stop=stop, column=column,
-                                  n_columns=root.n_columns, outputs=outputs)
+                                  n_columns=root.n_columns, outputs=outputs, inputs=batch,
+                                  grad_output=root.column(column), raw_grads=raw_grads)
 
 
 def per_sample_gradients(layer: CapturedLayer) -> Dict[str, Tensor]:

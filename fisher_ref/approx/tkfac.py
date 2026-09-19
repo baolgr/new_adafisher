@@ -1,22 +1,31 @@
-"""TKFAC: the trace-preserving Kronecker factorisation (``plan_exp_draft.md`` §4;
-arXiv:2011.10741 Eq. 4.3-4.9).
+"""TKFAC: the trace-preserving Kronecker factorisation (Gao et al., arXiv:2011.10741).
 
 ``K = delta * Phi (x) Psi`` with, in the paper's notation (``Lambda`` the per-sample input factor
-``a a^T``, ``Gamma`` the output one ``g g^T``):
+``a a^T``, ``Gamma`` the output one ``g g^T``, Eq. 4.3 to 4.9):
 
     delta = E[tr(Lambda) tr(Gamma)],   Phi = E[tr(Gamma) Lambda] / delta,
     Psi   = E[tr(Lambda) Gamma] / delta,   so tr(Phi) = tr(Psi) = 1.
 
-**It needs no new block class.** ``delta * Phi (x) Psi`` in this repository's ``rvec`` convention is
-``kron(delta * Psi, Phi)``, i.e. a :class:`~fisher_ref.approx.kfac.Kron` with the scalar folded into
-one factor — and folding it there rather than carrying it separately is what keeps ``solve`` and
+**It needs no new block class.** In this repository's row-major convention ``delta * Phi (x) Psi``
+is ``kron(delta * Psi, Phi)``, i.e. a :class:`~fisher_ref.approx.kfac.Kron` with the scalar folded
+into one factor. Folding it there rather than carrying it separately is what keeps ``solve`` and
 ``logdet`` exact, since ``delta K + lam I`` is not a Kronecker product but ``kron(delta*Psi, Phi)``
 still is.
 
-**Why the trace is preserved exactly** (T8): ``tr(K) = delta * tr(Phi) * tr(Psi) = delta``, and
-``tr(B_l) = E[||rvec(g a^T)||^2] = E[||a||^2 ||g||^2] = E[tr(Lambda) tr(Gamma)] = delta``. It is an
-identity of the estimator, not a property of the data — which is why `plan_lot3.md` §0.2 insists the
-EMA be kept on the **un-normalised numerators**: normalising first and multiplying back loses it.
+**Why the trace is preserved exactly.** ``tr(K) = delta * tr(Phi) * tr(Psi) = delta``, and the
+exact block's trace is ``E[||rvec(g a^T)||^2] = E[||a||^2 ||g||^2] = E[tr(Lambda) tr(Gamma)] =
+delta``. It is an identity of the estimator, not a property of the data -- which is why the running
+average must be kept on the **un-normalised numerators**. Normalising first and multiplying back
+loses it.
+
+Public API
+----------
+
+:class:`TkfacStats`  the un-normalised accumulators (``delta``, ``phi_raw``, ``psi_raw``) summed
+over probes and backprop columns, plus the probe count. ``build()`` returns the
+:class:`~fisher_ref.approx.kfac.Kron`.
+
+Dependencies: :mod:`fisher_ref.approx.kfac`.
 """
 
 from __future__ import annotations

@@ -45,7 +45,7 @@ else
   BUDGET_ARGS=(--budget-mode epochs)
 fi
 
-python -m benchmarks.resnet50_cifar100.bench \
+python -m benchmarks.models.resnet50_cifar100.bench \
   --arms adam \
   --epochs 50 \
   "${BUDGET_ARGS[@]}" \

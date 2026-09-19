@@ -1,27 +1,50 @@
-"""Precision policy, vectorisation convention and run metadata for the Fisher-drift campaign
-(``docs/reports/plan_exp_draft.md`` §2.5, §8; lot 0 of its §9).
+"""Precision policy, vectorisation convention and run metadata for the Fisher-drift campaign.
 
-Three things live here, and they are the invariants every later lot inherits:
+Three invariants live here, and every other module in ``fisher_ref`` inherits them.
 
-1. **Precision.** References (``F``, ``E_hat``, Grams, every metric) are fp64; the layer statistics
-   and ``U`` may be accumulated in fp32. TF32 is turned **off** on both the matmul and the cuDNN
-   path — the second defaults to ``True``, which is the trap: on A100/H100 convolutions then run in
-   TF32 with a relative error around ``1e-3`` on per-sample gradients, enough to break every
-   exactness test (``plan_exp_draft.md`` §2.5).
-2. **Vectorisation.** PyTorch flattens row-major (``rvec``), the literature writes ``cvec``. The
-   one identity that fixes everything is ``rvec(B M A^T) = (B (x) A) rvec(M)``, so the papers'
-   ``A (x) B`` (input factor first) is this repository's ``B (x) A``. ``kron_rvec`` is that
-   statement, once, with a numeric test behind it (T0.3).
-3. **Reference mode.** Every reference is computed with the model in ``eval`` mode: in ``train``
-   mode a ``BatchNorm2d`` output depends on the rest of the batch, so per-sample gradients — and
-   therefore ``F`` and ``E_hat`` — are not defined at all. ``reference_mode`` is the context that
-   guarantees it and restores whatever was there before; ``assert_sample_independent`` is the
-   check that it worked.
+1. **Precision.** Every reference matrix, every Kronecker factor and every metric is computed in
+   float64 (:data:`REFERENCE_DTYPE`). A Fisher spectrum spans more than eight orders of magnitude,
+   so in float32 the small eigenvalues carry no information at all. TF32 is turned off on both the
+   matmul path and the cuDNN path. The cuDNN switch defaults to ``True``, and that is the trap: on
+   an A100 or H100 a convolution then runs in TF32 and per-sample gradients come out about 1e-3
+   relative away, which breaks every exactness check in the test suite.
+2. **Vectorisation.** PyTorch flattens matrices row-major (this package calls that ``rvec``); the
+   K-FAC literature writes column-major (``cvec``). The identity that settles every ordering
+   question is ``rvec(B M A^T) = (B (x) A) rvec(M)``. So a paper writing ``F = A (x) B`` with ``A``
+   the input factor and ``B`` the output factor becomes ``kron(B, A)`` here: **output factor
+   first**. :func:`kron_rvec` is that statement written once. It is the central pitfall named by
+   ``papers/kfac_from_scratch_2507.05127.pdf`` (Def. 1/2 and Def. 23).
+3. **Reference mode.** Every reference is built with the network in ``eval`` mode. In ``train``
+   mode a ``BatchNorm2d`` output depends on the rest of the batch, so there is no per-sample
+   gradient to sum over and ``F`` is not defined at all. :func:`reference_mode` is the context
+   manager that guarantees it and restores the previous per-module modes;
+   :func:`assert_sample_independent` is the check that it worked.
 
-``configure()`` deliberately *returns what it set*. The TF32 switches have three spellings across
-torch versions (``allow_tf32``, and the newer ``fp32_precision``), so asserting one attribute is
-not evidence that TF32 is off — the returned record goes into every result file's metadata, and
-T0.1 checks that it agrees with the live state.
+Public API
+----------
+
+``REFERENCE_DTYPE`` / ``CAPTURE_DTYPE``  the two declared dtypes. ``CAPTURE_DTYPE`` (float32) is a
+declaration of what *may* be accumulated in single precision; no module uses it today, every
+accumulation being float64 end to end.
+
+``METRICS_VERSION``  a string stamped into every result file. Changing it invalidates comparisons
+with earlier results, which is why it is recorded rather than assumed.
+
+:func:`configure`  applies the precision policy and **returns what it set**. The TF32 switch has
+three spellings across torch versions (``allow_tf32`` on two backends, and the newer
+``fp32_precision``), so asserting one attribute is not evidence that TF32 is off. The returned
+:class:`PrecisionState` goes into every result file's metadata.
+
+:func:`precision_state`  reads the live backend state without changing it.
+
+:func:`run_metadata`  the provenance block written into every result file: metrics version, torch
+version, both dtypes, the precision state and the git revision.
+
+:func:`reference_mode`, :func:`assert_sample_independent`  see point 3 above.
+
+:func:`rvec`, :func:`unrvec`, :func:`kron_rvec`  the vectorisation convention.
+
+This module imports nothing from the rest of ``fisher_ref``.
 """
 
 from __future__ import annotations
@@ -36,12 +59,16 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-METRICS_VERSION = "fisher_ref/0.1"
+#: Bumped whenever the zoo or the result schema changes; 0.3 added TEKFAC and the four protocol
+#: rungs. Results carrying different versions are not comparable.
+METRICS_VERSION = "fisher_ref/0.3"
 
-#: Every reference and every metric is computed in this dtype (``plan_exp_draft.md`` §2.2: Fisher
-#: spectra span more than 1e8, and in fp32 eigenvalues below ~1e-7 * lambda_max are not meaningful).
+#: Every reference and every metric is computed in this dtype: a Fisher spectrum spans more than
+#: eight orders of magnitude, and in float32 an eigenvalue below about 1e-7 of the largest carries
+#: no information.
 REFERENCE_DTYPE = torch.float64
-#: ``U`` and the captured layer statistics may be accumulated here; the reductions are fp64.
+#: Declared as the dtype the per-example rows and layer statistics *may* be accumulated in. No
+#: module uses it today: every accumulation is float64 end to end.
 CAPTURE_DTYPE = torch.float32
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

@@ -1,31 +1,34 @@
-"""Numerically robust eigenbasis extraction, shared by ``ekfac`` and ``tekfac``.
+"""Numerically robust eigenvector extraction, shared by the ``ekfac`` and ``tekfac`` modes.
 
 Both modes need only the *eigenvectors* of a symmetric positive-semidefinite factor, and both used
-to call ``linalg.eigh`` on the raw EMA factor. On CUDA that crashes, reproducibly, on a factor that
-is **exactly** rank-deficient:
+to call ``torch.linalg.eigh`` on the raw running-average factor. On CUDA that crashes, reproducibly,
+on a factor that is **exactly** rank-deficient::
 
     torch._C._LinAlgError: linalg.eigh: The algorithm failed to converge because the input matrix
     is ill-conditioned or has too many repeated eigenvalues (error code: 1)
 
 Two measured instances, both from real cluster runs that died mid-training after 20 s and 4 min of
-useful work respectively (``benchmarks/slurm/logs/{mlp_ln_mnist,resnet20_cifar}_all-*.out``):
+useful work (``benchmarks/slurm/logs/{mlp_ln_mnist,resnet20_cifar}_all-*.out``):
 
-- ``mlp_ln_mnist``'s first ``Linear``: MNIST's border pixels are identically zero across the whole
-  dataset — 130 of 784 — so ``A`` is ``785 x 785`` of rank 646 with **136 exactly-zero
-  eigenvalues** and a condition number of ``4e301``;
-- ``resnet20_cifar``'s convolutions: the same structure reached by another route, a post-ReLU patch
+* ``mlp_ln_mnist``'s first ``Linear``. MNIST's border pixels are identically zero across the whole
+  dataset -- 130 of 784 -- so its input factor is 785 x 785 of rank 646, with 136 exactly-zero
+  eigenvalues and a condition number of 4e301.
+* ``resnet20_cifar``'s convolutions: the same structure reached by another route, a post-ReLU patch
   covariance with dead channels.
 
-``kfac``/``tkfac`` never hit this because they damp *before* inverting (``kfac.py::_damped_factors``
-builds ``A + sqrt(lambda*pi) I``, strictly positive definite by construction); the eigenbasis modes
-damped only afterwards, at ``precondition`` time (``s* + lambda``).
+The ``kfac`` and ``tkfac`` modes never hit this because they add their damping *before* inverting,
+which makes the matrix strictly positive definite. The eigenbasis modes damp only afterwards, when
+rescaling the projected gradient.
 
-**The ridge below is a conditioning device, not damping.** ``M + cI`` shifts every eigenvalue by
-``c`` and leaves every eigenvector — and their ascending order — unchanged, so the returned basis is
-mathematically identical to ``eigh(M)``'s. EKFAC's and TEKFAC's semantics are untouched, and
-``CLAUDE.md``'s rule that the four non-diagonal modes damp with ``lambda`` only still holds: the
-scaling applied to the projected gradient is still ``s* + lambda`` / ``Theta + lambda``, unchanged.
-Only the path cuSOLVER takes changes.
+:func:`eigenbasis` adds a small ridge before decomposing, and falls back to the CPU solver if the
+device solver still raises. **The ridge is a conditioning device, not damping.** ``M + c*I`` shifts
+every eigenvalue by ``c`` and leaves every eigenvector, and their ascending order, unchanged, so the
+basis returned is the same one ``eigh(M)`` would give. Only the eigenvectors are returned; the
+shifted eigenvalues are discarded, so nothing the modes use as curvature carries the ridge. The
+rule that the four Kronecker modes damp with ``lambda`` alone still holds.
+
+Not reproducible on a CPU-only test runner: LAPACK solves these matrices happily. Do not remove the
+ridge because the suite is green locally.
 """
 
 from __future__ import annotations
@@ -34,9 +37,11 @@ import warnings
 
 from torch import Tensor, eye, linalg
 
-# Relative to the factor's own mean diagonal entry, so it follows its scale. The bias-augmentation
-# column guarantees a nonzero diagonal for every supported layer type (``A[-1, -1] == 1`` for
-# Linear/Conv2d, ``A[1, 1] == 1`` for a normalisation layer), so the ridge is never zero.
+# Relative to the factor's own mean diagonal entry, so it follows the factor's scale. It is not
+# guaranteed nonzero: a bias-free Linear or Conv2d has no constant-one column, and the output
+# factor never has one, so a layer whose input or whose output gradient is identically zero gets a
+# ridge of zero and no conditioning at all. That case is degenerate anyway -- the factor is then the
+# zero matrix, which eigh handles.
 EIGH_RIDGE = 1e-6
 
 

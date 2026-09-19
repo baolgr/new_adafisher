@@ -1,27 +1,74 @@
-"""Abstract interface shared by every Fisher approximation mode.
+"""The interface every Fisher approximation mode implements.
 
-See docs/reports/plan_lot1.md §0 for the rationale behind this exact signature (three corrections
-to the sketch in docs/reports/plan.md §2.2, made precise while implementing lot 1):
+A mode is driven by four calls, in this order within one training step:
 
-1. ``update_input_factor`` / ``update_output_factor`` are two separate hook-driven calls, not one
-   ``update_factors(A, B)`` call, because the forward and backward hooks fire independently and
-   never have both raw factors available at the same time.
-2. ``precondition`` is called once per module, receiving the weight direction and (if present) the
-   bias direction together, so that a mode whose preconditioning is expensive (an eigenbasis
-   projection or a matrix inverse, for K-FAC/EKFAC/TKFAC/TEKFAC) computes its shared state exactly
-   once per module rather than once per parameter.
-3. ``precondition`` receives the *raw* first-moment tensor(s) (``exp_avg``), not a bias-corrected
-   ``m_hat``; the optimizer folds the bias-correction scalar into its own step size, mirroring
-   ``AdaFisher._step`` (adafisher.py:258-273) as closely as possible.
+1. :meth:`FisherApproximation.update_input_factor`, from a forward hook, with the layer's raw input.
+2. :meth:`FisherApproximation.update_output_factor`, from a backward hook, with the gradient
+   arriving at the layer's output.
+3. :meth:`FisherApproximation.refresh`, from ``step()``, to redo whatever is amortised over several
+   steps (a matrix inverse, an eigendecomposition). A no-op for ``diag``.
+4. :meth:`FisherApproximation.precondition`, from ``step()``, which applies the inverse second
+   moment to the direction the optimizer is about to take.
+
+Three details of this signature are deliberate.
+
+**The two factor updates are separate calls, not one.** The forward and backward hooks fire at
+different times and never hold both raw statistics at once. A mode that needs them paired (EKFAC
+and TEKFAC need the per-example input and gradient together) caches the input in
+``update_input_factor`` and consumes it in ``update_output_factor``. Those three modes consume
+their cache through :func:`pop_cached_input`, which turns "the input is not there" into one clear
+error instead of a bare ``KeyError`` in one mode and a silent skip in another.
+
+**``precondition`` is called once per module, with the weight and bias directions together.** The
+four Kronecker modes pay their dominant cost -- a projection into an eigenbasis, or two matrix
+products against a cached inverse -- once per module rather than once per parameter. It returns a
+single tensor when the module has no bias, and a ``(weight, bias)`` pair when it has one, mirroring
+the single-tensor-or-list convention of the reference implementation's own ``_get_F_tilde``.
+
+**``precondition`` receives the raw first moment, not a bias-corrected one.** The optimizer folds
+the Adam bias-correction scalar ``1 - beta**t`` into its own step size instead, exactly as the
+reference implementation does.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 from torch import Tensor
 from torch.nn import Module
+
+
+def pop_cached_input(cache: Dict[Module, Tensor], module: Module) -> Tensor:
+    """Take back the input ``update_input_factor`` cached for ``module``, or say why it is missing.
+
+    ``ekfac``, ``tkfac`` and ``tekfac`` pair each example's input with the gradient of the *same*
+    example, so the backward hook consumes exactly what the forward hook cached. One backward pass
+    per forward pass is what makes that pairing well defined, and there is no way to honour it
+    otherwise: a second backward over the same forward hands the output factor a second observation
+    while the input factor has only one, and the per-example pairing the eigen-rescaling and the
+    trace-restricted numerators are built from no longer exists.
+
+    So the second backward is refused here, for all three modes, with the same error. It used to be
+    a bare ``KeyError`` naming the module in ``tkfac`` and ``tekfac``, and a silent skip of the
+    rescaling update in ``ekfac`` -- three modes, three behaviours, none of them saying what was
+    wrong.
+
+    Note that ``diag`` and ``kfac`` cache nothing, so they cannot detect this and still accept a
+    second backward silently, folding the output gradient into their running average twice.
+    """
+    h_bar = cache.pop(module, None)
+    if h_bar is None:
+        raise RuntimeError(
+            f"No cached layer input for {module}: update_output_factor was reached without a "
+            f"matching update_input_factor. The usual cause is two backward passes over one "
+            f"forward pass (for example loss_a.backward(retain_graph=True) followed by "
+            f"loss_b.backward()), which this mode cannot support: it pairs each example's input "
+            f"with that same example's output gradient, and the second backward has no input to "
+            f"pair with. Run one backward per forward, or accumulate the two losses and call "
+            f"backward once."
+        )
+    return h_bar
 
 
 class FisherApproximation(ABC):

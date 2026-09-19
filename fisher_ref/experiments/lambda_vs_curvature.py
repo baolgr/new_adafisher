@@ -1,47 +1,52 @@
-"""Is ``lambda`` negligible against the real curvature scale? Per layer, per model, per mode.
+"""Is the damping constant negligible against the real curvature scale? Per layer, per model, per mode.
 
-Follow-up to ``docs/reports/validation_noise_investigation.md``. That investigation established
-(a) the Fisher modes' extra noise sits entirely on the held-out side, not the training side, and
-(b) across nine runs the only variable tracking it is model *size* (corr -0.68), not the share of
-normalisation layers (corr +0.20). The proposed reading of (b) is that "size" is a stand-in for
-the ratio between the **absolute** constant ``Lambda = 1e-3`` and each layer's own curvature
-scale, which depends on widths and activation magnitudes:
+The question comes from a prior observation: the Fisher modes' extra run-to-run noise sits entirely
+on the held-out side, not the training side, and across nine runs the only variable tracking it is
+model *size*, not the share of normalisation layers. The proposed reading is that "size" stands in
+for the ratio between the **absolute** damping constant and each layer's own curvature scale, which
+depends on widths and activation magnitudes:
 
-  * ``Lambda`` >> curvature  -> damping dominates every direction, every direction gets roughly the
-    same step, the method degenerates towards plain momentum. Calm, barely second-order.
-  * ``Lambda`` << curvature  -> the flattest directions are amplified by up to 1/Lambda. Aggressive,
-    and bumpy on held-out data.
+* damping much larger than curvature -- every direction gets roughly the same step and the method
+  degenerates towards plain momentum;
+* damping much smaller -- the flattest directions are amplified by up to one over the damping.
 
-This script measures that ratio directly.
+This script measures that ratio directly. Three numbers per (model, mode, layer), all read off the
+spectrum of the applied preconditioner::
 
-Three numbers per (model, mode, layer), all read off the spectrum of ``F~``:
+    curv/damp      median(undamped spectrum) / median(damping contribution)
+    frac_damp_dom  fraction of the spectrum where the damping term exceeds the curvature itself
+    dyn_range      p99 / p01 of the *applied* divisor: how much more the flattest directions are
+                   amplified than the steepest
 
-  curv/damp        median(undamped spectrum) / median(damping contribution). >> 1 means Lambda is
-                   negligible; << 1 means Lambda runs the show.
-  frac_damp_dom    fraction of the spectrum where the damping term exceeds the curvature itself.
-  dyn_range        p99 / p01 of the *applied* divisor -- how much more the flattest directions are
-                   amplified than the steepest. This is the quantity the noise should track.
+Damping is not a uniform additive shift in every mode, which is why both the undamped and the
+damped spectrum are formed rather than a single scalar::
 
-Damping is not a uniform additive shift in every mode, which is why the script works with both the
-undamped and the damped spectrum rather than with a single scalar:
+    diag    F~ = outer(S, H) + lam                        (H, S renormalised into [0,1])
+    kfac    F~ = kron(B + sqrt(lam)/pi I, A + pi sqrt(lam) I)   (split across the two factors)
+    ekfac   F~ = s* + lam                                 (s* IS the spectrum, in its own basis)
+    tkfac   F~ = delta * kron(Psi + d, Phi + d)           (d = sqrt(lam/delta))
+    tekfac  F~ = Theta + lam                              (Theta IS the spectrum)
 
-  diag    F~ = outer(S, H) + Lambda                     (H, S min-max'd into [0,1])
-  kfac    F~ = kron(B + sqrt(L)/pi I, A + pi sqrt(L) I) (damping split across the two factors)
-  ekfac   F~ = s* + Lambda                              (s* IS the spectrum, in its own eigenbasis)
-  tkfac   F~ = delta * kron(Psi + d, Phi + d)           (d = sqrt(Lambda/delta))
-  tekfac  F~ = Theta + Lambda                           (Theta IS the spectrum)
+Protocol. The checkpoints hold weights only, so the running averages have to be re-warmed before
+they can be read. The rule established by ``rewarm_fidelity.py``: every mode seeds its average with
+the identity, which acts as a spurious extra damping of ``0.08^k``, so the requirement is
+``0.08^k << lambda``, i.e. ten factor updates, not three. Each mode is re-warmed at *its own*
+checkpoint, in the conditions that arm actually trained under, with the arm's own hyperparameters
+read from its manifest.
 
-Protocol. The checkpoints hold theta only, so the EMA state must be re-warmed before it can be
-read. ``rewarm_fidelity.py`` established the rule -- every mode seeds its EMA with the IDENTITY,
-which acts as a spurious extra damping of ``0.08^k`` on top of Lambda, so the requirement is
-``0.08^k << Lambda``, i.e. **k = 10 factor updates**, not 3. Hence REWARM_STEPS = 10 * TCov. Each
-mode is re-warmed at *its own* ckpt_0.5, i.e. in the conditions that arm actually ran in, and with
-that run's own hyperparameters read from its manifest.
+Environment variables::
 
-Eigenvalues are computed on the CPU on purpose: cuSOLVER raises on the exactly rank-deficient
-factors this project has already hit in production (see ``approximations/_eigh_utils.py``).
+    REWARM_STEPS   re-warm length in steps  (default: 1000, i.e. ten factor updates at TCov 100)
+    CKPT_FRACTION  which checkpoint         (default: 0.5)
+    DATA_ROOT      dataset root             (default: benchmarks/data)
+    MODELS         comma-separated run directories; unset means every run found
 
-Env vars: REWARM_STEPS, CKPT_FRACTION, DATA_ROOT, MODELS (comma-separated run-directory names).
+Output: ``fisher_ref/outputs/lambda_vs_curvature.json`` plus a per-layer table on standard output.
+
+``spectra()`` here is the shared helper two sibling scripts import
+(``curvature_max_per_layer.py``, ``early_curvature.py``). They import it by its full package path,
+so both ``python -m fisher_ref.experiments.<name>`` and running the file by path work; each puts
+the repository root on the import path first.
 """
 import inspect
 import json

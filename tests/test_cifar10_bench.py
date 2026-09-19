@@ -20,6 +20,7 @@ import pytest
 import torch
 import torch.nn as nn
 from conftest import TinyMultiLayerNet, seed_all
+from PIL import Image
 from torch.utils.data import DataLoader, TensorDataset
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +28,17 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from adafisher_modes import AdaFisherMulti  # noqa: E402
 
-from benchmarks.common.data import Cutout, seeded_train_val_split  # noqa: E402
+from benchmarks.common.data import (  # noqa: E402
+    CIFAR10_SPEC,
+    CIFAR100_SPEC,
+    MNIST_SPEC,
+    Cutout,
+    build_transforms,
+    seeded_train_val_split,
+)
+from benchmarks.common.data import cifar10 as data_cifar10  # noqa: E402
+from benchmarks.common.data import cifar100 as data_cifar100  # noqa: E402
+from benchmarks.common.data import mnist as data_mnist  # noqa: E402
 from benchmarks.common.loop import train_under_budget  # noqa: E402
 from benchmarks.common.records import (  # noqa: E402
     ArmResult,
@@ -38,8 +49,8 @@ from benchmarks.common.records import (  # noqa: E402
     write_step_csv,
     write_summary,
 )
-from benchmarks.resnet50_cifar.model import build_resnet50_cifar  # noqa: E402
-from benchmarks.vit_small_cifar.model import build_vit_small_cifar  # noqa: E402
+from benchmarks.models.resnet50_cifar.model import build_resnet50_cifar  # noqa: E402
+from benchmarks.models.vit_small_cifar.model import build_vit_small_cifar  # noqa: E402
 
 # The two lot-8 nets, kept as a local table: the repository-wide registry is now the folder list
 # (plan_exp_step1.md §5), exercised by tests/test_benchmark_models.py.
@@ -74,7 +85,9 @@ def test_resnet50_shapes_and_param_count() -> None:
     assert model(torch.randn(2, 3, 32, 32)).shape == (2, 10)
 
     n_params = sum(p.numel() for p in model.parameters())
-    assert 23.4e6 < n_params < 23.6e6, n_params  # 23.52 M, plan_lot8.md §0.1
+    # Exact, not a 23.4-23.6 M window: a band that wide accepts a ResNet with the wrong number of
+    # blocks. The same number is the contract in tests/test_benchmark_models.py::EXPECTED.
+    assert n_params == 23_520_842, n_params  # "23.52 M", plan_lot8.md §0.1
     assert _count_types(model) == {"Conv2d": 53, "BatchNorm2d": 53, "Linear": 1}
 
     # resnet_1512.03385.pdf §4.2's CIFAR stem: 3x3, stride 1, and no max-pool anywhere.
@@ -90,7 +103,9 @@ def test_vit_shapes_and_param_count() -> None:
     assert model(torch.randn(2, 3, 32, 32)).shape == (2, 10)
 
     n_params = sum(p.numel() for p in model.parameters())
-    assert 2.6e6 < n_params < 2.8e6, n_params  # 2.69 M, plan_lot8.md §0.2
+    # Exact: a 2.6-2.8 M window admits a ViT of the wrong depth, which is the one thing this
+    # adaptation could plausibly get wrong (Table 1 defines no /4 variant).
+    assert n_params == 2_693_578, n_params  # "2.69 M", plan_lot8.md §0.2
     assert _count_types(model) == {"Conv2d": 1, "LayerNorm": 13, "Linear": 25}
 
     # 32/4 = 8 -> 64 patches, plus the [class] token of Eq. (1) = 65 positions.
@@ -300,9 +315,62 @@ def test_decoupled_weight_decay_matches_official_rule() -> None:
         optimizer.step()
         finals.append((before, [p.detach().clone() for p in model.parameters()]))
 
+    # ``rtol=0``: the default 1e-5 is relative to parameters of magnitude up to 13.7 here, i.e. an
+    # effective tolerance of 1.37e-4 against a measured worst residual of 9.537e-7 — 140x of slack,
+    # enough that a wrong decay *coefficient* would have passed. 9.537e-7 is exactly one float32
+    # ULP at that magnitude (2^-20), so the identity holds to the last bit and 3e-6 is a 3.1x
+    # margin on it. Measured over 5 repeated runs: identical to the last bit every time.
     (before_decoupled, after_decoupled), (_, after_plain) = finals
+    worst = 0.0
     for p0, p_dec, p_plain in zip(before_decoupled, after_decoupled, after_plain):
-        assert torch.allclose(p_dec, p_plain - lr * wd * p0, atol=1e-7)
+        worst = max(worst, float((p_dec - (p_plain - lr * wd * p0)).abs().max()))
+        assert torch.allclose(p_dec, p_plain - lr * wd * p0, rtol=0.0, atol=3e-6)
+    assert worst < 3e-6, worst
+
+
+def test_adam_and_adamw_are_bit_identical_at_zero_weight_decay() -> None:
+    """``CLAUDE.md`` states it as a property of the campaign ("``adam`` bit-identical to ``adamw``
+    on the two models with ``wd=0``") and the campaign-1 audit used it as a cross-check, but no
+    test held it.
+
+    The two rules differ only in *where* the decay is applied — into the gradient, or straight onto
+    the weights — so at ``weight_decay=0`` they are the same algorithm and must agree to the last
+    bit, not merely to a tolerance. Anything looser would not notice ``adamw`` silently picking up
+    a non-zero default decay, which is exactly what torch's own ``AdamW(weight_decay=1e-2)``
+    default would do if ``build_optimizer`` ever stopped passing the field.
+    """
+    from benchmarks.common.optimizers import HParams, build_optimizer
+
+    hp = HParams(baseline_lr=1e-2, weight_decay=0.0)
+    trajectories = []
+    for arm in ("adam", "adamw"):
+        seed_all(0)
+        model = TinyMultiLayerNet()
+        optimizer = build_optimizer(arm, model, hp)
+        seed_all(1)
+        x = torch.randn(6, 2, 5, 5)
+        for _ in range(4):
+            optimizer.zero_grad()
+            model(x).pow(2).mean().backward()
+            optimizer.step()
+        trajectories.append([p.detach().clone() for p in model.parameters()])
+    assert all(torch.equal(a, b) for a, b in zip(*trajectories))
+
+    # Non-vacuous: at a non-zero decay the two conventions do diverge, so the equality above is a
+    # statement about wd=0 rather than about the two optimizers being interchangeable.
+    decayed = []
+    for arm in ("adam", "adamw"):
+        seed_all(0)
+        model = TinyMultiLayerNet()
+        optimizer = build_optimizer(arm, model, HParams(baseline_lr=1e-2, weight_decay=0.1))
+        seed_all(1)
+        x = torch.randn(6, 2, 5, 5)
+        for _ in range(4):
+            optimizer.zero_grad()
+            model(x).pow(2).mean().backward()
+            optimizer.step()
+        decayed.append([p.detach().clone() for p in model.parameters()])
+    assert not all(torch.equal(a, b) for a, b in zip(*decayed))
 
 
 def test_coupled_weight_decay_matches_reference_adafisher(fisheradaptune_adafisher) -> None:
@@ -369,8 +437,12 @@ def test_budget_is_respected_and_eval_time_is_excluded() -> None:
     assert steps and epochs
     assert all(math.isfinite(r.loss) for r in steps)
     assert eval_calls["n"] == len(epochs)
-    max_step = max(r.fwd_bwd_s + r.step_s for r in steps)
-    assert steps[-1].elapsed_s <= budget + max_step + 1e-3
+    # The last batch's own cycle, not the largest cycle anywhere in the run — see the derivation
+    # in tests/test_equal_wallclock_bench.py::test_budget_is_respected_and_run_completes.
+    last = steps[-1]
+    bound = last.data_s + last.fwd_bwd_s + last.step_s
+    assert last.elapsed_s - budget <= bound + 1e-4
+    assert bound < 0.02 * budget, "the bound is too large a share of the budget to constrain it"
     # The excluded eval time really is excluded: real wall-clock exceeds the accounted budget by
     # roughly one 0.05s eval per epoch.
     assert wall >= steps[-1].elapsed_s + 0.05 * len(epochs) - 1e-2
@@ -394,6 +466,18 @@ def test_max_epochs_caps_a_cheap_arm() -> None:
 
 
 def test_scheduler_steps_once_per_completed_epoch() -> None:
+    """Two separate facts, asserted separately because the ``lr`` column used to conflate them.
+
+    The scheduler is stepped once per *completed* epoch — after three epochs an ``lr=1.0`` halved
+    each time stands at 0.125. And ``EpochRecord.lr`` is the rate the epoch **actually ran at**,
+    which for those three epochs is 1.0, 0.5, 0.25: the rate 0.125 is not used by any of them.
+
+    The column used to read ``[0.5, 0.25, 0.125]``, i.e. each epoch labelled with the rate the
+    *next* one would use. Verified on shipped data before the fix: in
+    ``benchmarks/outputs/cifar10/cnn_gn_cifar/epochs.csv`` (base 1e-3, ``T_max = 30``) epoch 0
+    records 0.0009972609, which is exactly the cosine value for epoch 1, while 1e-3 — the rate
+    epoch 0 was trained at — appears nowhere in the file.
+    """
     seed_all(0)
     model, loader = _synthetic_task()
     optimizer = AdaFisherMulti(model, lr=1.0, TCov=1, fisher_mode="diag")
@@ -402,7 +486,8 @@ def test_scheduler_steps_once_per_completed_epoch() -> None:
         model, optimizer, loader, nn.CrossEntropyLoss(),
         budget_s=1e6, max_epochs=3, scheduler=scheduler, log_fn=lambda _: None,
     )
-    assert [round(e.lr, 6) for e in epochs] == [0.5, 0.25, 0.125]
+    assert [round(e.lr, 6) for e in epochs] == [1.0, 0.5, 0.25]
+    assert round(float(optimizer.param_groups[0]["lr"]), 6) == 0.125, "one step per epoch"
 
 
 # ----------------------------------------------------------------------------------------------
@@ -411,19 +496,160 @@ def test_scheduler_steps_once_per_completed_epoch() -> None:
 
 
 def test_cutout_masks_one_square_region() -> None:
+    # The exact hole, re-derived from the same two draws Cutout makes: an upper bound of 16*16
+    # accepts an 8x8 hole, i.e. exactly the regression this test exists to catch. At seed 0 the
+    # centre is (12, 15), far enough from every edge that the hole is the full 16x16 = 256 pixels.
+    seed_all(0)
+    cy = int(torch.randint(32, (1,)).item())
+    cx = int(torch.randint(32, (1,)).item())
+    assert (cy, cx) == (12, 15)
+    y0, y1 = max(0, cy - 8), min(32, cy + 8)
+    x0, x1 = max(0, cx - 8), min(32, cx + 8)
+    assert (y1 - y0) * (x1 - x0) == 16 * 16, "the fixture must exercise a full-size hole"
+
     seed_all(0)
     img = torch.ones(3, 32, 32)
     out = Cutout(n_holes=1, length=16)(img)
     zeroed = (out[0] == 0)
     assert zeroed.any(), "Cutout masked nothing"
     assert zeroed.sum().item() <= 16 * 16
+    assert zeroed.sum().item() == (y1 - y0) * (x1 - x0), "wrong masked area"
     rows, cols = zeroed.any(dim=1).nonzero().flatten(), zeroed.any(dim=0).nonzero().flatten()
+    assert (int(rows[0]), int(rows[-1]) + 1) == (y0, y1)
+    assert (int(cols[0]), int(cols[-1]) + 1) == (x0, x1)
     # One axis-aligned, contiguous rectangle.
     assert torch.equal(rows, torch.arange(int(rows[0]), int(rows[-1]) + 1))
     assert torch.equal(cols, torch.arange(int(cols[0]), int(cols[-1]) + 1))
     # Identical mask across channels, and untouched pixels are untouched.
     assert torch.equal(out[0] == 0, out[1] == 0) and torch.equal(out[0] == 0, out[2] == 0)
     assert torch.equal(out[~zeroed.unsqueeze(0).expand(3, -1, -1)], img[~zeroed.unsqueeze(0).expand(3, -1, -1)])
+
+
+# ----------------------------------------------------------------------------------------------
+# The torchvision half of the data pipeline: build_transforms, build_loaders, mnist/cifar10/
+# cifar100. None of these was called by any test — the ImageNet path had coverage, this one did
+# not, so "the validation stream uses the eval transform, never the train augmentation" was
+# asserted for ImageNet only. The files are already in benchmarks/data/; nothing here downloads,
+# and a missing dataset is a skip with a reason, never a fetch.
+# ----------------------------------------------------------------------------------------------
+
+DATA_ROOT = REPO_ROOT / "benchmarks" / "data"
+
+#: ``(builder, spec, directory that must exist, train size, image shape)``. The validation split is
+#: 5000 everywhere and the official test set 10 000; the train size is what is left of the official
+#: training set (60 000 for MNIST, 50 000 for CIFAR).
+TORCHVISION_DATASETS = {
+    "mnist": (data_mnist, MNIST_SPEC, "MNIST", 55_000, (1, 28, 28)),
+    "cifar10": (data_cifar10, CIFAR10_SPEC, "cifar-10-batches-py", 45_000, (3, 32, 32)),
+    "cifar100": (data_cifar100, CIFAR100_SPEC, "cifar-100-python", 45_000, (3, 32, 32)),
+}
+
+AUGMENTATIONS = ("RandomCrop", "RandomHorizontalFlip", "Cutout")
+
+
+def _ops(transform) -> List[str]:
+    return [type(t).__name__ for t in transform.transforms]
+
+
+@pytest.fixture(scope="module", params=sorted(TORCHVISION_DATASETS))
+def loaders(request):
+    """The three real loaders of one dataset, read from ``benchmarks/data/`` with downloading
+    switched off. Built once per dataset (~0.7 s for CIFAR) and shared by the tests below.
+    """
+    name = request.param
+    builder, spec, directory, train_size, shape = TORCHVISION_DATASETS[name]
+    if not (DATA_ROOT / directory).is_dir():
+        pytest.skip(f"{name} is not staged at {DATA_ROOT / directory}; this test never downloads")
+    train, val, test = builder(DATA_ROOT, batch_size=8, seed=0, num_workers=0,
+                               allow_download=False)
+    return name, spec, train_size, shape, train, val, test
+
+
+@pytest.mark.parametrize("name", sorted(TORCHVISION_DATASETS))
+def test_build_transforms_augments_the_train_stream_only(name: str) -> None:
+    """``spec.augment`` decides, and MNIST's ``False`` must make the two transforms *the same
+    pipeline*, not a silently different one (``papers/ekfac_1806.03884.pdf`` §4.1's protocol has
+    no augmentation at all).
+    """
+    _builder, spec, _dir, _n, _shape = TORCHVISION_DATASETS[name]
+    train_tf, eval_tf = build_transforms(spec, cutout=True, cutout_length=16)
+    assert _ops(eval_tf) == ["ToTensor", "Normalize"], "the eval transform must only normalize"
+    if not spec.augment:
+        assert _ops(train_tf) == _ops(eval_tf), f"{name} must not be augmented"
+        return
+    assert _ops(train_tf) == ["RandomCrop", "RandomHorizontalFlip", "ToTensor", "Normalize",
+                              "Cutout"]
+    # resnet_1512.03385.pdf §4.2: "4 pixels are padded on each side, and a 32x32 crop is randomly
+    # sampled"; AdaFisher's own configs then add one 16 px Cutout hole.
+    assert train_tf.transforms[0].padding == 4 and train_tf.transforms[0].size == (32, 32)
+    assert train_tf.transforms[-1].length == 16 and train_tf.transforms[-1].n_holes == 1
+    assert _ops(build_transforms(spec, cutout=False, cutout_length=16)[0])[-1] == "Normalize"
+
+
+def test_build_loaders_splits_shapes_and_sampling(loaders) -> None:
+    name, spec, train_size, shape, train, val, test = loaders
+    assert (len(train.dataset), len(val.dataset)) == (train_size, spec.val_size), name
+    assert len(test.dataset) == 10_000, name
+    # The three streams are disjoint by construction: train/val share one underlying dataset and
+    # partition its indices, test is the official held-out set.
+    assert set(train.dataset.indices).isdisjoint(val.dataset.indices)
+    assert len(set(train.dataset.indices) | set(val.dataset.indices)) == train_size + spec.val_size
+    # Training is shuffled and drops a ragged last batch; evaluation is ordered and keeps it.
+    assert train.drop_last is True and type(train.sampler).__name__ == "RandomSampler"
+    for loader in (val, test):
+        assert loader.drop_last is False and type(loader.sampler).__name__ == "SequentialSampler"
+    inputs, targets = next(iter(val))
+    assert inputs.shape == (8, *shape) and inputs.dtype == torch.float32
+    assert targets.dtype == torch.int64 and int(targets.max()) < (100 if name == "cifar100" else 10)
+
+
+def test_val_and_test_streams_use_the_eval_transform(loaders) -> None:
+    """The validation split is carved out of the *training* set, so the one thing that must not
+    leak across is the train augmentation. Asserted structurally and then numerically: two passes
+    over the same validation batches must be bit-identical.
+    """
+    name, spec, _n, _shape, train, val, test = loaders
+    for loader in (val, test):
+        underlying = loader.dataset.dataset if hasattr(loader.dataset, "dataset") else loader.dataset
+        assert not set(_ops(underlying.transform)) & set(AUGMENTATIONS), name
+
+    first = torch.cat([x for i, (x, _) in enumerate(val) if i < 3])
+    second = torch.cat([x for i, (x, _) in enumerate(val) if i < 3])
+    assert torch.equal(first, second), f"{name}: the validation stream is not deterministic"
+
+    if spec.augment:
+        # Non-vacuous: the train pipeline of the *same* dataset really is random, so the check
+        # above would fail if it were the one wired into the validation loader.
+        assert set(_ops(train.dataset.dataset.transform)) >= set(AUGMENTATIONS), name
+        raw = train.dataset.dataset.data[0]
+        image = Image.fromarray(raw)
+        train_tf = train.dataset.dataset.transform
+        assert not torch.equal(train_tf(image), train_tf(image)), f"{name}: train tf is not random"
+
+
+def test_train_subset_truncates_the_train_split_only(loaders) -> None:
+    """A smoke run shortens training; its validation and test metrics must still mean what they
+    say, so those two streams stay full.
+    """
+    name, spec, _n, _shape, _train, _val, _test = loaders
+    builder = TORCHVISION_DATASETS[name][0]
+    train, val, test = builder(DATA_ROOT, batch_size=8, seed=0, num_workers=0,
+                               allow_download=False, train_subset=64)
+    assert len(train.dataset) == 64
+    assert (len(val.dataset), len(test.dataset)) == (spec.val_size, 10_000)
+
+
+def test_build_loaders_split_follows_the_seed(loaders) -> None:
+    name, _spec, _n, _shape, train, val, _test = loaders
+    builder = TORCHVISION_DATASETS[name][0]
+    same, same_val, _ = builder(DATA_ROOT, batch_size=8, seed=0, num_workers=0,
+                                allow_download=False, train_subset=64)
+    other, other_val, _ = builder(DATA_ROOT, batch_size=8, seed=1, num_workers=0,
+                                  allow_download=False, train_subset=64)
+    assert same.dataset.indices == train.dataset.indices[:64]
+    assert val.dataset.indices == same_val.dataset.indices
+    assert other.dataset.indices != same.dataset.indices
+    assert other_val.dataset.indices != same_val.dataset.indices, name
 
 
 def test_train_val_split_is_seeded_disjoint_and_sized() -> None:
@@ -439,7 +665,7 @@ def test_train_val_split_is_seeded_disjoint_and_sized() -> None:
 def _fake_result(arm: str) -> ArmResult:
     steps = [
         StepRecord(step=i, epoch=i / 4, elapsed_s=0.1 * i, loss=1.0 / (i + 1),
-                   fwd_bwd_s=0.01, step_s=0.02)
+                   fwd_bwd_s=0.01, step_s=0.02, data_s=0.07)
         for i in range(8)
     ]
     epochs = [
@@ -457,18 +683,32 @@ def test_summary_and_csv_schema(tmp_path: Path) -> None:
     summary = write_summary(results, tmp_path / "summary.md", skip_first=0)
 
     step_lines = (tmp_path / "records.csv").read_text().strip().splitlines()
-    assert step_lines[0] == "arm,step,epoch,elapsed_s,loss,fwd_bwd_s,step_s"
+    # ``data_s`` is appended on the right, so the seven columns that existed keep their positions
+    # and every by-name reader is unaffected.
+    assert step_lines[0] == "arm,step,epoch,elapsed_s,loss,fwd_bwd_s,step_s,data_s"
+    assert step_lines[0].startswith("arm,step,epoch,elapsed_s,loss,fwd_bwd_s,step_s")
     assert len(step_lines) == 1 + 2 * 8
+    row = dict(zip(step_lines[0].split(","), step_lines[1].split(",")))
+    assert float(row["data_s"]) == 0.07 and float(row["step_s"]) == 0.02
     epoch_lines = (tmp_path / "epochs.csv").read_text().strip().splitlines()
     assert epoch_lines[0] == "arm,epoch,steps,elapsed_s,train_loss,val_loss,val_acc,lr"
     assert len(epoch_lines) == 1 + 2 * 2
 
-    for column in ("best val acc", "test acc", "step/fwd+bwd", "total wall-clock", "peak VRAM"):
+    for column in ("best val acc", "test acc", "step/fwd+bwd", "total wall-clock", "peak VRAM",
+                   "compute share"):
         assert column in summary
     assert "| diag |" in summary and "| adamw |" in summary
     assert "2.00x" in summary  # step_s / fwd_bwd_s = 0.02 / 0.01
     assert "40.00%" in summary  # best val acc = 0.3 + 0.1
     assert "42.00%" in summary  # test acc
+    # compute share = sum(fwd_bwd_s + step_s) / total_s = 8 * 0.03 / 0.8 = 30.0%. The rest of the
+    # budget is data_s: fetch and host-to-device copy, which the WCT protocol charges to every arm
+    # once per epoch and which therefore taxes the arms that complete the most epochs.
+    assert "| 30.0% |" in summary
+    # One row per arm, and every row carries the new column: 11 separators before it, 12 after.
+    body = [ln for ln in summary.splitlines() if ln.startswith("| ") and "---" not in ln]
+    assert len(body) == 3  # header + two arms
+    assert all(ln.count("|") == 13 for ln in body), body
 
 
 def test_peak_vram_column_reports_bytes_and_absence(tmp_path: Path) -> None:

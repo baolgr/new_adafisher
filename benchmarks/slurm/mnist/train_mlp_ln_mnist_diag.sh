@@ -35,7 +35,7 @@ DATA_ROOT="${DATA_ROOT:-$SLURM_SUBMIT_DIR/dataset}"
 # every other arm's wall-clock budget. Read it back from the run's manifest.json:
 #   python -c "import json;print(json.load(open('benchmarks/outputs/mnist/mlp_ln_mnist/diag/manifest.json'))['arms']['diag']['total_s'])"
 # and pass it to the other jobs as --wct-budget (they default to WCT_BUDGET below).
-python -m benchmarks.mlp_ln_mnist.bench \
+python -m benchmarks.models.mlp_ln_mnist.bench \
   --arms diag \
   --epochs 20 \
   --budget-mode epochs \

@@ -65,7 +65,7 @@ DATA_ROOT="${DATA_ROOT:-$SLURM_SUBMIT_DIR/dataset}"
 # climbed back up, while an expensive arm stopped before reaching the floor — both measured, both
 # documented in benchmarks/common/schedules.py. The reference arm is unbudgeted and keeps the
 # nominal schedule; it is what defines the budget.
-python -m benchmarks.cnn_gn_imagenet.bench \
+python -m benchmarks.models.cnn_gn_imagenet.bench \
   --arms diag kfac ekfac tkfac tekfac adam adamw \
   --epochs 40 \
   --budget-mode wct \

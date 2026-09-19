@@ -1,26 +1,32 @@
-"""Why do `kfac` on `cnn_gn_cifar` and `tkfac` on `cct_2_3x2_cifar` fail Step 14's SGD-equivalence
-check, while `resnet20_cifar` never fails outright on *any* mode -- just sits a few percent off on
-all five?
+"""Why does a plain-momentum stand-in reproduce some networks and modes but not others?
 
-Step 15 found the mechanism that can make `kfac`/`tkfac` misbehave: a damped Kronecker factor can
-be badly conditioned (a near-zero eigenvalue swamped by one huge one), which no scalar schedule
-can reproduce and which amplifies noise in the corresponding direction. Step 15 only observed this
-as an outright *crash* once `Lambda` was pushed far below default, on `mlp_ln_mnist`. At each
-network's own default `Lambda`, `lambda_vs_curvature.py`'s own per-layer `dyn_range` (Step 7/10) is
-flat everywhere (~1.0-1.1) at `ckpt_0.5` -- but that is read off an *already-warm*, mid-training
-checkpoint. Step 13 measured that early in a *fresh* run, `dyn_range` of the raw (undamped)
-spectrum grows by 3-4 orders of magnitude over the first few hundred steps even while curvature's
-overall *magnitude* fades toward Lambda -- but Step 13 never looked at the *damped* spectrum (the
-matrix actually inverted and applied), and never covered `cct_2_3x2_cifar` at all.
+A damped Kronecker factor can be badly conditioned -- a near-zero eigenvalue swamped by one huge
+one -- which no scalar schedule can reproduce and which amplifies noise in the corresponding
+direction. That mechanism had only been observed as an outright *crash*, once the damping constant
+was pushed far below its default. At each network's own default the per-layer dynamic range is flat
+everywhere (about 1.0 to 1.1) at a half-trajectory checkpoint -- but that is read off an
+already-warm network. Early in a *fresh* run the dynamic range of the raw, undamped spectrum grows
+by three to four orders of magnitude over the first few hundred steps, even while curvature's
+overall magnitude fades towards the damping constant. What had never been looked at is the *damped*
+spectrum, which is the matrix actually inverted and applied.
 
-This script closes that gap: for `cnn_gn_cifar`, `cct_2_3x2_cifar` and `resnet20_cifar`, all five
-modes, a real fresh `AdaFisherMulti` run, snapshotting both the undamped and the *damped* spectrum
-per hooked layer at k=1..5 (absolute steps 0, 100, 200, 300, 400). If `kfac` on `cnn_gn_cifar` (or
-`tkfac` on `cct_2_3x2_cifar`) shows a damped-spectrum dyn_range that `tkfac` (or `kfac`) does not
-show on the same layer of the same network early in training, that is the mechanism; if
-`resnet20_cifar` never shows a comparably extreme value on any single layer in any mode, that is
-consistent with its gap coming from many small, evenly-spread imperfections (Step 12/13's dilution
-idea) rather than one bad layer.
+This script closes that gap: for three networks and all five modes, a real fresh
+``AdaFisherMulti`` run, snapshotting both the undamped and the **damped** spectrum per hooked layer
+at the first five factor updates (absolute steps 0, 100, 200, 300, 400).
+
+Reading it: if one mode shows a damped-spectrum dynamic range on a layer that another mode does not
+show on the same layer of the same network, that is the mechanism. If a network never shows a
+comparably extreme value on any single layer in any mode, that is consistent with its gap coming
+from many small, evenly spread imperfections rather than one bad layer.
+
+Environment variables::
+
+    EARLY_COND_MODELS  comma-separated run directories
+                       (default: cnn_gn_cifar,cct_2_3x2_cifar,resnet20_cifar)
+    EARLY_COND_MODES   comma-separated modes (default: diag,kfac,tkfac,ekfac,tekfac)
+    DATA_ROOT          dataset root (default: benchmarks/data)
+
+Output: a table on standard output. Nothing is written to disk.
 """
 from __future__ import annotations
 

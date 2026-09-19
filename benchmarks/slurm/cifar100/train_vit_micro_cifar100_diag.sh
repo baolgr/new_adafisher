@@ -35,7 +35,7 @@ DATA_ROOT="${DATA_ROOT:-$SLURM_SUBMIT_DIR/dataset}"
 # every other arm's wall-clock budget. Read it back from the run's manifest.json:
 #   python -c "import json;print(json.load(open('benchmarks/outputs/cifar100/vit_micro_cifar100/diag/manifest.json'))['arms']['diag']['total_s'])"
 # and pass it to the other jobs as --wct-budget (they default to WCT_BUDGET below).
-python -m benchmarks.vit_micro_cifar100.bench \
+python -m benchmarks.models.vit_micro_cifar100.bench \
   --arms diag \
   --epochs 30 \
   --budget-mode epochs \

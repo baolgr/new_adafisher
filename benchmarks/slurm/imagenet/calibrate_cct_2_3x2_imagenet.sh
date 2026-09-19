@@ -54,7 +54,7 @@ DATA_ROOT="${DATA_ROOT:-$SLURM_SUBMIT_DIR/dataset}"
 # steps/s, median step time and peak CUDA memory. Its job is to turn this model's --time value
 # from an extrapolation into a measurement, and to confirm every arm fits the 10 GB MIG slice.
 # Run this BEFORE the training jobs.
-python -m benchmarks.cct_2_3x2_imagenet.bench \
+python -m benchmarks.models.cct_2_3x2_imagenet.bench \
   --arms diag kfac ekfac tkfac tekfac adam adamw \
   --epochs 2 \
   --budget-mode epochs \

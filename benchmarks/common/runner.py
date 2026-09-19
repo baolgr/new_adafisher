@@ -1,13 +1,67 @@
-"""The single runner (``plan_exp_step1.md`` D3): arm loop, WCT protocol, seeding, reporting, CLI.
+"""The runner every bench calls: argument parsing, the arm loop, seeding and reporting.
 
-A model's ``bench.py`` is a ``Benchmark`` literal plus ``main(BENCH)`` — no control flow, no
-argument parsing, no reporting of its own (target: 50 lines).
+A model's ``bench.py`` is a :class:`Benchmark` literal plus ``main(BENCH)`` — no control flow, no
+argument parsing, no reporting of its own. Everything else happens here.
 
-The wall-clock-time protocol is AdaFisher's own (``adafisher_2405.16397.pdf`` §5, p. 8: *"We employ
-the Wall-Clock-Time (WCT) method with a cutoff of 200 epochs for AdaFisher's training"*): one
-reference arm runs a fixed epoch count, every other arm gets that arm's measured wall-clock time
-and runs as many epochs as fit. ``plan.md`` §6.3: an epoch-fixed comparison is "rigged in favour of
-the expensive modes".
+The wall-clock-time protocol
+----------------------------
+
+AdaFisher's own (``papers/adafisher_2405.16397.pdf`` §5, p. 8: *"We employ the Wall-Clock-Time
+(WCT) method with a cutoff of 200 epochs for AdaFisher's training"*). One reference arm — ``diag``
+by default, ``--reference-arm`` — runs a fixed ``--epochs`` epochs unbudgeted. Its measured
+elapsed time becomes every other arm's budget, and each of those runs as many epochs as fit. The
+budget is derived in-process; ``--wct-budget`` supplies a pre-measured number instead, so one arm
+can be one independent cluster job. ``--budget-mode epochs`` disables the protocol and gives every
+arm the same epoch count, which is the comparison the protocol exists to avoid: an equal-epoch
+comparison is rigged in favour of the modes with the most expensive step.
+
+``--max-epoch-factor`` (default 3) bounds how far a *budgeted* arm may run when the reference
+arm's budget turns out generous. It never applies to the reference arm, which must run exactly the
+nominal epoch count — it is what defines the budget.
+
+Learning rate
+-------------
+
+``--lr-schedule`` picks between the two readings of AdaFisher Appendix D's "a cosine annealing
+learning rate decay strategy [...] aligning with the number of training epochs specified for each
+optimizer": ``nominal`` anneals over ``--epochs``, shared by every arm and clamped at the floor
+past it; ``budget`` anneals each budgeted arm over its own wall-clock budget, so every arm
+completes one full cosine. ``benchmarks/common/schedules.py`` derives both and records the two
+biases the shared-``T_max`` reading was measured to introduce. The reference arm is unbudgeted and
+always uses ``nominal``.
+
+Seeding
+-------
+
+``run_arm`` seeds the global generator once, before building the model, so every arm of a model
+starts from identical weights and sees identical batch orderings. The train/val split takes the
+same seed through its own generator.
+
+Arm isolation
+-------------
+
+``run_arm`` also tears the arm down before returning: it unregisters the optimizer's hooks and
+collects, because a hook-based optimizer and its model form a reference cycle that plain reference
+counting cannot free. Without that, every arm stayed resident for the rest of the process and each
+following arm measured its peak device memory on top of its predecessors — which is what made the
+reported ``peak VRAM`` column rise monotonically in the order the arms ran, with ``adam`` shown as
+the most expensive of the seven. Only that column and real memory pressure change; the weights,
+the records and the report are already final when the teardown runs.
+
+What a run writes
+-----------------
+
+Into ``--output-dir`` (default ``benchmarks/outputs/<output_group>/<name>/``): ``records.csv``,
+``epochs.csv``, ``summary.md``, ``manifest.json`` and, unless ``--no-plot``, a set of PNG curves.
+The report is rewritten after *every* completed arm, not once at the end, so a crash in a later
+arm cannot lose the arms that already finished. ``--checkpoints`` additionally dumps model weights
+at fixed fractions of the nominal trajectory (``benchmarks/common/checkpoints.py``).
+
+The registry
+------------
+
+``discover_benchmarks()`` imports every ``benchmarks/models/<name>/bench.py`` that exposes a
+``BENCH``. The folder list is the registry; nothing else has to be edited to add a model.
 """
 
 from __future__ import annotations
@@ -40,6 +94,7 @@ from .loop import (
     default_prepare_batch,
     evaluate,
     peak_memory_bytes,
+    release_optimizer,
     reset_peak_memory,
     train_under_budget,
 )
@@ -78,8 +133,8 @@ class Benchmark:
     arms: Tuple[str, ...] = ("diag", "kfac", "ekfac", "tkfac", "tekfac", "adam", "adamw")
     # Architecture variants a model declares for itself, ``{keyword: allowed values}``; each
     # becomes a ``--<keyword>`` CLI choice defaulting to its first value, and is passed to
-    # ``build_model`` as a keyword. A2's ``--norm {gn,bn}`` (plan_exp_step1.md §4) is its only
-    # user; every other bench leaves it empty and ``build_model`` is called with no arguments.
+    # ``build_model`` as a keyword. ``cnn_gn_cifar``'s ``--norm {gn,bn}`` is its only user; every
+    # other bench leaves it empty and ``build_model`` is called with no arguments.
     model_choices: Mapping[str, Tuple[str, ...]] = field(default_factory=dict)
     # Optional one-level subdirectory grouping this bench's results and SLURM jobs, i.e.
     # ``outputs/<output_group>/<name>/`` and ``slurm/<output_group>/``. Empty is still the flat
@@ -100,18 +155,18 @@ class Benchmark:
 
 
 def discover_benchmarks() -> Dict[str, Benchmark]:
-    """The folder list *is* the registry (``plan_exp_step1.md`` §5): every ``benchmarks/<x>/bench.py``
-    exposing a ``BENCH``.
+    """The folder list *is* the registry: every ``benchmarks/models/<x>/bench.py`` exposing a
+    ``BENCH``. Adding a model folder adds its bench, with no edit here.
     """
     found: Dict[str, Benchmark] = {}
-    for path in sorted(BENCHMARKS_DIR.glob("*/bench.py")):
-        module = importlib.import_module(f"benchmarks.{path.parent.name}.bench")
+    for path in sorted(BENCHMARKS_DIR.glob("models/*/bench.py")):
+        module = importlib.import_module(f"benchmarks.models.{path.parent.name}.bench")
         found[path.parent.name] = module.BENCH
     return found
 
 
 # ----------------------------------------------------------------------------------------------
-# CLI: one flag per HParams field, generated (D4) rather than hand-written
+# CLI: one flag per HParams field, generated rather than hand-written
 # ----------------------------------------------------------------------------------------------
 
 
@@ -142,7 +197,7 @@ def resolve_hparams(bench: Benchmark, args: argparse.Namespace) -> HParams:
 
 def build_parser(bench: Benchmark) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog=f"benchmarks.{bench.name}.bench",
+        prog=f"benchmarks.models.{bench.name}.bench",
         description=f"{bench.title()} — {len(ARMS)} available arms under the WCT protocol.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -209,7 +264,7 @@ def run_arm(
     bench: Benchmark, arm: str, args: argparse.Namespace, hp: HParams,
     device: torch.device, budget_s: float, output_dir: Path,
 ) -> ArmResult:
-    torch.manual_seed(args.seed)  # identical init + data order across arms (plan_lot8.md §0.12)
+    torch.manual_seed(args.seed)  # identical init and data order across every arm of this model
     model = bench.build_model(**{k: getattr(args, k) for k in bench.model_choices}).to(device)
     optimizer = build_optimizer(arm, model, hp)
 
@@ -236,22 +291,20 @@ def run_arm(
         # CosineAnnealingLR for every epoch within T_max.
         scheduler = NominalCosine(optimizer, t_max=args.epochs)
     # --max-epoch-factor bounds how far a *budgeted* arm may run when the reference arm's budget
-    # turns out generous (plan_lot8.md §0.7 step 3). The reference arm itself is unbudgeted and
-    # must run exactly the nominal epoch count — it is what defines the budget (AdaFisher §5's WCT
-    # protocol). Lot 8's `main` applied the factor to both, which only ever mattered for the
-    # in-process reference arm, since its SLURM jobs run that arm as --budget-mode epochs.
+    # turns out generous. The reference arm itself is unbudgeted and must run exactly the nominal
+    # epoch count — it is what defines the budget (AdaFisher §5's WCT protocol). Do not apply the
+    # factor to it.
     max_epochs = (args.epochs if budget_s == float("inf")
                   else max(args.epochs, int(args.epochs * args.max_epoch_factor)))
 
     writer: Optional[CheckpointWriter] = None
     if args.checkpoints:
-        # The checkpoint schedule is expressed against the **nominal** trajectory
-        # (``--epochs``), never against ``max_epochs``: under the WCT protocol every arm of a model
-        # shares one nominal length, so ``ckpt_0.5`` means the same amount of training in every arm
-        # and the fractions are comparable across them — which is the whole point of the dumps
-        # (plan_exp_draft.md §7). Using ``max_epochs`` instead put a budgeted arm's ``ckpt_0.1`` at
-        # ~31% of its own run and made ``ckpt_0.5`` unreachable, since ``max_epochs`` is
-        # ``--max-epoch-factor`` times longer than anything an arm actually runs.
+        # The checkpoint schedule is expressed against the **nominal** trajectory (``--epochs``),
+        # never against ``max_epochs``. Under the WCT protocol every arm of a model shares one
+        # nominal length, so ``ckpt_0.5`` means the same amount of training in every arm and the
+        # fractions are comparable across them, which is the whole point of the dumps. Using
+        # ``max_epochs`` instead put a budgeted arm's ``ckpt_0.1`` at ~31% of its own run and made
+        # ``ckpt_0.5`` unreachable. Do not "simplify" this back.
         writer = CheckpointWriter(
             output_dir=output_dir,
             fractions=parse_fractions(args.checkpoints),
@@ -303,8 +356,23 @@ def run_arm(
     peak_vram = peak_memory_bytes(device)
     print(f"[{arm}] done: {len(steps)} steps, {len(epochs)} epochs, "
           f"test_acc={test_acc * 100:.2f}%, peak VRAM={format_bytes(peak_vram)}")
-    return ArmResult(arm, steps, epochs, test_acc, test_loss, total_s,
-                     dict(writer.written) if writer is not None else {}, peak_vram)
+    result = ArmResult(arm, steps, epochs, test_acc, test_loss, total_s,
+                       dict(writer.written) if writer is not None else {}, peak_vram)
+
+    # Tear the arm down before returning, so the *next* arm resets its peak-memory counter on an
+    # empty device. An AdaFisherMulti arm is a reference cycle — the optimizer holds each hooked
+    # module, and each module's hook dictionary holds a bound method of the optimizer — which plain
+    # reference counting cannot break, so without this every arm's model, optimizer and curvature
+    # factors stay resident for the rest of the process. The symptom in the shipped reports is a
+    # `peak VRAM` column that rises monotonically in the order the arms ran, with `adam` (which has
+    # no factors at all) reported as the most expensive of the seven. Nothing here touches the
+    # weights or the records: `result` is already built, so no number a run produced can change.
+    # Every other reference to the model and the optimizer — the checkpoint writer, the eval
+    # closure, the local names — is acyclic and dies with this frame; the cycle was the only thing
+    # refcounting could not undo. ``test_no_arm_survives_run_arm`` holds weak references and
+    # proves nothing is left, for all seven arms.
+    release_optimizer(model, optimizer)
+    return result
 
 
 # ----------------------------------------------------------------------------------------------

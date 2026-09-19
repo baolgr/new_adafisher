@@ -1,16 +1,33 @@
-"""Generate the SLURM job scripts, one calibration job plus one job per arm, for every model
-folder (``plan_exp_step1.md`` §6: "jobs enumerate model folders").
+"""Generate every SLURM job script under this directory, one per (model, arm) plus the grouped,
+calibration, sweep and extra-seed jobs.
 
-The folder list *is* the registry: this script imports ``benchmarks.common.runner.discover_
-benchmarks`` and reads each ``Benchmark``'s own nominal epoch count, arm list and dataset, so
-adding a model folder adds its jobs with no edit here. The scripts are near-identical apart from
-the model, the arm and the ``--time`` budget, hence generated rather than hand-maintained.
+    python benchmarks/slurm/generate_jobs.py     # regenerates every .sh here; edit this file only
 
-    python benchmarks/slurm/generate_jobs.py        # regenerates every .sh in this directory
+The model folder list is the registry: this script calls
+``benchmarks.common.runner.discover_benchmarks`` and reads each ``Benchmark``'s own nominal epoch
+count, arm list, dataset and output group, so adding a model folder adds its jobs with no edit
+here — except in :data:`WALLTIME`, which has one required row per model and raises ``KeyError``
+without it. The scripts are near-identical apart from the model, the arm and the ``--time``
+budget, hence generated rather than hand-maintained.
 
-Every cluster-specific line (account, GPU shape, module load, no-internet assumption) is copied
-from job scripts that have actually run on this cluster
-(``/Users/baolgr/Documents/AtlasAnalyticsLab/experiments/*/slurm/``), not re-derived — see
+What gets generated, per model
+------------------------------
+
+* ``calibrate_<model>.sh`` — two short epochs of every arm on a 5000-example training subset, to
+  turn that model's ``--time`` value from an extrapolation into a measurement.
+* ``train_<model>_<arm>.sh`` — one arm per job. The reference arm (``diag``) runs unbudgeted at a
+  fixed epoch count; every other arm reads its budget from the ``WCT_BUDGET`` environment
+  variable, and falls back to an equal-epoch run when that is unset.
+* ``train_<model>_all.sh`` — all seven arms in one job, for the models listed in :data:`GROUPED`.
+  This is the preferred form: the runner derives the wall-clock budget in-process, so there is no
+  measured number to copy by hand between jobs.
+* sweep and extra-seed jobs, from :data:`SWEEPS` and :data:`V0_SEEDS`.
+
+Jobs land in ``benchmarks/slurm/<output_group>/``, matching where their results land
+(``benchmarks/outputs/<output_group>/<model>/``).
+
+Every cluster-specific line — account, GPU shape, module load, the no-internet assumption — is
+copied from job scripts that have actually run on this cluster rather than re-derived. See
 ``README.md`` in this directory for the provenance of each.
 """
 
@@ -200,10 +217,27 @@ SWEEPS = {
 # per seed, ~1 h of MIG slice for the whole table, against 8 h for the two large models that
 # serve the lot-8 convergence question instead.
 #
-# NOTE the deliberate absence of --lr-schedule budget. Seed 0 ran under the default ``nominal``
-# schedule; these seeds must share that convention or they are not comparable with it, which is
-# their entire purpose. The budget schedule is for convergence curves, not for drift checkpoints.
+# --lr-schedule is passed EXPLICITLY, so the job says which protocol it ran under instead of
+# leaving it to the CLI default. ``nominal`` is chosen because it is what this job has always done
+# (the flag was absent, and ``nominal`` is the default), so the seeds already on disk and any
+# future one stay one set.
+#
+# An earlier version of this comment claimed the flag was omitted so that these seeds would match
+# seed 0's ``nominal`` schedule. Measured from the manifests on disk, that premise is false and
+# seed 0 is not one protocol but three:
+#   * ``mlp_ln_mnist``      seed 0: ``"lr_schedule": "budget"``
+#   * the other four models seed 0: no ``lr_schedule`` key at all — those runs pre-date
+#     ``common/schedules.py`` and used torch's *periodic* ``CosineAnnealingLR``, whose rate climbs
+#     back up past ``T_max``. A missing value is not ``nominal``.
+# So "match seed 0" was never achievable across the table, and the honest fix is to record what
+# these runs do rather than to claim agreement with something that does not exist. The existing
+# runs are left alone; their protocol is what their own manifests say.
+#
+# Use ``budget`` instead when the point is a convergence curve under the WCT protocol, which is
+# what every generated *training* job passes. For drift checkpoints the schedule only has to be
+# stated, not optimal.
 V0_SEED_ARMS = ("diag", "adamw")
+V0_SEEDS_LR_SCHEDULE = "nominal"
 V0_SEEDS = {
     "mlp_ln_mnist": [1, 2, 3, 4],      # regime A -> 5 seeds total
     "cnn_gn_cifar": [1, 2, 3, 4],
@@ -281,7 +315,7 @@ CALIBRATION_BODY = """# Calibration: 2 short epochs of every arm on a 5000-examp
 # steps/s, median step time and peak CUDA memory. Its job is to turn this model's --time value
 # from an extrapolation into a measurement, and to confirm every arm fits the 10 GB MIG slice.
 # Run this BEFORE the training jobs.
-python -m benchmarks.{model}.bench \\
+python -m benchmarks.models.{model}.bench \\
   --arms {arms} \\
   --epochs 2 \\
   --budget-mode epochs \\
@@ -296,7 +330,7 @@ REFERENCE_BODY = """# Reference arm (plan_lot8.md §0.7): a fixed {epochs}-epoch
 # every other arm's wall-clock budget. Read it back from the run's manifest.json:
 #   python -c "import json;print(json.load(open('benchmarks/outputs/{out}/{arm}/manifest.json'))['arms']['{arm}']['total_s'])"
 # and pass it to the other jobs as --wct-budget (they default to WCT_BUDGET below).
-python -m benchmarks.{model}.bench \\
+python -m benchmarks.models.{model}.bench \\
   --arms {arm} \\
   --epochs {epochs} \\
   --budget-mode epochs \\
@@ -321,7 +355,7 @@ else
   BUDGET_ARGS=(--budget-mode epochs)
 fi
 
-python -m benchmarks.{model}.bench \\
+python -m benchmarks.models.{model}.bench \\
   --arms {arm} \\
   --epochs {epochs} \\
   "${{BUDGET_ARGS[@]}}" \\
@@ -348,7 +382,7 @@ GROUPED_BODY = """# All {n_arms} arms of one model, in ONE job (plan_exp_step1.m
 # climbed back up, while an expensive arm stopped before reaching the floor — both measured, both
 # documented in benchmarks/common/schedules.py. The reference arm is unbudgeted and keeps the
 # nominal schedule; it is what defines the budget.
-python -m benchmarks.{model}.bench \\
+python -m benchmarks.models.{model}.bench \\
   --arms {arms} \\
   --epochs {epochs} \\
   --budget-mode wct \\
@@ -371,7 +405,7 @@ SWEEP_BODY = """# Hyperparameter sweep: the full {n_arms}-arm WCT protocol, once
 # Why this sweep exists: see SWEEPS in benchmarks/slurm/generate_jobs.py.
 for VALUE in {values}; do
   echo "=== --{flag} $VALUE ==="
-  python -m benchmarks.{model}.bench \\
+  python -m benchmarks.models.{model}.bench \\
     --arms {arms} \\
     --epochs {epochs} \\
     --budget-mode wct \\
@@ -393,8 +427,11 @@ V0_SEEDS_BODY = """# Extra training seeds for the Fisher-drift campaign (plan_ex
 # 2 x T_diag per (model, seed), not 7. Regime A gets seeds 1-4 (5 with the existing seed 0), regime
 # B seeds 1-2 (3 with seed 0).
 #
-# No --lr-schedule flag on purpose: seed 0 ran under the default 'nominal' schedule and these must
-# match it to be comparable, which is the whole point. Do not add --lr-schedule budget here.
+# --lr-schedule is stated explicitly (see V0_SEEDS_LR_SCHEDULE in generate_jobs.py) so this job is
+# self-describing: 'nominal' is what it has always run, and a future reader does not have to know
+# the CLI default to know what these checkpoints sit on. Seed 0 is NOT one protocol -- mlp_ln_mnist
+# ran 'budget' and the other four pre-date schedules.py entirely -- so read each run's own
+# manifest.json before comparing a seed against it.
 #
 # Writes to benchmarks/outputs/seeds/<model>/seed<n>/ -- deliberately ungrouped, its axis being
 # the seed -- leaving outputs/<group>/<model>/ (seed 0) untouched.
@@ -402,12 +439,13 @@ V0_SEEDS_BODY = """# Extra training seeds for the Fisher-drift campaign (plan_ex
 FAILED=()
 run_one () {{  # $1 = model, $2 = seed
   echo "=== $1  seed $2 ==="
-  python -m "benchmarks.$1.bench" \\
+  python -m "benchmarks.models.$1.bench" \\
     --arms {arms} \\
     --seed "$2" \\
     --budget-mode wct \\
     --reference-arm {reference} \\
     --max-epoch-factor 3 \\
+    --lr-schedule {lr_schedule} \\
     --num-workers {workers} \\
     --no-allow-download \\
     --data-root "$DATA_ROOT" \\
@@ -577,6 +615,7 @@ def write_v0_seeds(benches) -> None:
                         "training, plus ~2 min of eval and ~40 s of setup."),
         )
         + V0_SEEDS_BODY.format(arms=" ".join(V0_SEED_ARMS), reference=REFERENCE_ARM,
+                               lr_schedule=V0_SEEDS_LR_SCHEDULE,
                                workers=DEFAULT_RESOURCES[1], invocations=invocations),
     )
 

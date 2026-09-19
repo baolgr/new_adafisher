@@ -45,7 +45,7 @@ else
   BUDGET_ARGS=(--budget-mode epochs)
 fi
 
-python -m benchmarks.vit_small_cifar.bench \
+python -m benchmarks.models.vit_small_cifar.bench \
   --arms kfac \
   --epochs 50 \
   "${BUDGET_ARGS[@]}" \

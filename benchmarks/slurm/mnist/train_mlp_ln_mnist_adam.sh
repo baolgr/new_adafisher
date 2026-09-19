@@ -45,7 +45,7 @@ else
   BUDGET_ARGS=(--budget-mode epochs)
 fi
 
-python -m benchmarks.mlp_ln_mnist.bench \
+python -m benchmarks.models.mlp_ln_mnist.bench \
   --arms adam \
   --epochs 20 \
   "${BUDGET_ARGS[@]}" \

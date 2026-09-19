@@ -35,7 +35,7 @@ DATA_ROOT="${DATA_ROOT:-$SLURM_SUBMIT_DIR/dataset}"
 # steps/s, median step time and peak CUDA memory. Its job is to turn this model's --time value
 # from an extrapolation into a measurement, and to confirm every arm fits the 10 GB MIG slice.
 # Run this BEFORE the training jobs.
-python -m benchmarks.vit_small_cifar100.bench \
+python -m benchmarks.models.vit_small_cifar100.bench \
   --arms diag kfac ekfac tkfac tekfac adam adamw \
   --epochs 2 \
   --budget-mode epochs \

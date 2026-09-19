@@ -1,36 +1,45 @@
-"""``kfac`` mode: Martens & Grosse's Kronecker-factored approximate curvature (K-FAC). Linear
-(lot 2, ``docs/reports/plan_lot2.md``) and Conv2d with ``groups=1``, ``dilation=(1,1)`` (lot 4,
-``docs/reports/plan_lot4.md`` §0.5 — this file needed **no** logic change: ``update_input_factor``/
-``update_output_factor`` already dispatch through ``factors.py``'s ``compute_h_full``/
-``compute_s_full``, and ``precondition`` already goes through ``_kron_utils``, both of which gained
-``Conv2d`` support underneath this file unchanged).
+"""``kfac`` mode: Martens & Grosse's Kronecker-factored approximate curvature.
 
     F_l = E[h_bar h_bar^T (x) delta delta^T] ~= E[h_bar h_bar^T] (x) E[delta delta^T] = A (x) B
 
-(independence assumption, ``kfac_1503.05671.pdf`` §3, eq. 1). Inverted via
-``(A (x) B)^-1 = A^-1 (x) B^-1`` (§4.2, "Approximating F~^-1 as block-diagonal") and applied to a
-direction ``M`` (shaped like the module's gradient) through the vec identity
-``(A (x) B) vec(X) = vec(B X A^T)`` (§4.2, unnumbered display equation after eq. 6:
-``U_i = G_{i,i}^-1 V_i A_bar_{i-1,i-1}^-1``), which in this project's row-major convention becomes
-``M -> B^-1 M A^-1`` — derived from scratch in ``docs/reports/plan_lot2.md`` §0.4 (not just cited).
+``h_bar`` is the layer's bias-augmented input and ``delta`` the gradient at its output. Replacing
+the expectation of the Kronecker product by the Kronecker product of the expectations is K-FAC's
+independence assumption (``kfac_1503.05671.pdf`` section 3, eq. 1). It buys
+``(A (x) B)^-1 = A^-1 (x) B^-1`` (section 4.2), so a direction is preconditioned by two matrix
+products instead of one large solve.
 
-Damping follows the factored Tikhonov technique of §6.3 (unnumbered display equation, p. 23):
+**Applied form.** PyTorch lays a weight out as ``(d_out, d_in)``, so flattening it row by row is the
+``rvec`` convention, while the K-FAC literature uses the column-major ``cvec``. From
+``vec_r(u v^T) = u (x) v`` one gets ``vec_r(B M A^T) = (B (x) A) vec_r(M)``, so the operator this
+file must build is ``kron(B, A)`` -- output factor outer, input factor inner -- and applying its
+inverse to a direction ``M`` is ``B^-1 M A^-1``. This is the transpose trap the K-FAC-from-scratch
+notes (``kfac_from_scratch_2507.05127.pdf``, Def. 1/2 and Def. 23) warn about: on square factors a
+swap is completely silent.
 
-    pi_l = sqrt( (tr(A)/d_A) / (tr(B)/d_B) )
-    A~ = A + pi_l * sqrt(lambda) * I
-    B~ = B + (sqrt(lambda) / pi_l) * I
+**Damping** follows the factored Tikhonov technique of section 6.3 (p. 23)::
 
-Reproduced (not copied) from ``EKFAC-pytorch/kfac.py::_inv_covs``'s ``pi=True`` branch, whose local
-``pi`` variable equals this ``pi_l`` squared (its code adds ``sqrt(eps*pi)``/``sqrt(eps/pi)``, i.e.
-``sqrt(eps)*sqrt(pi)`` — consistent with the paper once ``pi_l = sqrt(pi)``).
+    pi   = sqrt( (tr(A) / dim(A)) / (tr(B) / dim(B)) )
+    A~   = A + pi * sqrt(lambda) * I
+    B~   = B + (sqrt(lambda) / pi) * I
 
-**SUA (lot 6, docs/reports/plan_lot6.md).** ``conv_sua=True`` selects the channel-only SUA input
-factor (``kfac_conv_1602.01407.pdf`` p. 14) for ``Conv2d`` modules instead of the patch-based one —
-``update_input_factor`` passes ``sua=self.conv_sua`` to ``compute_h_full``; ``precondition`` applies
-the resulting small operator independently at each of the ``k_h*k_w`` kernel offsets instead of one
-flat matmul (plan_lot6.md §0.4). ``update_output_factor``, ``refresh``, ``f_tilde`` are unchanged —
-none of them care whether ``A`` came from patches or from SUA's channel-only pooling, only its size
-differs.
+Expanding ``A~ (x) B~`` recovers ``A (x) B + lambda I`` plus two cross terms; ``pi`` is the value
+that minimises the trace norm of those cross terms. ``pi=False`` sets it to 1, the unsplit version.
+The same formula appears in ``EKFAC-pytorch/kfac.py::_inv_covs``, whose local ``pi`` variable is
+this ``pi`` squared.
+
+**Cadence.** ``update_input_factor`` and ``update_output_factor`` fold each new observation into the
+running average (:mod:`adafisher_modes.ema`) from the raw statistics built by
+:mod:`adafisher_modes.factors`. ``refresh`` recomputes the two inverses, but only on steps that are
+multiples of ``T_inv``; ``precondition`` uses whatever inverses that last refresh left behind.
+
+**SUA** (``conv_sua=True``, ``Conv2d`` only) replaces the patch-based input factor, of width
+``C_in * k_h * k_w [+1]``, by a channel-only one of width ``C_in [+1]``
+(``kfac_conv_1602.01407.pdf`` p. 14). Nothing in the rescaling changes; the same small operator is
+applied independently at each of the ``k_h * k_w`` kernel offsets instead of once to a single flat
+matrix. Measured at ResNet-18 scale, the widest input factor drops from 4609 to 513 entries per
+side, about 80.7 times fewer bytes.
+
+``f_tilde`` builds the dense operator and exists only for tests; ``precondition`` never forms it.
 """
 
 from __future__ import annotations
@@ -40,7 +49,7 @@ from typing import Dict, Optional, Sequence, Tuple, Union
 from torch import Tensor, eye, kron
 from torch.nn import Conv2d, Module
 
-from adafisher_modes.ema import update_running_avg
+from adafisher_modes.ema import seed_or_accumulate
 from adafisher_modes.factors import compute_h_full, compute_s_full
 
 from ._kron_utils import (
@@ -60,12 +69,14 @@ class KFACApproximation(FisherApproximation):
         T_inv: int = 100,
         pi: bool = True,
         conv_sua: bool = False,
+        ema_seed_first: bool = False,
     ) -> None:
         self.Lambda = Lambda
         self.gammas = gammas
         self.T_inv = T_inv
         self.pi = pi
         self.conv_sua = conv_sua
+        self.ema_seed_first = ema_seed_first
         self._A: Dict[Module, Tensor] = {}
         self._B: Dict[Module, Tensor] = {}
         self._A_inv: Dict[Module, Tensor] = {}
@@ -73,19 +84,20 @@ class KFACApproximation(FisherApproximation):
 
     def update_input_factor(self, module: Module, h: Tensor, step: int) -> None:
         A_i = compute_h_full(h, module, sua=self.conv_sua)
-        if step == 0:
-            self._A[module] = eye(A_i.size(0), dtype=A_i.dtype, device=A_i.device)
-        update_running_avg(A_i, self._A[module], self.gammas)
+        seed_or_accumulate(A_i, self._A, module,
+                           lambda: eye(A_i.size(0), dtype=A_i.dtype, device=A_i.device),
+                           self.gammas, step, self.ema_seed_first)
 
     def update_output_factor(self, module: Module, s: Tensor, step: int) -> None:
         B_i = compute_s_full(s, module)
-        if step == 0:
-            self._B[module] = eye(B_i.size(0), dtype=B_i.dtype, device=B_i.device)
-        update_running_avg(B_i, self._B[module], self.gammas)
+        seed_or_accumulate(B_i, self._B, module,
+                           lambda: eye(B_i.size(0), dtype=B_i.dtype, device=B_i.device),
+                           self.gammas, step, self.ema_seed_first)
 
     def _pi(self, A: Tensor, B: Tensor) -> Tensor:
-        """Factored Tikhonov scalar pi_l (kfac_1503.05671.pdf §6.3). ``pi=False`` reduces to the
-        plain, non-factored damping split (pi_l = 1).
+        """The factored Tikhonov scalar ``pi`` of ``kfac_1503.05671.pdf`` §6.3, the value that
+        minimises the trace norm of the two cross terms ``A~ (x) B~`` introduces. ``pi=False``
+        returns 1, the unsplit damping.
         """
         if not self.pi:
             return A.new_tensor(1.0)
@@ -100,18 +112,24 @@ class KFACApproximation(FisherApproximation):
         return A_tilde, B_tilde
 
     def refresh(self, module: Module, step: int) -> None:
-        if step % self.T_inv != 0:
+        # "or nothing cached yet" covers a module first reached after step 0, whose first step is
+        # not necessarily a multiple of T_inv; precondition() would otherwise read an inverse that
+        # was never built. It cannot fire on a module present from step 0, since step 0 is a
+        # multiple of every T_inv, so no existing trajectory changes.
+        if step % self.T_inv != 0 and module in self._A_inv:
             return
         A_tilde, B_tilde = self._damped_factors(module)
         self._A_inv[module] = A_tilde.inverse()
         self._B_inv[module] = B_tilde.inverse()
 
     def f_tilde(self, module: Module) -> Tensor:
-        """Dense ``(d_out*d_in_aug)^2`` reconstruction of ``F~_KFAC = kron(B~, A~)`` (B outer, A
-        inner — see plan_lot2.md §0.4), from the *current* damped factors. ``precondition`` never
-        forms this matrix; it exists only for the Frobenius-dominance test (plan_lot2.md §0.5).
-        Reflects any EMA drift since the last ``refresh()`` — call ``refresh()`` immediately before
-        this for a matched comparison.
+        """Dense ``(d_out * d_in_aug)^2`` reconstruction of ``F~ = kron(B~, A~)``: output factor
+        outer, input factor inner, which is the ``rvec`` ordering the module docstring derives.
+
+        Built from the *current* running averages, so it reflects any drift since the last
+        ``refresh()``; call ``refresh()`` immediately before it for a matched comparison against
+        what ``precondition`` would apply. For tests and debugging only -- ``precondition`` never
+        forms this matrix.
         """
         A_tilde, B_tilde = self._damped_factors(module)
         return kron(B_tilde, A_tilde)

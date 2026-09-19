@@ -1,31 +1,29 @@
-"""Shared plumbing for the four non-diagonal Fisher approximation modes (K-FAC, EKFAC, TKFAC,
-TEKFAC): folding a (weight, bias) direction pair into one augmented-shape tensor before applying a
-Kronecker-factored preconditioner, and splitting the result back.
+"""Shape plumbing shared by the four Kronecker modes: fold a (weight, bias) direction pair into one
+matrix before preconditioning it, and split the result back.
 
-This is the same "shape plumbing" as the reference AdaFisher's own weight/bias split
-(``adafisher.py:218-222``), which ``diag.py`` already inlines directly. Factored out here (private,
-leading underscore — not part of the public API) because K-FAC/EKFAC (lot 2) and TKFAC/TEKFAC
-(lot 3, ``docs/reports/plan.md`` §2.1's file layout) all need it identically, whereas ``diag.py``'s
-own inline version is left untouched per ``CLAUDE.md``'s "no unsolicited refactor of existing code"
-convention. See ``docs/reports/plan_lot2.md`` §0.2.
+The input factor of every supported layer type is built from the layer's input with a constant-one
+column appended, so that the bias is treated as one more input coordinate. The direction the
+optimizer wants to precondition therefore has to be laid out the same way: the weight as a
+``(d_out, d_in)`` matrix with the bias appended as one more column. That is all
+:func:`augment_direction` and :func:`split_direction` do. A ``Conv2d`` weight, shaped
+``(C_out, C_in, k_h, k_w)``, is flattened to ``(C_out, C_in * k_h * k_w)`` first, which is the same
+order the patch extraction produces, so the inverse reshape recovers the kernel layout unchanged.
 
-Lot 4 (docs/reports/plan_lot4.md §0.3) extends ``augment_direction`` to a ``Conv2d`` weight
-direction, shaped ``(C_out, C_in, k_h, k_w)`` rather than ``(d_out, d_in)``: flattened to
-``(C_out, C_in*k_h*k_w)`` before the (optional) bias column is appended, matching the patch-dimension
-layout ``extract_patches`` already produces. ``split_direction`` needs no change — reshaping a
-``(C_out, C_in*k_h*k_w)`` slice back to ``weight_shape`` already recovers the ``(C_in, k_h, k_w)``
-layout correctly, since that flattening order already matches ``Conv2d.weight``'s own.
+The ``diag`` mode does the same split inline and is left alone; this module exists because the four
+Kronecker modes need it identically.
 
-Lot 6 (docs/reports/plan_lot6.md §0.4) adds ``augment_conv2d_direction_sua``/
-``split_conv2d_direction_sua``: under the SUA approximation the input factor is channel-only
-(``C_in[+1]``), smaller than the weight's own flattened width (``C_in*k_h*k_w[+1]``), so the single
-flat matmul ``augment_direction``/``split_direction`` build is no longer shape-compatible. These two
-new functions instead expose the weight direction as ``k_h*k_w`` independent ``(C_out, C_in[+1])``
-slices — one per kernel offset, all preconditioned by the *same* small operator via ordinary batched-
-matmul broadcasting (no explicit loop in the callers) — with the bias direction broadcast into every
-slice and, on the way back, read off only the center slice's estimate (plan_lot6.md §0.4's bias
-convention, inherited from ``EKFAC-pytorch::_precond_sua_ra`` for lack of a theorem-backed
-alternative).
+**The SUA pair is different, and needs its own two functions.** Under SUA the input factor is
+channel-only (``C_in [+1]``), narrower than the weight's own flattened width
+(``C_in * k_h * k_w [+1]``), so one flat matrix product no longer type-checks.
+:func:`augment_conv2d_direction_sua` instead exposes the weight as ``k_h * k_w`` independent
+``(C_out, C_in [+1])`` slices, one per kernel offset in row-major ``(k_h, k_w)`` order, which a
+batched matrix product preconditions with the same small operator and no explicit loop. The bias
+direction is broadcast into every slice, mirroring the offset-independent constant-one column of the
+input factor, and :func:`split_conv2d_direction_sua` reads the preconditioned bias back from the
+centre offset only. The other ``k_h * k_w - 1`` offsets produce different bias estimates; that is a
+property of treating the offsets as independent, not a bug. The centre is used because it is the
+same reference offset the SUA input factor itself is built from, and it matches
+``EKFAC-pytorch::_precond_sua_ra``; there is no theorem behind it.
 """
 
 from __future__ import annotations
@@ -39,8 +37,8 @@ def augment_direction(weight_direction: Tensor, bias_direction: Optional[Tensor]
     """Concatenate weight/bias momentum directions into one ``(d_out, d_in [+1])`` matrix,
     mirroring the bias-augmented-input convention (a ones column appended) used to build the
     corresponding input factor. ``weight_direction`` with more than 2 dimensions (a ``Conv2d``
-    weight, ``(C_out, C_in, k_h, k_w)``) is flattened to ``(C_out, C_in*k_h*k_w)`` first — lot 4,
-    plan_lot4.md §0.3.
+    weight, ``(C_out, C_in, k_h, k_w)``) is flattened to ``(C_out, C_in*k_h*k_w)`` first, which is
+    the order the patch extraction already produces.
     """
     W = (
         weight_direction
@@ -66,7 +64,7 @@ def split_direction(
 def augment_conv2d_direction_sua(
     weight_direction: Tensor, bias_direction: Optional[Tensor]
 ) -> Tensor:
-    """SUA analogue of ``augment_direction`` (docs/reports/plan_lot6.md §0.4): expose a Conv2d
+    """SUA analogue of ``augment_direction``: expose a Conv2d
     weight direction, shaped ``(C_out, C_in, k_h, k_w)``, as ``k_h*k_w`` independent
     ``(C_out, C_in [+1])`` slices (one per kernel offset, row-major in ``(k_h, k_w)`` — matching
     ``split_conv2d_direction_sua``'s inverse reshape) instead of one flat
@@ -86,7 +84,7 @@ def split_conv2d_direction_sua(
     M: Tensor, weight_shape: Size, bias_shape: Optional[Size]
 ) -> Union[Tensor, Tuple[Tensor, Tensor]]:
     """Inverse of ``augment_conv2d_direction_sua``. The bias estimate is read off the *center*
-    kernel offset only (docs/reports/plan_lot6.md §0.4) — the same reference offset
+    kernel offset only — the same reference offset
     ``augment_conv2d_input_sua`` uses to build the input factor, not an arbitrary choice — since the
     other ``k_h*k_w - 1`` slices' own bias estimates are expected to disagree (a property of this
     block-diagonal-across-offsets approximation, not a bug).

@@ -1,13 +1,24 @@
-"""The single optimizer factory (``plan_exp_step1.md`` §3, D4).
+"""The single optimizer factory: eight arms, one hyperparameter record.
 
-Eight arms: the five ``AdaFisherMulti`` Fisher modes, the two baselines, and ``reference`` —
-FisherAdapTune's own ``AdaFisher`` (``reference_repos/FisherAdapTune/scripts/adafisher.py``, the
-authoritative implementation per ``CLAUDE.md``), loaded **by file path** so that the read-only
-reference repository's package ``__init__`` is never imported. It is the lot-1 non-regression demo
-and stays available to every bench, not just the MNIST auto-encoder.
+``build_optimizer(arm, model, hp)`` returns a ready optimizer for one of:
 
-Hyperparameters live with the model, as an ``HParams`` literal in its ``bench.py`` (D4); this
-module owns only their meaning and their defaults.
+* the five ``AdaFisherMulti`` Fisher modes — ``diag``, ``kfac``, ``ekfac``, ``tkfac``, ``tekfac``;
+* the two baselines, ``adam`` and ``adamw``;
+* ``reference``, FisherAdapTune's own ``AdaFisher``
+  (``reference_repos/FisherAdapTune/scripts/adafisher.py``), loaded by file path so that the
+  read-only reference repository's package ``__init__`` is never imported. It is the original
+  implementation this project's ``diag`` mode is a port of, and it stays available to every bench.
+
+:class:`HParams` is the arm-independent operating point. One instance lives with each model, as a
+literal in its ``bench.py``; this module owns only the field meanings and their defaults. Field
+names are also the command-line flag names — ``runner.add_hparam_arguments`` generates one
+``--<field>`` flag per field — so a new knob needs no CLI code.
+
+Two conventions to know about. The baselines take ``baseline_lr`` rather than ``lr``, because
+AdaFisher's Table 9 tunes Adam/AdamW separately from AdaFisher on ViTs. ``weight_decay`` is shared
+by every arm and applied to every parameter, including biases and normalisation scales; what
+differs between arms is the *convention* — ``Adam`` and ``AdaFisher`` fold the decay into the
+gradient, ``AdamW`` and ``AdaFisherW`` (``decoupled_wd=True``) apply it directly to the weights.
 """
 
 from __future__ import annotations
@@ -48,8 +59,9 @@ class HParams:
     t_eig: int = 100  # ekfac, tekfac
     t_re: int = 1  # tekfac, T_RE of Alg. 1
     minmax: bool = True  # diag only; True = faithful to AdaFisher Eq. (4)
-    minmax_after_average: bool = False  # diag only; True = Algorithm 1's order instead of the
-                                         # official code's (audit_step.md §4.7)
+    minmax_after_average: bool = False  # diag only; True = AdaFisher Algorithm 1's order
+                                         # (normalise the running average) instead of the official
+                                         # code's (normalise each instantaneous factor)
     conv_sua: bool = False  # the four Kronecker modes, Conv2d only
     fisher_batch_samples: Optional[int] = None
     decoupled_wd: bool = False  # True = AdaFisherW / AdamW convention
@@ -65,14 +77,22 @@ def load_reference_adafisher() -> ModuleType:
     return module
 
 
-def build_optimizer(arm: str, model: nn.Module, hp: HParams) -> Any:
+def build_optimizer(arm: str, model: nn.Module, hp: HParams, **overrides: Any) -> Any:
     """The eight arms at ``hp``'s operating point.
 
-    The two baselines take ``baseline_lr`` (Table 9 gives Adam/AdamW a different tuned learning
-    rate from AdaFisher's on ViTs); ``weight_decay`` is shared, its *convention* being what differs
-    (``Adam``/``AdaFisher`` couple it into the gradient, ``AdamW``/``AdaFisherW`` decouple it —
-    ``plan_lot8.md`` §0.6).
+    ``overrides`` are passed straight to ``AdaFisherMulti`` and win over anything derived from
+    ``hp``. They exist for experiments that vary one optimizer knob outside the ``HParams`` set,
+    such as sweeping ``gamma`` or ``ema_seed_first``. Passing one for the
+    ``adam``/``adamw``/``reference`` arms, which do not take them, is an error rather than a silent
+    no-op.
+
+    The two baselines take ``baseline_lr``: AdaFisher's Table 9 gives Adam/AdamW a different tuned
+    learning rate from AdaFisher's on ViTs. ``weight_decay`` is shared by every arm; what differs
+    is the convention — ``Adam`` and ``AdaFisher`` couple it into the gradient, ``AdamW`` and
+    ``AdaFisherW`` decouple it.
     """
+    if overrides and arm in ("adam", "adamw", "reference"):
+        raise ValueError(f"arm {arm!r} takes no AdaFisherMulti overrides; got {sorted(overrides)}")
     if arm == "adam":
         return torch.optim.Adam(model.parameters(), lr=hp.baseline_lr,
                                 weight_decay=hp.weight_decay)
@@ -110,6 +130,8 @@ def build_optimizer(arm: str, model: nn.Module, hp: HParams) -> Any:
             kwargs["T_eig"] = hp.t_eig
         if arm == "tekfac":
             kwargs["T_re"] = hp.t_re
+    kwargs.update(overrides)
+
     return AdaFisherMulti(model, **kwargs)
 
 

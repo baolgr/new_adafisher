@@ -1,6 +1,6 @@
 """Step 1 (``docs/reports/plan_exp_step1.md`` §6): the one test that makes adding a model safe.
 
-Parametrized over every ``benchmarks/<model>/bench.py`` the folder registry discovers, so a new
+Parametrized over every ``benchmarks/models/<model>/bench.py`` the folder registry discovers, so a new
 model folder is covered the moment it exists. Everything runs on synthetic tensors — no MNIST, no
 CIFAR download — the discipline of ``plan_lot7.md`` §0.8.
 
@@ -44,47 +44,61 @@ _MODE_KWARGS = {
 
 
 class Expected:
-    """``(parameters, hooked-module counts, unhooked parameter names, synthetic input shape)``."""
+    """``(parameters, hooked-module counts, unhooked parameter names, synthetic input shape,
+    output width)``.
+
+    ``out_features`` is the width of what the model emits — the number of classes for a
+    classifier, the flattened image for the auto-encoder. Keyword-only and without a default, so a
+    new model folder cannot be added without stating it.
+    """
 
     def __init__(self, params: int, counts: Dict[str, int], unhooked: List[str],
-                 input_shape: Tuple[int, ...]) -> None:
+                 input_shape: Tuple[int, ...], *, out_features: int) -> None:
         self.params, self.counts, self.unhooked, self.input_shape = (
             params, counts, unhooked, input_shape
         )
+        self.out_features = out_features
 
 
 EXPECTED: Dict[str, Expected] = {
     # plan_exp_step1.md §4, "migrated" rows.
-    "mnist_autoencoder": Expected(2_837_314, {"Linear": 8}, [], (1, 28, 28)),
+    "mnist_autoencoder": Expected(2_837_314, {"Linear": 8}, [], (1, 28, 28), out_features=784),
     "resnet50_cifar": Expected(
         # §4 transcribes 23 519 178; the model — migrated verbatim from lot 8's cifar10_models.py,
         # not modified here — has 23 520 842. plan_lot8.md's own "23.52 M" is the correct rounding.
         23_520_842, {"Conv2d": 53, "BatchNorm2d": 53, "Linear": 1}, [], (3, 32, 32),
+        out_features=10,
     ),
     "vit_small_cifar": Expected(
         # §4 transcribes 2 685 898; the verbatim-migrated model has 2 693 578 ("2.69 M" either way).
         2_693_578, {"Conv2d": 1, "LayerNorm": 13, "Linear": 25}, ["cls_token", "pos_embed"],
         (3, 32, 32),
+        out_features=10,
     ),
     # plan_exp_step1.md §4, "new" rows — A1, A2, A3, B2, B1.
-    "mlp_ln_mnist": Expected(26_634, {"Linear": 3, "LayerNorm": 2}, [], (1, 28, 28)),
+    "mlp_ln_mnist": Expected(26_634, {"Linear": 3, "LayerNorm": 2}, [], (1, 28, 28),
+                             out_features=10),
     "cnn_gn_cifar": Expected(
         24_458, {"Conv2d": 3, "Linear": 1},
         # GroupNorm is deliberately not a SUPPORTED_MODULES type (see the model's docstring).
         ["features.1.weight", "features.1.bias", "features.5.weight", "features.5.bias",
          "features.9.weight", "features.9.bias"],
         (3, 32, 32),
+        out_features=10,
     ),
     "vit_micro_cifar": Expected(
         # §4 estimates "≈ 21 162 [DERIVED] — the exact value is fixed by the config and locked by
         # the test once built". Mean pooling removes the cls_token (32) and its position row (32).
         21_098, {"Conv2d": 1, "LayerNorm": 5, "Linear": 9}, ["pos_embed"], (3, 32, 32),
+        out_features=10,
     ),
     "resnet20_cifar": Expected(
         269_722, {"Conv2d": 19, "BatchNorm2d": 19, "Linear": 1}, [], (3, 32, 32),
+        out_features=10,
     ),
     "cct_2_3x2_cifar": Expected(
         283_723, {"Conv2d": 2, "LayerNorm": 5, "Linear": 10}, ["pos_embed"], (3, 32, 32),
+        out_features=10,
     ),
     # ------------------------------------------------------------------------------------------
     # CIFAR-100: the six CIFAR-10 architectures, unchanged apart from a 100-way head. The hooked
@@ -97,22 +111,28 @@ EXPECTED: Dict[str, Expected] = {
         ["features.1.weight", "features.1.bias", "features.5.weight", "features.5.bias",
          "features.9.weight", "features.9.bias"],
         (3, 32, 32),
+        out_features=100,
     ),
     "vit_micro_cifar100": Expected(
         24_068, {"Conv2d": 1, "LayerNorm": 5, "Linear": 9}, ["pos_embed"], (3, 32, 32),
+        out_features=100,
     ),
     "resnet20_cifar100": Expected(
         275_572, {"Conv2d": 19, "BatchNorm2d": 19, "Linear": 1}, [], (3, 32, 32),
+        out_features=100,
     ),
     "cct_2_3x2_cifar100": Expected(
         295_333, {"Conv2d": 2, "LayerNorm": 5, "Linear": 10}, ["pos_embed"], (3, 32, 32),
+        out_features=100,
     ),
     "resnet50_cifar100": Expected(
         23_705_252, {"Conv2d": 53, "BatchNorm2d": 53, "Linear": 1}, [], (3, 32, 32),
+        out_features=100,
     ),
     "vit_small_cifar100": Expected(
         2_710_948, {"Conv2d": 1, "LayerNorm": 13, "Linear": 25}, ["cls_token", "pos_embed"],
         (3, 32, 32),
+        out_features=100,
     ),
     # ------------------------------------------------------------------------------------------
     # ImageNet-1K. Two resolutions, and ``input_shape`` is what distinguishes them: the four
@@ -128,22 +148,28 @@ EXPECTED: Dict[str, Expected] = {
         ["features.1.weight", "features.1.bias", "features.5.weight", "features.5.bias",
          "features.9.weight", "features.9.bias"],
         (3, 32, 32),
+        out_features=1000,
     ),
     "vit_micro_imagenet": Expected(
         53_768, {"Conv2d": 1, "LayerNorm": 5, "Linear": 9}, ["pos_embed"], (3, 32, 32),
+        out_features=1000,
     ),
     "resnet20_imagenet": Expected(
         334_072, {"Conv2d": 19, "BatchNorm2d": 19, "Linear": 1}, [], (3, 32, 32),
+        out_features=1000,
     ),
     "cct_2_3x2_imagenet": Expected(
         411_433, {"Conv2d": 2, "LayerNorm": 5, "Linear": 10}, ["pos_embed"], (3, 32, 32),
+        out_features=1000,
     ),
     "resnet50_imagenet": Expected(
         25_557_032, {"Conv2d": 53, "BatchNorm2d": 53, "Linear": 1}, [], (3, 224, 224),
+        out_features=1000,
     ),
     "vit_small_imagenet": Expected(
         22_050_664, {"Conv2d": 1, "LayerNorm": 25, "Linear": 49}, ["cls_token", "pos_embed"],
         (3, 224, 224),
+        out_features=1000,
     ),
 }
 
@@ -212,7 +238,7 @@ def _model_params():
 
 def test_every_model_folder_is_covered() -> None:
     assert set(BENCHES) == set(EXPECTED), (
-        "a benchmarks/<model>/bench.py exists with no entry in EXPECTED (or the reverse); "
+        "a benchmarks/models/<model>/bench.py exists with no entry in EXPECTED (or the reverse); "
         "adding a model means adding its row here"
     )
 
@@ -225,7 +251,10 @@ def test_model_builds_with_expected_parameter_count(name: str) -> None:
     assert n_params == EXPECTED[name].params, f"{name}: {n_params} parameters"
     inputs, _ = _synthetic_batch(name)
     inputs, _targets = BENCHES[name].prepare_batch((inputs, torch.zeros(inputs.size(0)).long()))
-    assert model(inputs).shape[0] == inputs.shape[0]
+    # The batch axis AND the head width. ``shape[0] == inputs.shape[0]`` alone compares the batch
+    # axis with itself and cannot fail, so six models had no output-shape assertion at all.
+    with torch.no_grad():
+        assert model(inputs).shape == (inputs.shape[0], EXPECTED[name].out_features), name
 
 
 @pytest.mark.parametrize("name", MODEL_IDS)
@@ -257,8 +286,21 @@ def test_every_parameter_is_updated(name: str) -> None:
 @pytest.mark.parametrize("name", _model_params())
 @pytest.mark.parametrize("mode", list(_MODE_KWARGS))
 def test_all_modes_run(name: str, mode: str) -> None:
-    model, _ = _one_arm_steps(name, mode)
+    """Every mode on every model: finite *and* moving.
+
+    This is 100 of this file's items and it used to assert finiteness only — which a mode that
+    silently updated nothing would pass, since the initial weights are finite too. The "no
+    parameter left un-updated" check above ran with ``fisher_mode="diag"`` alone, so the four
+    Kronecker modes were never checked for it on any model. They are now: measured across all 20
+    model folders x 5 modes, zero parameters stay bit-identical to their initial value after two
+    real steps.
+    """
+    model, before = _one_arm_steps(name, mode)
     assert all(torch.isfinite(p).all() for p in model.parameters()), f"{name}/{mode}"
+    unchanged = [n for n, p in model.named_parameters() if torch.equal(p.detach(), before[n])]
+    assert unchanged == [], (
+        f"{name}/{mode}: {len(unchanged)} parameter(s) never updated: {unchanged[:8]}"
+    )
 
 
 # ----------------------------------------------------------------------------------------------
@@ -286,7 +328,7 @@ def test_bench_py_files_are_declarative() -> None:
     ``main(BENCH)`` — at most 50 lines, and no control flow beyond the ``__main__`` guard.
     """
     for name in MODEL_IDS:
-        path = REPO_ROOT / "benchmarks" / name / "bench.py"
+        path = REPO_ROOT / "benchmarks" / "models" / name / "bench.py"
         lines = path.read_text().splitlines()
         assert len(lines) <= 50, f"{name}/bench.py is {len(lines)} lines"
         body = [ln for ln in lines if not ln.lstrip().startswith("#")]

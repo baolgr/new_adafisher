@@ -70,7 +70,7 @@ root on `v^(t)` — is **identical across the five modes**.
 > ≈4.6s, `kfac` ≈8.6s, `ekfac`/`tekfac` ≈10.6s) — over `6×` apart between the fastest and the
 > epoch-count "winner" (`tkfac`, fewest epochs to the floor), which is exactly the equal-epoch
 > rigging `plan.md` §6.3 predicted an epoch-fixed comparison would introduce, now demonstrated
-> rather than only argued. `benchmarks/mnist_autoencoder.py::_make_optimizer` was generalized to
+> rather than only argued. `benchmarks/models/mnist_autoencoder.py::_make_optimizer` was generalized to
 > build all five modes (`--optimizer kfac|ekfac|tkfac|tekfac|all`) for a quick epoch-fixed sanity
 > check; the wall-clock-budget bench itself is the new `benchmarks/equal_wallclock_bench.py`, built
 > around a dataset- and model-agnostic training-loop helper so its mechanics (budget adherence,
@@ -380,10 +380,235 @@ root on `v^(t)` — is **identical across the five modes**.
 > cuSOLVER in campaign 1). `features.0` also carries **63% of `tr(F)`**: A1's curvature is
 > overwhelmingly in its first layer, which conditions any per-layer-type reading of this model.
 
+> **Lot 3 of the campaign (regime A with weight sharing): code done, cluster runs submitted**
+> (`docs/reports/plan_exp_lot3.md`). A1 has `T = 1` on every layer, so every K-FAC branch written
+> for shared weights had never been *run* — and three of them were wrong, each measured rather than
+> suspected. (1) **K-FAC-reduce was `T²` too large**: it summed the input over positions where
+> Eschenhagen et al. (arXiv:2311.00636 §3.3, Eq. 10) average it — relative error **24.000** at
+> `T = 5` and **80.000** at `T = 9`, i.e. exactly `T² − 1`, and biased in the direction that favours
+> expand, which is HF2's own question. (2) **EKFAC-reduce projected a statistic that is not a
+> gradient** (`(Σ_t a)(Σ_t g)ᵀ` instead of the per-example `Σ_t g_t a_tᵀ`), so its `s` was not the
+> optimal diagonal and `tr(K) = tr(B)` failed. (3) **TKFAC at `T > 1`** used per-*example* summed
+> traces, whose product carries every cross-position pair and matches neither `tr(B)` nor
+> `tr(B^exp)` nor `adafisher_modes`' own; it is now the per-`(n, c, t)` flattening the optimizer
+> uses, and preserves `tr(B^exp)` exactly. **T5** (expand exact in the expand setting, reduce in the
+> reduce setting, and each *not* exact in the other), **T8-exp**, **T9-shared** and **T13-shared**
+> pin all three. T13-shared also measures a declared constant worth carrying into P2: fed identical
+> gradients, the optimizer's Kronecker operator on a shared layer is **K-FAC-expand divided by `T`**
+> (`A` agrees exactly, `G = T · compute_s_full`), so a fixed `λ` weighs `T` times more there — 64 on
+> a ViT token layer, 1 024 on A2's first convolution.
+> **Two lot-2 readings are corrected** (erratum added to `plan_exp_lot2.md` §6.3 and its French
+> translation): its `as_implemented` normalisation structure is `diag(hadamard)`, **not** `diag.py`'s
+> formula (which sums the *raw* input over batch and positions before squaring, and yields a
+> 2-entry `H_D` shared by all channels) — lot 3 renames it `hadamard_diag` and adds the shipped
+> reading as `diag_py`, computed by **calling** `compute_h_diag`/`compute_s_diag` on training-size
+> micro-batches; and three of §6.3's four orderings are **theorems** (the exact diagonal is the
+> Frobenius-optimal diagonal; `exact_separate` is optimal among matrices with no `γ`-`β` cross
+> terms), now asserted in the tests and checked at runtime, so a violation is a bug rather than a
+> finding.
+> **A3's `pos_embed` (2 048 of 21 098 parameters) was silently outside lot 2's reference**, whose
+> runner passed `modules=...` and labelled the restricted result `F`. It is now captured by
+> substituting a batch-expanded leaf for the traversal (and listing it in `inputs=`, or the engine
+> prunes it — the lot-1 pruning trap in a new place), and **every reference build now checks its own
+> rows against autograd twice**: the sum rule, and one example against a one-example backward (the
+> second catches what the first cannot, a statistic that mixes examples). Measured on the three real
+> checkpoints: `≤ 5.3e-16`, GroupNorm, BatchNorm-eval, stride-4 patch embedding and `pos_embed`
+> included. New modules: `fisher_ref/folds.py` (one traversal, `K` folds offloaded to the host,
+> halves assembled by addition — per-layer intervals *and* the whole-matrix floor for no extra
+> traversal, where lot 2 rebuilt forty references for the floor alone), `approx/sharing.py` (the
+> `B → B^exp → K-FAC` decomposition, held as a half-vectorised rearrangement so nothing `P × P` is
+> formed), `approx/embed.py`, and `experiments/lot3_decisions.py`, which applies §0.10's
+> **pre-registered** decision rules. `METRICS_VERSION` is `fisher_ref/0.2`. When lot 3 closed the suite was
+> **609 passing** — the 579 that existed, unmodified, plus its 30 — and it has grown since with work
+> outside this lot.
+>
+> **The three runs are done** (`21276896` A3 `01:02:33`; `21276894` A2-GN `04:30:41`; `21276895`
+> A2-BN `04:20:50`; `N = 45 000`, ten folds, 20 partitions, five checkpoints, both sources, host
+> peaks 54-81 GB, **zero** `invariant_violation` rows, row checks `≤ 5.3e-16` throughout), and the
+> pre-registered rules give **HF2 confirmed on all three models** (`plan_exp_lot3.md` §6). Four
+> results to carry:
+> 1. **K-FAC-reduce beats K-FAC-expand almost everywhere**: 14/15, 15/15 and 40/45 cells, with
+>    reduce's wins at `Δe_F = −0.08 … −0.94` against expand's small, early-checkpoint wins
+>    (`+0.02 … +0.18`, plus the ViT patch embedding at `θ = 0`, `+0.78`). The whole-matrix noise
+>    floor at this `N` is 0.005-0.039, so these are not noise (A1's floor was 0.343).
+> 2. **K-FAC's error on a shared layer is first of all a *weight-sharing* error, not the
+>    independence assumption**: the median `sharing_share` is **0.971 on all three models** —
+>    dropping the cross-position terms alone already costs ~97 % of the exact block — while the
+>    independence step on top costs 0.45-0.60. At initialisation the block is *nearly* Kronecker
+>    (`best_kron` 0.05 on the ViT's `qkv`, 0.22-0.37 on A2's convolutions) while K-FAC-expand sits
+>    at 0.95-0.97: the Kronecker form is not what fails, K-FAC's choice of factors is.
+> 3. **`e_F` and `ρ` disagree systematically on that same question**: `ρ(reduce) < ρ(expand)` in
+>    70/75, 62/75 and 162/225 cells. Reduce is closer in norm and usually *worse* for the step it
+>    would produce, so the expand/reduce choice **for an optimizer** must be read on `ρ`, not `e_F`
+>    (which is why §0.10 votes on `e_F` and reports `ρ` across the sweep rather than mixing them).
+> 4. **Proposition 3.1 under weight sharing: right direction, 20-38× too small.** The Hadamard
+>    reading's optimal rescaling is 0.95 on A1 (no sharing) but 27.8 / 20.4 / 37.9 on A2-GN / A2-BN /
+>    A3, because it is built from expand-style statistics and therefore approximates `B^exp`, not the
+>    exact `(γ, β)` block. Direction-wise the ranking is identical on all four models. And the
+>    shipped `diag_py` reading is last by direction in 13/15 (A2-BN) and 15/25 (A3) cells — the claim
+>    lot 2 §6.3 made about the wrong object now holds, measured, for the right one.
+>
+> Two of lot 2's own Q4 conclusions **do not transport** and are recorded as failing: "`ρ` falls for
+> every structure along training" is a tendency (95 % of pairs on A1, but 52-71 % here), and
+> "inter-layer coupling ≥ 0.5 everywhere" fails on the ViT (min 0.28) and on A2-GN (0.44) — layers
+> are *less* entangled where weights are shared, the opposite of what an MLP-only study suggests.
+
+> **Lot 5 of the campaign — P2, the operational protocol: DONE, all six jobs COMPLETED**
+> (`docs/reports/plan_exp_lot5.md` §6; jobs **21388028** fidelity `00:28`, **21388029** smoke
+> `00:42`, **21388030/31/32/33** for A3 `01:58` / A2-GN `06:58` / A2-BN `07:25` / A1 `02:04`, the
+> last four chained `afterok` to the smoke). 181 574 rows, **zero** invariant violations, **zero**
+> non-finite values, row checks against autograd `≤ 1.04e-15`, host peaks 77.9-81.6 GB against the
+> 80.7 predicted.
+>
+> **The result, in one line: the preconditioner the optimizer actually divides by is the identity.**
+> `cond(F~)` is **1.0000-1.1035** over 25 (mode, block) pairs and `lambda` is **98.9-100.0 %** of
+> its mean eigenvalue; over 7 750
+> (mode, block, checkpoint, source, damping) cells `rho(P2 mode)` equals `rho(identity)` — the
+> plain-gradient step — to a median of one part in `10^4` to `10^6` (p95 `<= 1.2 %`). The same
+> structures in their P1 form deliver **0.58-0.88** of the ideal quadratic decrease where the
+> operational ones deliver **0.18-0.42**, which is what doing nothing delivers. This is
+> `plan_lambda_dominance.md` seen from the other end: that report measured the *state* sitting
+> `~2e8` below what it estimates, lot 5 measures the *consequence* for the operator and for the step.
+>
+> **And the damping is what does it, not the averaging** — the separation §11's decision rule does
+> not make. Before the optimizer's own `lambda` the operational operator still carries **0.01-0.43**
+> of structure (after the EMA, the min-max, train mode, the augmentation, fp32 and an effective
+> sample of ~150 examples); adding `lambda` takes it to `1e-8`-`5e-4`, i.e. **139x to 5.8 Mx closer
+> to the identity**. The four-rung ladder (P1 -> P1-py -> P2-raw -> P2, with a one-micro-batch
+> control) attributes the rest: the optimizer's own **formulas cost nothing** directionally
+> (`kron_py` = `kfac` to three decimals); the **effective sample size** costs 0.275 on A1's
+> `785 x 785` input factor but only 0.001-0.013 on the CIFAR convolutions, because 128 examples are
+> 128 x 1024 *patches* — **weight sharing is what makes the operational estimator viable at all**.
+>
+> **HF7 is "confirmed" by the pre-registered rule and the honest reading is different, and
+> stronger.** Median `tau(P1,P2)` is `-0.67 / -0.33 / -0.33 / -0.33` with a reproducibility ceiling
+> of `+0.67`-`+1.00` and **0 degenerate, 0 dropped** cells — the gate §0.9 was built around had a
+> real chance to fire and did not. But the spread between the five modes at the operational rung is
+> **0.0000-0.0003** against a per-layer noise floor of **0.026-0.167**, i.e. **100-1000x below it**,
+> while at the structural rung it is 2-16x *above*. By `plan_exp_draft.md` §10.3's own reading rule
+> that difference is not reportable: **there is no P2 ranking, so HF7 as worded is ill-posed at the
+> operational point.** §0.9's gate used the operator's own replica noise (`1e-8`) as its yardstick,
+> which is too permissive; §10.3's floor is the binding one and the verdict is reported under it.
+>
+> **The one mode that survives its own damping is the one whose `lambda` is relative.** Ranked by
+> departure from doing nothing: `ekfac` `1.3e-7`, `tekfac` `1.5e-7`, `kfac` `1.8e-5`, `diag`
+> `2.9e-5`, **`tkfac` `6.8e-5`** — 500x further than `ekfac`, growing along training, and holding the
+> single largest departure of all 7 750 cells (`+11.6 %` over the plain gradient on A1's
+> `features.0` at initialisation). `tkfac` is the only mode damping with `sqrt(lambda/delta)` against
+> `tr(Phi) = tr(Psi) = 1`, i.e. **relative to the curvature's own trace**; every other adds an
+> absolute `lambda`. That is quantitative support for fix **S1** of `plan_lambda_dominance.md`,
+> arriving from a new direction — and it is corroborated independently by the condition numbers,
+> whose per-mode ranges reproduce the same ordering: `ekfac`/`tekfac` 1.0000-1.0013, `kfac`
+> 1.0003-1.0206, `diag` 1.0001-1.0568, **`tkfac` 1.0010-1.1035**.
+>
+> **Exit criterion 5, the re-warm, is confirmed on all four models**: at `k = 10` the gap on the
+> applied preconditioner is within **0.37-1.82x** its own batch-draw floor on all 20 (model, mode)
+> pairs and `k = 20` changes nothing; at `k = 3` the four Kronecker modes sit **4-8 x 10^5** above
+> their floor with the applied preconditioner **52-87 % wrong**, because the floor *collapses* when
+> two replicas share the same deterministic identity seed. **Exit criterion 8** (the free regression
+> test on reusing the P1 runner) holds on type-2 to `3.47e-13` over 33 065 rows with zero above
+> `1e-10`; HF7's own P1 structures to `<= 5.5e-10` and the verdict statistic to `<= 1.5e-13`.
+>
+> **A finding that belongs to lot 3, found chasing the one exception.** On the *empirical* source
+> `ekfac_reduce`'s inverse metrics differ from lot 3's by up to `0.376`. Cause: the reduce output
+> factor `G_reduce` is **exactly rank-deficient** on any layer followed by a normalisation —
+> `rank = channels - num_groups`, measured **8 of 16** on `cnn_gn_cifar`'s `features.0` and 24 of 32
+> on `features.4` — because a normalisation's backward makes the gradient sum to zero within each
+> group and `reduce` sums over exactly those positions. Inside that degenerate null space the
+> eigenvectors are numerically arbitrary: K-FAC is invariant (constant eigenvalue there), EKFAC is
+> not (it assigns a data-estimated `s`). Measured: a `3.2e-16` perturbation rotates the null-space
+> eigenvectors by **0.53**, moves `kfac_reduce`'s step by `1.2e-12` and **`ekfac_reduce`'s by
+> `0.144`**. **HF2's verdict stands** (it votes on type-2 `e_F`, no inverse), but no `rho`, `cos_ngd`
+> or Stein-KL number for `ekfac_reduce` should be quoted to better than ~10 %.
+>
+> **What lot 5 does not establish**: one arm (`diag`) and one seed; regime A only, so §10.3's
+> regime-B clause is unmet and every per-layer-type reading is provisional until lot 4; and `lambda`
+> is not swept on the P2 side by construction. Read `plan_exp_lot5.md` §6.7 before extending any of
+> it. P1 asks how good a family of approximations can
+> possibly be; P2 asks how good the thing the optimizer actually divides by is. The new
+> `fisher_ref/approx/adafisher_state.py` reads `AdaFisherMulti`'s live per-module state — after the
+> running average, after `diag`'s min-max, at the optimizer's own `lambda`, estimated in fp32 from
+> augmented training batches with normalisation layers in train mode — and `fisher_ref/rewarm.py`
+> rebuilds that state from a checkpoint's weights, since the checkpoints hold weights only.
+> **It is not on B1/B2**: `cct_2_3x2_cifar` and `resnet20_cifar` are regime-B models, so both halves
+> of the comparison need lot 4, which does not exist; lot 5 runs on **every regime-A model instead**
+> (A1 `mlp_ln_mnist`, A2-GN `cnn_gn_cifar`, A2-BN `cnn_gn_cifar_bn`, A3 `vit_micro_cifar`), which is
+> exactly where P1 has been measured (§0.0 there).
+>
+> **The design decision that makes it cheap and paired**: `p2_operational.py` is the *P1* runner
+> with extra structures injected (`ExtraStructures`), not a second runner — so P1 and P2 come from
+> **one** reference build, on the same probes at the same weights. Checked directly rather than
+> argued: on a real `cnn_gn_cifar/diag/ckpt_0.5`, **340 of 340 P1 rows are bit-identical** between a
+> pure-P1 run and the P2 run, and the only extra structure is the `tekfac` the P2 job enables on
+> purpose. 657 tests pass (the 628 that existed, unmodified, plus lot 5's 29).
+>
+> **Six things the plan's own adversarial re-read caught before any code was written**, each of
+> which changed the design (§0.14 there): there was no like-for-like P1 partner for `p2_diag`;
+> **P1 builds no Kronecker structure on a normalisation layer at all** (its `A` there is the
+> `(C+1)x(C+1)` second moment of the *normalised* input, the wrong size for a `2C` block), so three
+> of HF7's five mode pairs had nothing to compare against; the P2 operator's **own** sampling noise
+> was nowhere (fold intervals carry the *reference's*, and the operator is a draw of something that
+> is 92 % one minibatch); the augmentation and train-mode term was silently folded into "the EMA";
+> M3 would have tripled the job for a metric not in the verdict; and there was no sizing table.
+> The fix is a **four-rung ladder** — P1 (structure alone, fp64, per-example) -> P1-py (the
+> optimizer's *own formulas*, called not re-implemented, still without averaging or damping) ->
+> P2-raw (after the running average, min-max, fp32 and the training data) -> P2 (plus the
+> optimizer's damping) — so the gap is attributed rather than lumped.
+>
+> **Four measured findings during implementation**, each recorded in §5 there. (1) The premise was
+> verified first: solving `F~ x = rvec(M)` densely reproduces `approx.precondition` to **0.0-2.2e-15**
+> in all twenty (mode, layer) combinations, so no new block class was needed. (2) `diag_py`
+> **averages the product** `outer(S_D, H_D)` over micro-batches while the optimizer keeps one
+> running average per **factor**; lot 3's function is left untouched and `diag_py_factor_reading` is
+> added beside it, so the gap is a number in the CSV rather than a choice. (3) On a real block the
+> P1-py readings sit at **`c* = 1.6e4`** against the exact Fisher — that is `CLAUDE.md` §4.3's
+> `1/batch^2 = 16 384` at batch 128, confirmed end to end on a trained network for the first time;
+> its consequence is that `rho` on a scale-free reading must be evaluated on `c*K`, which lot 3 did
+> only for a `Diag`. (4) **At the correct re-warm length the operational preconditioner is,
+> numerically, a multiple of the identity**: `cond(F~)` on `cnn_gn_cifar`'s head is 1.00-1.11 for
+> `ekfac`/`tkfac`/`tekfac`, 1.02 for `kfac`, 1.05 for `diag`, and `lambda` is **37x** the mean
+> eigenvalue of the exact Fisher there. That is `plan_lambda_dominance.md` seen from the other side,
+> and it means `rho(P2) ~= rho(identity)` in the real runs will be a measurement, not a bug. One
+> layer, one checkpoint, one model — the four jobs are what settle it.
+>
+> **Two traps this lot had to avoid, both of a kind this repository has paid for before.** A
+> normalisation layer's block is **interleaved** in the optimizer (`gamma_0, beta_0, gamma_1, ...`)
+> and **blocked** in the campaign (`[gamma; beta]`), so a block that skips the permutation is
+> symmetric, positive definite and silently wrong — `plan_exp_lot2.md` §5.2's bug in a new place,
+> pinned by a test that fails when the permutation is removed. And `conv_sua=True` is **refused**
+> rather than answered: under SUA the operator is not one `kron(B~, A~)` over the full patch
+> direction but the same small operator applied at each kernel offset (`plan_lot6.md` §0.4).
+
 ## Working language
 
 All code, comments, docstrings, reports and documentation are written in **English**, to the standard
 of a well-maintained academic repository. French output on explicit request only.
+
+## Writing style — plain words, always
+
+**Feynman's rule: if it cannot be said in simple words, it is not understood yet.** This applies to
+every report, plan, docstring and chat answer in this project, not only to the ones written for an
+outside reader.
+
+- **Plain words over technical ones.** Write "the number the optimizer divides the step by", not
+  "the preconditioner", unless that document has already said what a preconditioner is. Write "the
+  list of curvature values, one per direction", not "the spectrum". Write "many directions have
+  exactly zero curvature", not "the factor is rank-deficient".
+- **One idea per sentence.** No stacked subordinate clauses. No chains of em-dashes carrying three
+  separate thoughts. If a sentence needs two commas to stay upright, split it.
+- **Define on first use, then reuse freely.** A term is allowed once it has been explained in that
+  same document. A reader should never have to look elsewhere to parse a sentence.
+- **Every number says what it is.** Units, and whether it was measured, computed on paper, or
+  estimated. Never a bare figure whose provenance the reader has to guess.
+- **No decorative hedging and no inflation.** "We measured X" or "this is not explained" — not
+  "it would appear that X may plausibly obtain".
+- **The reference examples in this repository** are `docs/reports/validation_noise_investigation.md`
+  and `docs/reports/plan_lambda_dominance.md`. Match their register; the second one opens with a
+  short version and a straight-through narrative before any detail, which is the shape to copy.
+
+This governs prose. It does **not** rename anything in code: function names, variable names and the
+papers' own notation (`A`, `B`, `Lambda`, `rvec`, K-FAC) stay exactly as they are. The rule is that
+prose *around* those names explains them.
 
 ## Hard constraints
 
@@ -399,7 +624,7 @@ of a well-maintained academic repository. French output on explicit request only
 ## Layout
 
 ```
-adafisher /
+adafisher/
 ├── pyproject.toml                # package "adafisher-modes", src layout
 ├── .venv/                        # project-local venv (uv), not FisherAdapTune's conda env
 ├── papers/                       # 10 PDFs, primary sources (plan.md §0) — + resnet_1512.03385
@@ -474,7 +699,7 @@ adafisher /
 │                                  #   weight-decay conventions, the eval-excluding budget
 │                                  #   harness, Cutout, the 45k/5k split; all offline
 │                                  # step 1: test_benchmark_models.py (new) — parametrized over
-│                                  #   every benchmarks/<model>/ folder: exact parameter count,
+│                                  #   every benchmarks/models/<model>/ folder: exact parameter count,
 │                                  #   hooked-module inventory + the explicit list of parameters
 │                                  #   belonging to no hooked module, "no parameter left
 │                                  #   un-updated", all 5 modes, the bench spec (<= 50 lines, no
@@ -487,6 +712,16 @@ adafisher /
 │                                  #   ImageFolder pipeline on a synthetic tree, both transform
 │                                  #   regimes, the seeded split, output_group routing, and that
 │                                  #   every bench has generated jobs in its own subdirectory
+│                                  # S3: test_ema_seed_first.py (new) -- the identity-seed fix:
+│                                  #   default inertness, the constant-input property, all 5 modes
+│                                  # full-repo audit: test_optimizer_robustness.py (new) — two
+│                                  #   parameter groups, LayerNorm(bias=False), a frozen bias, a
+│                                  #   module first reached after step 0, two backwards over one
+│                                  #   forward, a tied weight, precondition-vs-exp_avg aliasing;
+│                                  #   test_eig_before_rescale.py (new) — the ekfac/tekfac
+│                                  #   ordering knob; test_full_factors_match_diag.py extended
+│                                  #   with the bias-free Conv2d scale quirk, three scope guards
+│                                  #   and the raw-vs-normalised input-factor pin. All offline
 │                                  # campaign 1 audit: test_lr_schedule.py (new) — NominalCosine
 │                                  #   identical to torch's inside T_max and clamped outside it,
 │                                  #   BudgetCosine's shape/monotonicity/floor, both through the
@@ -494,6 +729,15 @@ adafisher /
 ├── benchmarks/                   # step 1 (plan_exp_step1.md): a package — one shared harness in
 │   │                             #   common/, one folder per tested model. The five flat modules
 │   │                             #   of lots 1/7/8 are gone; every line of them landed here.
+│   │                             #   Post-step-1 reorganization: every model folder now sits one
+│   │                             #   level deeper, under models/, so benchmarks/ itself only holds
+│   │                             #   the shared harness, the SLURM generator, data/, outputs/ and
+│   │                             #   archives/. discover_benchmarks() globs models/*/bench.py and
+│   │                             #   imports benchmarks.models.<name>.bench; every CLI invocation,
+│   │                             #   cross-folder import (e.g. vit_micro_cifar's ViTCIFAR from
+│   │                             #   vit_small_cifar) and generated SLURM job follows the same
+│   │                             #   benchmarks.models.<name> prefix. outputs/, data/ and slurm/
+│   │                             #   did NOT move — only the 20 model source folders did.
 │   ├── common/
 │   │   ├── data.py               # mnist()/cifar10()/cifar100(), imagenet()/imagenet32() (an
 │   │   │                         #   ImageFolder tree, staged by hand), Cutout,
@@ -511,18 +755,22 @@ adafisher /
 │   │   │                         #   relative to the NOMINAL trajectory, shared across arms
 │   │   └── runner.py             # Benchmark, build_parser(bench), main(bench),
 │   │                             #   discover_benchmarks() — the folder list *is* the registry
-│   ├── mnist_autoencoder/        # model.py bench.py  (migrated, lots 1+7)
-│   ├── mlp_ln_mnist/             # model.py bench.py  (A1, new: 26 634 params)
-│   ├── cnn_gn_cifar/             # model.py bench.py  (A2, new: 24 458; --norm gn|bn)
-│   ├── vit_micro_cifar/          #          bench.py  (A3, new: 21 098; imports ViTCIFAR from
-│   │                             #   vit_small_cifar/model.py — D1's one cross-folder import)
-│   ├── resnet20_cifar/           # model.py bench.py  (B2, new: 269 722, option-A shortcuts)
-│   ├── cct_2_3x2_cifar/          # model.py bench.py  (B1, new: 283 723, AdaFisher's own model)
-│   ├── resnet50_cifar/           # model.py bench.py  (migrated verbatim, lot 8: 23 520 842)
-│   ├── vit_small_cifar/          # model.py bench.py  (migrated verbatim, lot 8: 2 693 578)
-│   ├── <arch>_cifar100/          # 6 folders: the six architectures above with num_classes=100.
-│   │                             #   bench.py only — the model is imported from <arch>_cifar/
-│   ├── <arch>_imagenet/          # 6 folders, num_classes=1000. Four read ImageNet downsampled to
+│   ├── models/                    # one folder per tested model (moved here out of benchmarks/
+│   │   │                         #   directly, see the note above); benchmarks.models.<name> is
+│   │   │                         #   the import prefix and `python -m benchmarks.models.<name>.bench`
+│   │   │                         #   the CLI invocation for every one of the 20 folders below.
+│   │   ├── mnist_autoencoder/    # model.py bench.py  (migrated, lots 1+7)
+│   │   ├── mlp_ln_mnist/         # model.py bench.py  (A1, new: 26 634 params)
+│   │   ├── cnn_gn_cifar/         # model.py bench.py  (A2, new: 24 458; --norm gn|bn)
+│   │   ├── vit_micro_cifar/      #          bench.py  (A3, new: 21 098; imports ViTCIFAR from
+│   │   │                         #   vit_small_cifar/model.py — D1's one cross-folder import)
+│   │   ├── resnet20_cifar/       # model.py bench.py  (B2, new: 269 722, option-A shortcuts)
+│   │   ├── cct_2_3x2_cifar/      # model.py bench.py  (B1, new: 283 723, AdaFisher's own model)
+│   │   ├── resnet50_cifar/       # model.py bench.py  (migrated verbatim, lot 8: 23 520 842)
+│   │   ├── vit_small_cifar/      # model.py bench.py  (migrated verbatim, lot 8: 2 693 578)
+│   │   ├── <arch>_cifar100/      # 6 folders: the six architectures above with num_classes=100.
+│   │   │                         #   bench.py only — the model is imported from <arch>_cifar/
+│   │   └── <arch>_imagenet/      # 6 folders, num_classes=1000. Four read ImageNet downsampled to
 │   │                             #   32x32 (imagenet32) and reuse the CIFAR model unchanged;
 │   │                             #   resnet50_imagenet has its OWN model.py (the paper's ImageNet
 │   │                             #   7x7/s2+maxpool stem, 25 557 032) and vit_small_imagenet is
@@ -579,6 +827,20 @@ adafisher /
 │   ├── reference/dense.py        #   lot 1: regime A — F = U^T U, E_hat, B_l in fp64, U streamed;
 │   │                             #   columns in named_parameters() order (plan_exp_lot1.md §0.5).
 │   │                             #   ONE P x P buffer on the device: addmm_ + symmetrize_ (§0.9)
+│   ├── approx/, metrics/,        #   lot 2: the zoo (K-FAC, EKFAC, TKFAC, AF-raw, norm readings)
+│   │   runners/p1_structural.py  #   and M1/M3/M5/M7/M8 + the P1 CLI. Lot 3 extended all three
+│   │                             #   to weight sharing: reduce variants, approx/sharing.py (the
+│   │                             #   B^exp decomposition), approx/embed.py (pos_embed), diag_py,
+│   │                             #   the identity control (plan_exp_lot3.md)
+│   ├── approx/adafisher_state.py #   lot 5: P2 -- AdaFisherMulti's live state as curvature blocks,
+│   │                             #   in the layout P1 holds each block in. A normalisation layer's
+│   │                             #   is INTERLEAVED there and BLOCKED here: norm_permutation()
+│   ├── rewarm.py                 #   lot 5: frozen-theta re-warm from a checkpoint's weights;
+│   │                             #   refuses < 10*TCov steps (0.08^k << lambda, not << 1)
+│   ├── runners/p2_operational.py #   lot 5: the P1 runner with three more rungs injected, not a
+│   │                             #   second runner -- one reference build, so P1 and P2 are paired
+│   ├── folds.py                  #   lot 3: one traversal over K folds, sums offloaded to the host,
+│   │                             #   halves assembled by addition -> per-layer intervals for free
 │   ├── experiments/              #   measurement drivers, not tests; env-var constants, no CLI.
 │   │                             #   rewarm_fidelity.py, identity_seed_residual.py,
 │   │                             #   dense_reference_a1.py (lot 1 phase 5: F/E_hat/blocks, the
@@ -621,7 +883,15 @@ AdaFisherMulti(model, lr=1e-3, beta=0.9, Lambda=1e-3, gammas=[0.92, 0.008], TCov
                conv_sua=False,              # kfac/ekfac/tkfac/tekfac only; Conv2d SUA (lot 6)
                fisher_batch_samples=None,   # lot 8: estimate the factors from the first k examples
                                             #   of each batch only (memory); None = whole batch
-               decoupled_weight_decay=False)# lot 8: True = the official AdaFisherW rule
+               decoupled_weight_decay=False,# lot 8: True = the official AdaFisherW rule
+               ema_seed_first=False,        # S3: start each running average from its first
+                                            #   observation instead of the identity, so no residue
+                                            #   of the identity survives (plan_lambda_dominance.md)
+               eig_before_rescale=False)    # ekfac/tekfac only: rebuild the eigenbasis in the
+                                            #   backward hook, BEFORE projecting the gradient into
+                                            #   it, so s*/Theta is measured in the basis
+                                            #   precondition then uses (EKFAC Lemma 1, both papers'
+                                            #   Alg. 1). ValueError on the other three modes.
 ```
 
 YAML (style of `reference_repos/FisherAdapTune/crack_segmentation/config_segformer.yaml`):
@@ -641,6 +911,9 @@ fisher_batch_samples:  # lot 8, null = whole batch; an int caps the *curvature s
                         #   first k examples (ekfac/tekfac's cached batch is 3.4 GB on ResNet-50
                         #   at batch 128 otherwise — plan_lot8.md §0.4)
 fisher_decoupled_wd: false # lot 8, true = AdaFisherW (decoupled decay); use with AdamW baselines
+fisher_ema_seed_first: false # S3, true = seed each running average from its first observation
+fisher_eig_before_rescale: false # ekfac/tekfac only, true = measure the rescaling in the basis
+                        #   precondition will use, not in the one about to be replaced
 ```
 
 The mode is a **configuration field, not a separate optimizer**: no other part of the training code
@@ -659,6 +932,104 @@ knows which mode is active.
   `−inf → 0`) and the `epsilon = 1e-6` guard in the denominator. `_smart_detect_inf` already exists,
   unused, at `adafisher.py:21`.
 
+## Every deviation from the original AdaFisher
+
+**Why this section exists.** For a paper, or for any comparison against published AdaFisher numbers,
+it must be possible to say exactly what this code does differently from the original, and whether the
+difference is on by default. That is what this table is. It is the authoritative list; when
+something changes, change it here too.
+
+"Original" means two things that do not always agree, so both are named:
+**P** = the AdaFisher paper (`papers/adafisher_2405.16397.pdf`, Algorithm 1, Eq. (3)-(4), Prop. 3.1-3.2);
+**R** = the reference implementations (`reference_repos/FisherAdapTune/scripts/adafisher.py`, which is
+authoritative here, and `reference_repos/AdaFisher/`, kept for comparison only).
+
+### 1. What is reproduced exactly
+
+These are the anchors. If any of them breaks, the port is broken.
+
+| What | Against what | Test |
+|---|---|---|
+| `diag` with `minmax_normalization=False`: `F~` at every EMA update, and the parameter trajectory | **R** (FisherAdapTune), bit-exact | `test_diag_bitexact.py` |
+| `min_max_normalization` and `smart_detect_inf`, including the `epsilon = 1e-6` guard and the `+inf -> 1` / `-inf -> 0` pre-pass | **R** (official repo), bit-exact | `test_minmax_matches_official.py` |
+| Scale convention: mean over `batch x spatial` everywhere | **R** (AdaFisher's, *not* `EKFAC-pytorch`'s, which multiplies `grad_output` by the batch size) | the factor tests |
+
+### 2. Differences that are ON by default
+
+**These five change behaviour without being asked for.** Any comparison against a published number
+has to account for them. Two of them (2.2 and 2.5) are bug fixes: the reference's own version of
+each is wrong on a network or a parameter grouping this repository actually uses.
+
+| # | Difference | Why | Size of the effect |
+|---|---|---|---|
+| 2.1 | The update is **unfused**: `precondition()` returns a direction, then `param.add_(direction, alpha=-lr/bc)`. **R** uses the fused `addcdiv_` (`adafisher.py:273`). | `addcdiv_` is an element-wise division, so it assumes the preconditioner is diagonal in the parameter basis. That is true only for `diag`. The four new modes are not diagonal there, so the operator has to be *applied*, not divided by. See `plan_lot1.md` §0.3. | A few ULPs per step on a `Linear` layer. Amplified to about `1e-4` over 6 steps once `BatchNorm2d`'s running statistics feed back. This is why `test_diag_bitexact` resyncs parameters after each step. |
+| 2.2 | Parameters are paired to modules by **identity** (`id(param) -> module`), not by walking both lists positionally. **R** uses an index loop (`adafisher.py:275-307`). | **This is a bug fix, not a preference.** The index loop ran exactly `len(self.modules)` iterations and spent one on each *unpaired* parameter, so a network with `k` parameters outside the four hooked layer types silently lost its last `k` modules. Measured on `ViT-S/4`: `cls_token` and `pos_embed` cost the final `LayerNorm` **and the whole classification head**, which were never updated, with finite gradients and a still-falling loss. `plan_lot8.md` §0.3. | None on any network where the index loop was correct, which is asserted, not assumed (`test_pairing_matches_legacy_loop_on_reference_nets`). Total on any network with unpaired parameters. |
+| 2.3 | `diag` applies min-max to the **instantaneous** factors, *before* the EMA. | This follows **R** (`AdaFisher.py:412`, `:431`) and contradicts **P** (Algorithm 1 lines 4-5, which averages first and normalises after). The two orderings are not cosmetic: normalising destroys scale, so "before" leaves the EMA's own mis-scaling in the result and "after" erases it. `audit_step.md` §4.4. | Decisive. In the shipped order `F~_D` lives in `[lambda, lambda + 7.6e-5]`, a 7.6% spread across a whole layer; in the paper's order it lives in `[lambda, 1 + lambda]`. Measured in `plan_lambda_dominance.md` Part 6, E1. Switchable with `minmax_after_average=True`. |
+| 2.4 | `ekfac`/`tekfac` decompose through `approximations/_eigh_utils.py::eigenbasis`, which adds a relative ridge (`1e-6 * mean(diag(M))`) and falls back to the CPU solver. | **P** and **R** have no eigendecomposition at all, so there is nothing to deviate from; but this is code that runs and it should be on the list. Without it, cuSOLVER raises on an exactly rank-deficient factor, which killed two real cluster runs. | Mathematically inert on the returned basis: `M + cI` has the same eigenvectors as `M`, in the same order. |
+| 2.5 | A module is stepped **once per `step()`**, through one `stepped` set shared by the whole walk over the parameter groups. **R** rebuilds its bookkeeping inside the `for group in self.param_groups` loop (`adafisher.py:281`). | **This is a bug fix, not a preference.** A module is preconditioned once, with its weight and bias together, so "already stepped" is a property of the module, not of the group a parameter happens to sit in. With the standard decay/no-decay split — weights in one group, biases in the other — every hooked module was reached from both groups and stepped twice. | Measured on a two-layer net with that split: every parameter moved **exactly 2.0000 times** as far from its initial value as under a single group. None on any model in this repository, all of which build one group — which is why this is a behaviour-preserving fix and not a knob. One limitation stays and is documented in `optimizer.py`: a module whose weight and bias end up in *different* groups is stepped with the hyperparameters of whichever group its first-encountered parameter is in. `tests/test_optimizer_robustness.py` |
+
+### 3. Differences that are OFF by default
+
+Every one of these reproduces today's exact behaviour when left alone. They exist so that an
+experiment can turn one thing on at a time.
+
+| Knob | What it does | Where it is justified |
+|---|---|---|
+| `fisher_mode` in `kfac`, `ekfac`, `tkfac`, `tekfac` | The whole point of the project: four alternative ways to build `v^(t)` from the same per-layer Fisher block. `diag` is AdaFisher's own. | `plan.md`, lots 2-6 |
+| `conv_sua` | The SUA channel-only `Conv2d` input factor, `d_in = C_in[+1]` instead of `C_in*k_h*k_w[+1]`. | `plan_lot6.md` |
+| `fisher_batch_samples` | Estimate the factors from the first `k` examples of each batch only. Changes the *estimator*, not the applied gradient. | `plan_lot8.md` §0.4 |
+| `decoupled_weight_decay` | The official `AdaFisherW` rule, so ViT arms can be compared like-for-like with `AdamW`. | `plan_lot8.md` §0.6 |
+| `gamma` | Overrides `gammas` with `(1-gamma, 1-gamma)`, which collapses the EMA to **P**'s Eq. (3) exactly. | `audit_step.md` §4.7-§4.8 |
+| `minmax_after_average` | Moves the min-max to where Algorithm 1 puts it (see 2.3). | `audit_step.md` §4.4 |
+| `ema_seed_first` | Starts each running average from its first observation instead of from the identity, so no residue of the identity is ever left in the state. Fix S3. | `plan_lambda_dominance.md` Part 4, `tests/test_ema_seed_first.py` |
+| `eig_before_rescale` | `ekfac`/`tekfac` only. Rebuilds the eigenbasis **inside the backward hook**, before the gradient is projected into it, so the rescaling is measured in the basis `precondition` then uses; `refresh()` does not redo it that step. By default the basis is replaced *afterwards*, in `step()`, so `s*`/`Theta` describe a basis that no longer exists — EKFAC's Lemma 1 makes the optimal diagonal optimal for the `Q` it was measured in and no other, and Algorithm 1 of both papers, plus `EKFAC-pytorch/ekfac.py::step`, order it eigenbasis-then-rescaling. Passing it to the other three modes is a `ValueError`, not a silent no-op. **Measured** (24-16-6 net with a `LayerNorm`): the two orderings store an `s*`/`Theta` differing by **91%–141%** relative, but the *applied step* differs by only **3.0e-3** (60 steps, `TCov=10`) and **3.7e-5** (200 steps, `TCov=20`) at the shipped `Lambda=1e-3`, against **8.3** and **0.28** at `Lambda=1e-8`. So no trained model in this repository is affected — and **fix the ordering before acting on `plan_lambda_dominance.md`'s fix S1**, which lowers `Lambda`. | EKFAC Lemma 1 / Alg. 1, TEKFAC Alg. 1, `audit_full_repo.md` finding 3, `tests/test_eig_before_rescale.py` |
+| `T_inv`, `T_eig`, `T_re` | Amortisation cadences for the inverse, the eigenbasis and the rescaling. | K-FAC §6.3, TEKFAC Alg. 1 |
+
+### 4. Where the code and the paper disagree, and both reference repos take the code's side
+
+**These are not this project's deviations.** They are properties of AdaFisher as published in code,
+reproduced here on purpose. They matter for a paper because a reader will assume the paper's version.
+
+| # | The paper says | Both reference repos do | Consequence, measured |
+|---|---|---|---|
+| 4.1 | Eq. (3): `gamma * old + (1-gamma) * new`, `gamma = 0.8` | `0.08 * old + 0.008 * new` (`gammas = [0.92, 0.008]`). The coefficients sum to 0.088, not 1. | The stored quantity settles at **1/115** of what it estimates, and **92%** of it is one minibatch. `audit_step.md` §4.2-§4.3 |
+| 4.2 | Algorithm 1 recomputes the factors every step | `TCov = 100` | The curvature comes from one minibatch out of every hundred steps. `audit_step.md` §4.3 |
+| 4.3 | The Fisher is an expectation over per-example gradients | The backward hook takes the gradient of the **batch-mean** loss | Each example's share of the curvature is divided by `batch^2`, i.e. **16 384** at batch 128. Confirmed directly: 56 measurements of the `1/batch^2` rule, all between 0.021 and 0.144 where it predicts 0.0625 (`plan_lambda_dominance.md` Part 6, E3). `EKFAC-pytorch` compensates for this; AdaFisher does not. |
+| 4.4 | Prop. 3.1 for a normalisation layer: `S = sum_x s_x s_x^T` ("square-then-sum"), potentially full rank | `diag`'s `_h_batchnorm2d` / `_s_batchnorm2d` / `_h_layernorm` / `_s_layernorm` do "sum-then-square" | A different object, not a reduction-order difference. Left untouched in `diag`; the four new modes use Prop. 3.1 itself. `plan_lot5.md` §0.6 |
+| 4.5 | — | `_h_conv2d` divides by `batch * S * P` **with a bias** and by `batch` alone **without one**, instead of `batch * S` in both cases | Two per-layer constant factors, harmless only because `diag`'s min-max erases per-layer scale. The new `Conv2d` code deliberately reproduces neither, so `compute_h_full`'s `Conv2d` diagonal is `P` times `compute_h_diag`'s with a bias and exactly `1/S` times it without one (measured: `1/25`, `1/16`, `1/9` on three shapes). Both are asserted as locked regressions. **Every convolution in every ResNet and CCT in this repository is `bias=False`**, so the `1/S` branch is the one that actually runs on the CNN benchmarks; until the full-repository audit only the `P` branch had a test. `plan_lot4.md` §0.2, `tests/test_full_factors_match_diag.py` |
+| 4.6 | Prop. A.1's proof writes `H\|_nu = E[h h^T]` for the **normalised** activation `x_hat` — `y = gamma*x_hat + beta`, so `d/d gamma` pairs the output gradient with `x_hat`, not with the layer's input | The forward hook sees the input **before** normalisation, and that is what `augment_norm_input` pools — in `diag` and in all four Kronecker modes | **Not a reduction-order difference: a different activation.** Measured on `BatchNorm2d(8)` with a post-ReLU input and running statistics far from the batch statistics: `a_nu = A[0,0]` is **4.3991** from the raw input against **0.1296** from the train-mode `x_hat` (a factor of **33.9**), and the scale-shift coupling `A[0,1]` is **2.0377** against **4.3e-08**. The factor is **bit-identical in train and eval mode**, which is only possible because it never looks at the normalisation. For `diag` this is inherited from both reference repositories; for the four new modes it is this repository's own choice, and it was missing from this table until the full-repository audit. **Do not "fix" it by swapping in `x_hat`:** for `LayerNorm`, `x_hat` sums to zero across channels by construction, so `a_nu` would be exactly 0 — measured at **6.3e-15** on `LayerNorm(16)` — and the whole scale block would collapse to the damping term. Pinned, with these numbers, by `test_norm_input_factor_ignores_the_normalisation_itself` and `test_norm_input_factor_coupling_entry_is_far_from_the_normalised_value`. `audit_full_repo.md` finding 4 |
+
+The joint effect of 4.1 and 4.3 is a factor of about **2 x 10^8** between the stored curvature and
+the quantity it estimates. That is the single most important number for anyone comparing this code
+with the paper, and it is why `Lambda = 1e-3` sits above **every** direction of **every** network
+measured here. `plan_lambda_dominance.md` is the whole story.
+
+### 5. Choices made inside the new modes, which have no AdaFisher counterpart
+
+Relevant to a paper about the four new modes, not to a comparison with AdaFisher itself. Each is a
+place where a reader of the source paper would expect something else.
+
+| Choice | Instead of | Why |
+|---|---|---|
+| `ekfac`'s `s*` is an EMA of the **intra-batch** estimate | Either of the paper's two named variants ("from scratch every minibatch", or `-ra`'s squared batch-mean) | A deliberate third choice, so that all five modes share one EMA. `plan_lot2.md` §0.3 |
+| A normalisation layer's input factor is a `2x2` matrix with a Frobenius-optimal scalar surrogate `a_nu` | Prop. 3.1's exact `H|_nu`, which is Hadamard- and not Kronecker-structured and does not fit the shared `kron(A,B)` machinery | Derived in `plan_lot5.md` §0.1-§0.2. The small `nu`-`beta` coupling term is **kept**, not forced to zero |
+| SUA's input factor is the **centre offset** of every patch `extract_patches` already produces | `EKFAC-pytorch`'s own SUA, which pools the raw input independently | Only the centre-slice version stays row-aligned with the output factor's pooling when `stride != 1` or the padding is not "same". `plan_lot6.md` §0.3 |
+| SUA treats the input factor as exactly block-diagonal across kernel offsets | The exact IAD+SH+SUA block, which has a rank-1 cross-offset coupling term | Matches `EKFAC-pytorch`'s own (also uncorrected) convention. A documented gap, not a bug. `plan_lot6.md` §0.1 |
+| The bias direction under SUA is read back from the **centre** offset only | Any of the other `k_h*k_w - 1` offsets, which are expected to disagree | Inherited from `EKFAC-pytorch`; no theorem behind it. `plan_lot6.md` §0.4 |
+| TEKFAC's trace-adaptive `lambda` (Eq. 3.5) and TKFAC's adaptive floor (Eq. 5.16) are **not implemented** | The papers' own conv-layer damping | A dimension-agnostic additive `lambda` is used instead. This is exactly what fix S1 of `plan_lambda_dominance.md` proposes to undo |
+| `precondition()` receives the bias-corrected first moment `m_hat`, not the raw gradient | Preconditioning `g` before averaging | Preconditioning first would be K-FAC + momentum, a different algorithm, and would break AdaFisher's own Table 1 |
+
+### 6. Differences on the benchmark side
+
+These do not touch the optimizer, but they change any number produced with it.
+
+| Difference | Why |
+|---|---|
+| `NominalCosine` is **clamped** past `T_max`; torch's `CosineAnnealingLR` is periodic and climbs back up | Under a wall-clock budget a cheap arm overshoots `T_max`. Measured: `resnet20_cifar/adam` hit `lr = 0` at epoch 49, then trained 9 more epochs with the learning rate rising again, best accuracy decaying 88.82% -> 88.06%. `benchmarks/common/schedules.py` |
+| `BudgetCosine` (`--lr-schedule budget`) anneals each arm over **its own** wall-clock budget | So every arm completes exactly one full cosine. The price is that such a run is no longer bit-reproducible |
+| Checkpoint fractions are relative to the **nominal** trajectory, shared by every arm | So `ckpt_0.5` means the same amount of training in every arm. Using `max_epochs` put a budgeted arm's `ckpt_0.1` at 31% of its own run |
+| The wall-clock-time protocol itself | AdaFisher's own (`adafisher_2405.16397.pdf` §5): one reference arm runs a fixed epoch count, every other arm gets its measured wall-clock time |
+
 ## Environment
 
 A project-local venv, **not** FisherAdapTune's conda env (`fisheradaptune`) — that one exists only to
@@ -676,9 +1047,9 @@ the lot-1 completion notes). Two consequences, both already wired up:
 
 - `pyproject.toml`'s `[tool.pytest.ini_options]` sets `pythonpath = ["src"]`, so `pytest` works
   without any extra flag.
-- Each `benchmarks/<model>/bench.py` inserts both the repository root and `src` onto `sys.path`
-  itself, so `python benchmarks/<model>/bench.py` works alongside `python -m
-  benchmarks.<model>.bench`; running with `PYTHONPATH=src` explicitly also works.
+- Each `benchmarks/models/<model>/bench.py` inserts both the repository root and `src` onto `sys.path`
+  itself, so `python benchmarks/models/<model>/bench.py` works alongside `python -m
+  benchmarks.models.<model>.bench`; running with `PYTHONPATH=src` explicitly also works.
 
 If this turns out to be specific to this sandbox rather than the host machine in general, the editable
 install may "just work" elsewhere — no need to route around it there too.
@@ -725,9 +1096,10 @@ Run these from the repository root on the laptop (the local checkout lives at
 ## Running the tests
 
 ```bash
-.venv/bin/pytest tests/ -v                                    # everything (lots 1-8 + step 1 + campaign
-                                                               #   lots 0-1: 341 tests, + 10 marked slow and
-                                                               #   1 needing curvlinops, run with --runslow)
+.venv/bin/pytest tests/ -v                                    # everything: 853 collected, 812 passed and
+                                                               #   41 skipped by default (40 gated on --runslow,
+                                                               #   1 needing curvlinops). With --runslow: 852
+                                                               #   passed, 1 skipped. Measured 2026-09-19.
 .venv/bin/pytest tests/test_diag_bitexact.py -v                # exit criteria 1 & 3 (bit-exactness)
 .venv/bin/pytest tests/test_diag_eq4_semantics.py -v            # exit criterion 2 (Eq. 4 semantics)
 .venv/bin/pytest tests/test_minmax_matches_official.py -v      # MinMaxNormalization vs. official repo
@@ -747,6 +1119,19 @@ Run these from the repository root on the laptop (the local checkout lives at
                                                                  #   samples, both weight-decay rules, budget+eval (lot 8)
 .venv/bin/pytest tests/test_eigh_conditioning.py -v              # the ekfac/tekfac eigh conditioning ridge:
                                                                  #   inertness, rank-deficient factors, CPU fallback
+.venv/bin/pytest tests/test_ema_seed_first.py -v                  # the ema_seed_first knob: default
+                                                                 #   inertness on a real trajectory, the
+                                                                 #   exact constant-input property it
+                                                                 #   exists for, all 5 modes; offline
+.venv/bin/pytest tests/test_optimizer_robustness.py -v            # the awkward networks and loops: two
+                                                                 #   parameter groups, a frozen bias, a module
+                                                                 #   first reached after step 0, two backwards
+                                                                 #   over one forward, a tied weight, and that
+                                                                 #   precondition never aliases exp_avg
+.venv/bin/pytest tests/test_eig_before_rescale.py -v              # the eig_before_rescale knob: default
+                                                                 #   inertness, the basis s*/Theta is measured
+                                                                 #   in vs the one precondition uses, and how
+                                                                 #   far the difference reaches at two lambdas
 .venv/bin/pytest tests/test_lr_schedule.py -v                    # the cosine under WCT: clamped nominal
                                                                  #   vs. budget-annealed, and both in the loop
 .venv/bin/pytest tests/test_dataset_benches.py -v                 # CIFAR-100 + ImageNet-1K: the
@@ -769,37 +1154,50 @@ Run these from the repository root on the laptop (the local checkout lives at
                                                                  #   torch.func and vs. finite differences, the
                                                                  #   backward-hook pruning regression, the dense
                                                                  #   F/E_hat/B_l and their layout; all offline
+.venv/bin/pytest tests/test_fisher_ref_lot5.py -v                # the campaign's lot 5 (T12): the state reader
+                                                                 #   vs the optimizer's own applied preconditioner,
+                                                                 #   all 5 modes x all 4 hooked layer types; diag vs
+                                                                 #   the upstream optimizer; the norm-layer
+                                                                 #   permutation (and that removing it fails); the
+                                                                 #   re-warm's refusal below 10*TCov; conv_sua
+                                                                 #   refused; k_lam inertness; the P1-py readings;
+                                                                 #   TEKFAC's trace and dominance; all offline
+.venv/bin/pytest tests/test_fisher_ref_lot3.py -v                # the campaign's lot 3: T5 (expand/reduce exact
+                                                                 #   in their settings, and NOT in the other),
+                                                                 #   T8-exp, T9-shared, T13-shared, B^exp vs brute
+                                                                 #   force, pos_embed rows, the row checks, the fold
+                                                                 #   engine, theorem orderings, diag_py; offline
 
-# Every bench takes the same CLI; `python -m benchmarks.<model>.bench` and
-# `python benchmarks/<model>/bench.py` are equivalent. The models are:
+# Every bench takes the same CLI; `python -m benchmarks.models.<model>.bench` and
+# `python benchmarks/models/<model>/bench.py` are equivalent. The models are:
 #   mnist_autoencoder  mlp_ln_mnist  cnn_gn_cifar  vit_micro_cifar
 #   resnet20_cifar     cct_2_3x2_cifar  resnet50_cifar  vit_small_cifar
-PYTHONPATH=src .venv/bin/python -m benchmarks.mnist_autoencoder.bench \
+PYTHONPATH=src .venv/bin/python -m benchmarks.models.mnist_autoencoder.bench \
     --arms reference diag --epochs 5 --budget-mode epochs --no-minmax   # lot 1's non-regression demo
-PYTHONPATH=src .venv/bin/python -m benchmarks.mnist_autoencoder.bench --epochs 20   # lot 7's WCT bench
+PYTHONPATH=src .venv/bin/python -m benchmarks.models.mnist_autoencoder.bench --epochs 20   # lot 7's WCT bench
 # local smoke (seconds); the full 7-arm runs go to benchmarks/slurm/, see its README
-PYTHONPATH=src .venv/bin/python -m benchmarks.vit_small_cifar.bench \
+PYTHONPATH=src .venv/bin/python -m benchmarks.models.vit_small_cifar.bench \
     --arms diag adam --epochs 2 --budget-mode epochs --train-subset 1024
-PYTHONPATH=src .venv/bin/python -m benchmarks.resnet50_cifar.bench --epochs 50      # the real thing
+PYTHONPATH=src .venv/bin/python -m benchmarks.models.resnet50_cifar.bench --epochs 50      # the real thing
 # CIFAR-100 and ImageNet-1K: identical CLI, results under outputs/<dataset>/<model>/. CIFAR-100 is
 # downloaded; ImageNet-1K must be staged by hand first (benchmarks/slurm/imagenet/README.md).
-PYTHONPATH=src .venv/bin/python -m benchmarks.resnet20_cifar100.bench --epochs 50
-PYTHONPATH=src .venv/bin/python -m benchmarks.cnn_gn_imagenet.bench \
+PYTHONPATH=src .venv/bin/python -m benchmarks.models.resnet20_cifar100.bench --epochs 50
+PYTHONPATH=src .venv/bin/python -m benchmarks.models.cnn_gn_imagenet.bench \
     --arms diag adam --epochs 1 --budget-mode epochs --train-subset 2048 --no-allow-download
 # trajectory checkpoints, the input steps 2-5 of plan_exp_draft.md consume; add
 # --checkpoint-optimizer-state (opt-in, OFF by default) to also dump the optimizer's own state —
 # its state_dict plus AdaFisherMulti's EMA'd Fisher factors keyed by module name (~1.8 GB for a
 # full 6-model x 7-arm x 5-checkpoint campaign). Off means the payload is byte-for-byte what it
 # was, which matters while cluster jobs run from $SLURM_SUBMIT_DIR.
-PYTHONPATH=src .venv/bin/python -m benchmarks.cnn_gn_cifar.bench \
+PYTHONPATH=src .venv/bin/python -m benchmarks.models.cnn_gn_cifar.bench \
     --epochs 30 --checkpoints 0,0.01,0.1,0.5,1
 # THE CAMPAIGN PROTOCOL: --lr-schedule budget, so every budgeted arm completes one full cosine
 # instead of being cut off mid-anneal (or, if cheap, having its LR climb back up). Every generated
 # SLURM job passes it; the CLI default is still `nominal` (now clamped). See "Things to watch".
-PYTHONPATH=src .venv/bin/python -m benchmarks.cnn_gn_cifar.bench \
+PYTHONPATH=src .venv/bin/python -m benchmarks.models.cnn_gn_cifar.bench \
     --epochs 30 --budget-mode wct --lr-schedule budget --checkpoints 0,0.01,0.1,0.5,1
 # the lam bracket on the stalling autoencoder bench (sweep_mnist_autoencoder_lam.sh on the cluster)
-for L in 1e-5 1e-3 1e-1; do PYTHONPATH=src .venv/bin/python -m benchmarks.mnist_autoencoder.bench \
+for L in 1e-5 1e-3 1e-1; do PYTHONPATH=src .venv/bin/python -m benchmarks.models.mnist_autoencoder.bench \
     --epochs 20 --budget-mode wct --lr-schedule budget --lam "$L" \
     --output-dir benchmarks/outputs/sweeps/mnist_autoencoder_lam/"$L"; done
 ```
@@ -865,6 +1263,19 @@ What each existing test guarantees:
 | `test_cifar10_bench::test_cutout_masks_one_square_region`, `::test_train_val_split_*` | Cutout masks one contiguous ≤16×16 region identically in every channel; the 45k/5k split is seeded, disjoint and exhaustive | `plan_lot8.md` §0.9 |
 | `test_cifar10_bench::test_summary_and_csv_schema`, `::test_empty_arm_*` | the promised CSV/summary columns; an arm with zero steps does not break the report | `plan_lot8.md` §0.10 |
 | `test_equal_wallclock_bench::test_eigenbasis_modes_pay_more_per_step_than_diag` | `ekfac`/`tekfac` (which project into and out of an eigenbasis) cost strictly more per step than `diag`, at equal step count — asserted; `kfac`/`tkfac` vs. `diag` reported for information only, since that comparison is not reliably ordered at toy scale (`diag`'s own multi-op min-max pipeline is comparably expensive to `kfac`/`tkfac`'s two cached-inverse matmuls) | `plan_lot7.md` §0.4, §5 point 5 |
+| `test_optimizer_robustness::test_two_parameter_groups_step_each_module_once` | with the standard decay/no-decay split, the trajectory is `torch.equal` to the single-group one, all five modes — the fix for the double step (§2.5) | §2.5 |
+| `test_optimizer_robustness::test_layernorm_without_bias_is_refused_when_the_optimizer_is_built` | `LayerNorm(d, bias=False)` raises `NotImplementedError` naming the module, in all five modes, instead of a shape error inside the mode | — |
+| `test_optimizer_robustness::test_frozen_bias_on_a_trained_weight_is_refused_by_name` | a trainable weight with `bias.requires_grad = False` raises a message naming the module, instead of a bare `assert` (`diag`) or a matmul shape error (the other four) | — |
+| `test_optimizer_robustness::test_module_first_reached_after_step_zero`, `::test_late_module_works_when_the_refresh_cadence_misses_its_first_step` | a module behind a conditional branch (stochastic depth) starts its running average on its first observation whatever the step, and gets an inverse/eigenbasis even when its first step is not a multiple of `T_inv`/`T_eig`. It used to raise `KeyError` in all five modes | — |
+| `test_optimizer_robustness::test_two_backwards_over_one_forward_are_refused` | `ekfac`/`tkfac`/`tekfac` raise **one** clear error on the second backward, instead of a bare `KeyError` in two of them and a silent skip in the third. `::test_two_backwards_are_not_detected_by_the_two_cacheless_modes` pins the remaining gap: `diag` and `kfac` hold no per-example cache and still accept it silently | — |
+| `test_optimizer_robustness::test_tied_weight_*` | a weight shared by two modules is owned by the **later** one, both modules still accumulate factors, and the shared weight is preconditioned once per sharing module. Pinned, not endorsed | — |
+| `test_optimizer_robustness::test_precondition_returns_a_new_tensor_not_a_view_of_exp_avg` | the preconditioned direction never aliases the momentum buffer it was built from, all five modes, on a biased net (all four layer types) and a bias-free one — the case where aliasing is actually reachable | — |
+| `test_eig_before_rescale::test_flag_off_is_bit_identical_to_not_passing_it` | the knob is inert by default, on a real trajectory, `ekfac` and `tekfac` | §3 |
+| `test_eig_before_rescale::test_on_/test_off_the_rescaling_is_measured_in_...` | with the knob on, the basis `s*`/`Theta` was measured in is bit-identical to the one `precondition` uses; with it off, it is not. The second is the test that fires if the two orderings are ever swapped | EKFAC Lemma 1, TEKFAC Alg. 1 |
+| `test_eig_before_rescale::test_the_difference_reaches_the_applied_step_only_once_lambda_is_lowered` | from one state, the ordering moves the applied step by `<1e-2` at `Lambda=1e-3` and `>100x` more at `Lambda=1e-8` | `audit_full_repo.md` finding 3 |
+| `test_full_factors_match_diag::test_conv2d_h_diag_scale_quirk_without_bias_is_one_over_S` | the `bias=False` branch of §4.5, exactly `1/S` on three shapes — the branch every ResNet and CCT here actually runs | §4.5 |
+| `test_full_factors_match_diag::test_conv2d_{non_zero_padding_mode,string_padding}_not_supported`, `::test_layernorm_without_bias_not_supported` | three layer configurations that used to be silently wrong (`padding_mode='reflect'`: 48% relative error) or to fail with an error naming neither the layer nor the option | — |
+| `test_full_factors_match_diag::test_norm_input_factor_ignores_the_normalisation_itself`, `::test_norm_input_factor_coupling_entry_is_far_from_the_normalised_value` | §4.6 pinned with its numbers: the input factor is bit-identical in train and eval mode through real hooks while the output factor is not, and the `x_hat` alternative is degenerate (`6.3e-15`) | §4.6 |
 
 **Known testing pitfalls.**
 - `addcdiv_` (the reference's fused update) and the unfused `div` + `add_(alpha=...)` this port uses
@@ -1137,7 +1548,7 @@ scale, and independently at each of the `k_h·k_w` kernel offsets (`plan_lot6.md
   had completed and `available_seeds()` still returned `[0]` until the checkpoints were pulled
   explicitly (the second rsync line under "Cluster sync" above). 80 runs / 399 checkpoints is the
   current, correct state.
-- **A new `benchmarks/<model>/` folder must be added to four registries, not one.** The folder list
+- **A new `benchmarks/models/<model>/` folder must be added to four registries, not one.** The folder list
   is the registry for *discovery*, but four tests exist precisely to fail when a folder appears
   without its contract: `tests/test_benchmark_models.py::EXPECTED`,
   `tests/test_fisher_ref_lot0.py::EXPECTED_LAYER_TYPES`,
@@ -1145,7 +1556,7 @@ scale, and independently at each of the `k_h·k_w` kernel offsets (`plan_lot6.md
   `benchmarks/slurm/generate_jobs.py::WALLTIME` (whose absence makes the generator raise `KeyError`
   *after* overwriting half the directory — `tests/test_dataset_benches.py` checks it up front).
 - **`ViT-S/4` is an adaptation, not a paper variant.** `vit_2010.11929.pdf` Table 1 defines only
-  Base/Large/Huge, all 224px/patch-16. `benchmarks/vit_small_cifar/model.py`'s 32x32 configuration
+  Base/Large/Huge, all 224px/patch-16. `benchmarks/models/vit_small_cifar/model.py`'s 32x32 configuration
   (`patch 4`, `D=192`, `depth 6`, `heads 3`) keeps that table's `MLP = 4D` and `D/heads = 64` and
   cites §3.1's Eq. (1)-(4) for the *structure* only. Never attribute the configuration itself to the
   paper. And the paper's own caveat applies (§1, §3.1 "Inductive bias", §4.2): a from-scratch ViT on

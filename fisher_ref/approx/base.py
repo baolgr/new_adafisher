@@ -1,23 +1,56 @@
-"""The common interface every structured approximation exposes (``plan_exp_draft.md`` §7.1), so
-each metric is written once for all of them and for all three regimes.
+"""The common interface every structured approximation exposes, and four generic containers.
 
-The protocol is the plan's, with one addition: ``inner_dense(R)``, the inner product ``<R, K>``
-against a dense reference. Without it, M1 against a Kronecker structure has to materialise
-``G (x) A`` — 5.05 GB for A1's first layer, to take a scalar product. Every implementation inherits
-a **generic, always-correct** ``inner_dense`` from :class:`BlockOps`, computed by sweeping the
-identity in column blocks through ``matmat``; the structures that can do better override it with a
-closed form, and the conformance tests check that the two agree.
+Every metric is written once against this protocol, so it applies to every structure. The protocol
+is the usual one -- apply, solve, trace, squared Frobenius norm, log-determinant, diagonal, dense
+form -- with one addition: ``inner_dense(R)``, the inner product against a dense reference. Without
+it, comparing a Kronecker structure to a reference would have to materialise ``G (x) A``, which is
+gigabytes for a single wide layer, just to take a scalar product. Every implementation inherits a
+generic, always-correct ``inner_dense`` from :class:`BlockOps`, computed by sweeping the identity
+through in column blocks; the structures that can do better override it with a closed form, and the
+conformance tests check that the two agree.
 
-The one primitive worth naming is the **rearrangement** ``R(B)`` of :func:`rearrange`. For a block
-``B`` of size ``(d_out*d_in)^2`` in ``rvec`` order it satisfies
+The rearrangement
+-----------------
 
-    <B, G (x) A>      = vec(G)^T R(B) vec(A)
-    ||B - G (x) A||_F = ||R(B) - vec(G) vec(A)^T||_F
+The one primitive worth naming is ``R(B)`` of :func:`rearrange`. For a block ``B`` of size
+``(d_out*d_in)^2`` in row-major (``rvec``) order it satisfies
 
-so the best rank-1 Kronecker fit of ``B`` is the top singular pair of ``R(B)`` (Van Loan-Pitsianis;
-Koroko et al. arXiv:2201.10285 used exactly this on auto-encoders). That makes it the shared engine
-of **M7** — whose ``sigma_2/sigma_1`` *is* the independence bias — and of **M1** against any
-Kronecker structure. One primitive, two metrics (``plan_exp_lot2.md`` §0.4).
+    <B, G (x) A>       = vec(G)^T R(B) vec(A)
+    ||B - G (x) A||_F  = ||R(B) - vec(G) vec(A)^T||_F
+
+so the best rank-one Kronecker fit of ``B`` is the top singular pair of ``R(B)`` (Van Loan and
+Pitsianis; used on auto-encoder curvature by Koroko et al., arXiv:2201.10285). That makes it the
+shared engine of two things at once: the Kronecker-bias metric, whose ``sigma_2 / sigma_1`` *is*
+the departure from any Kronecker product, and the Frobenius comparison against any Kronecker
+structure.
+
+Public API
+----------
+
+:func:`rearrange`  ``R(B)``, shape ``(d_out^2, d_in^2)``.
+
+:class:`CurvatureBlock`  the protocol, for type checking.
+
+:class:`BlockOps`  everything derivable from ``matmat``; implementations override what they can do
+in closed form. ``solve`` and ``logdet`` have no generic fallback on purpose -- a column sweep
+would cost ``P`` solves, and every structure here has a closed form.
+
+:class:`Dense`  the reference itself as a block, so a metric can take ``R`` as ``K`` (the
+self-consistency check).
+
+:class:`Diag`  a diagonal structure: the exact diagonal control, AdaFisher's raw estimator, Adam's
+second moment.
+
+:class:`BlockDiag`  a block diagonal over contiguous parameter ranges. Its ``logdet`` counts the
+coordinates no block covers explicitly, since each would contribute ``log(lam)``.
+
+:func:`block_diagonal_of`  the exact block diagonal of a dense reference.
+
+:func:`optimal_scale`  ``c* = <R, K> / ||K||_F^2``, the scalar that minimises ``||R - cK||_F``.
+Required for any structure that makes no claim on scale, and for any comparison between references
+built on different probe sets, whose norms differ.
+
+This module imports nothing from the rest of ``fisher_ref``.
 """
 
 from __future__ import annotations

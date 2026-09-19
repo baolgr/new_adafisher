@@ -731,6 +731,16 @@ def test_noise_floor_interval_and_scaling() -> None:
     assert abs(floor.null_two_independent - floor.median / (2.0 ** 0.5)) < 1e-12
     assert floor.contains(floor.median)
 
+    # What low/high MEAN at a partition count this small: the observed range of the splits, which
+    # is what the module header tells the reader to read them as. `contains(median)` above cannot
+    # fail for any interval that brackets the median, so it does not say this.
+    ordered = sorted(floor.splits)
+    assert floor.low == ordered[0] == min(floor.splits)
+    assert floor.high == ordered[-1] == max(floor.splits)
+    # The documented tie-break at an even count: the UPPER of the two central values, not their
+    # average. Asserted with a strict inequality, so averaging the two would fail here.
+    assert floor.median == ordered[3] > ordered[2]
+
 
 def test_convergence_curve_decreases_with_more_probes() -> None:
     seed_all(27)
@@ -740,9 +750,24 @@ def test_convergence_curve_decreases_with_more_probes() -> None:
         return build_dense_reference(model, inputs[indices], targets[indices], source="type2",
                                      batch_size=len(indices)).matrix
 
-    curve = metrics.convergence_curve(build, int(inputs.shape[0]), fractions=(0.25, 0.5, 1.0))
+    n = int(inputs.shape[0])
+    curve = metrics.convergence_curve(build, n, fractions=(0.25, 0.5, 1.0))
     assert curve[1.0] < 1e-12                       # the full set against itself
     assert curve[0.25] > curve[0.5] > curve[1.0]
+
+    # Each value against an independent build, so the curve is pinned to a number and not only to
+    # an ordering: the subset is the FIRST `max(int(f*N), 2)` probes, compared with the full set.
+    # `curve[1.0] < 1e-12` alone is a matrix against itself and would survive any subset rule.
+    full = build(list(range(n)))
+    for fraction in (0.25, 0.5, 1.0):
+        expected = metrics.dense_gap(build(list(range(max(int(fraction * n), 2)))),
+                                     full)["rel_to_geom"]
+        assert curve[fraction] == expected, fraction
+    assert curve[1.0] == 0.0, "the full set against itself is exactly zero, not merely small"
+
+    # The floor of two probes: int(0.01 * 20) is 0, and a zero-probe reference has no norm.
+    tiny = metrics.convergence_curve(build, n, fractions=(0.01,))
+    assert tiny[0.01] == metrics.dense_gap(build([0, 1]), full)["rel_to_geom"] > 0.0
 
 
 def test_probe_gradient_matches_autograd() -> None:
@@ -826,6 +851,20 @@ def test_p1_runner_writes_the_declared_schema(tmp_path: Path) -> None:
     assert meta["protocol"] == "P1" and meta["precision"]["cudnn_allow_tf32"] is not True
     assert "noise_floor" in meta
 
+    # The reference block of meta.json, which the schema assertions above do not reach. `n_rows` is
+    # the rank budget every "this reference is not rank-limited by its probe count" argument rests
+    # on; it was recorded as 0 for every reference this package ever wrote, because `n_columns` was
+    # hardcoded to 0 and `n_rows` is its product with the probe count.
+    references = meta["references"]
+    assert set(references) == {"0.5/type2", "0.5/empirical"}
+    for key, block in references.items():
+        # 10 columns for the type-2 softmax root of MNIST's 10 classes, 1 for the single
+        # empirical gradient (fisher_ref.sources).
+        expected_columns = 10 if key.endswith("type2") else 1
+        assert block["n_probes"] == 32, key
+        assert block["n_columns"] == expected_columns, key
+        assert block["n_rows"] == 32 * expected_columns, key
+
 
 # ----------------------------------------------------------------------------------------------
 # Device plumbing — the class of bug that killed cluster job 21125955
@@ -879,3 +918,228 @@ def test_ekfac_to_moves_its_three_tensors() -> None:
     assert torch.equal(moved.QA, block.QA) and torch.equal(moved.QG, block.QG)
     assert torch.equal(moved.s, block.s)
     assert moved.P == block.P
+
+
+# ----------------------------------------------------------------------------------------------
+# What the coupling number IS — the gap that let its prose drift from its formula
+# ----------------------------------------------------------------------------------------------
+
+
+def _uncentred_alignment(U: Tensor, first: slice, second: slice) -> float:
+    """``<K_1, K_2>_F / (||K_1||_F ||K_2||_F)`` from the per-layer tangent kernels themselves.
+
+    Independent of :func:`coupling_matrix`, which never sees ``U``: this builds each layer's
+    ``m x m`` kernel ``K_l = U_l U_l^T / m`` explicitly and takes the alignment between the two
+    kernels, where the function under test works from the ``P x P`` matrix ``R = U^T U / m``.
+    """
+    m = int(U.shape[0])
+    K1, K2 = U[:, first] @ U[:, first].T / m, U[:, second] @ U[:, second].T / m
+    return float((K1 * K2).sum() / (torch.linalg.matrix_norm(K1) * torch.linalg.matrix_norm(K2)))
+
+
+def test_m8_coupling_is_the_square_root_of_the_uncentred_kernel_alignment() -> None:
+    """``coupling_matrix`` returns ``sqrt`` of the uncentred kernel alignment, not the alignment.
+
+    Both readings are legitimate normalised couplings in ``[0, 1]``, and Q4.5's verdict compares
+    the measured value against ``0.5`` on this same scale, so the verdict does not depend on which
+    one is returned. What does depend on it is every sentence that calls the number an alignment or
+    a CKA: a reported ``0.5`` is an alignment of ``0.25``.
+
+    Nothing constrained the value before, which is how the prose and the formula drifted apart. So
+    this pins the identity against a kernel-side computation that shares no line with it, and then
+    checks the two readings really differ off the diagonal -- otherwise the identity would hold
+    for both and say nothing.
+    """
+    seed_all(70)
+    m, first, second = 40, slice(0, 5), slice(5, 12)
+    U = torch.randn(m, 12, dtype=DTYPE)
+    R = U.T @ U / m
+    ranges = [("a", first), ("b", second)]
+    names, C = metrics.coupling_matrix(R, ranges)
+    assert names == ["a", "b"]
+
+    alignment = _uncentred_alignment(U, first, second)
+    assert 0.0 < alignment < 1.0
+    for i, j in ((0, 1), (1, 0)):
+        assert float(C[i, j]) == pytest.approx(alignment ** 0.5, rel=0, abs=1e-12)
+    # Non-vacuous: the square root is a different number here, and always the larger one in (0, 1).
+    assert float(C[0, 1]) - alignment > 0.05, (float(C[0, 1]), alignment)
+
+    # The diagonal is where the two readings agree, which is why the existing diagonal test could
+    # not see the difference.
+    for i, (_, columns) in enumerate(ranges):
+        assert float(C[i, i]) == pytest.approx(_uncentred_alignment(U, columns, columns) ** 0.5,
+                                               rel=0, abs=1e-12)
+
+
+def test_m8_coupling_identity_holds_on_a_real_reference() -> None:
+    """The same identity on a reference built by the package, with ``U`` stacked independently.
+
+    The synthetic check above pins the formula; this one pins that the object the runner hands it
+    really is ``U^T U / N`` in the layout the per-layer ranges index, so the kernel reading applies
+    to the numbers in the result files and not only to a random matrix.
+    """
+    seed_all(71)
+    model, inputs, targets = _unshared_net()
+    modules = capture.capturable_modules(model)
+    n = int(inputs.shape[0])
+    reference = build_dense_reference(model, inputs, targets, source="type2", batch_size=n)
+    layout = reference.layout
+
+    rows = []
+    for step in capture.iter_probe_columns(model, inputs, targets, source="type2",
+                                           modules=modules, batch_size=n, dtype=DTYPE):
+        block = torch.zeros(step.n_examples, layout.P, dtype=DTYPE)
+        for layer in step.capturer:
+            for p_name, gradient in capture.per_sample_gradients(layer).items():
+                full = f"{layer.name}.{p_name}" if layer.name else p_name
+                block[:, layout.slices[full]] = gradient.reshape(step.n_examples, -1)
+        rows.append(block)
+    U = torch.cat(rows)
+    assert torch.allclose(U.T @ U / n, reference.matrix, atol=1e-12), "U is not the one R came from"
+
+    ranges = [(name, layout.block_slice(name)) for name in ("0", "2")]
+    _, C = metrics.coupling_matrix(reference.matrix, ranges)
+    alignment = _uncentred_alignment(U, ranges[0][1], ranges[1][1])
+    assert float(C[0, 1]) == pytest.approx(alignment ** 0.5, rel=0, abs=1e-12)
+    assert float(C[0, 1]) - alignment > 0.05, (float(C[0, 1]), alignment)
+
+
+# ----------------------------------------------------------------------------------------------
+# The noise floor's interval: what its two indices are, against a textbook percentile
+# ----------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("partitions", [10, 20, 40, 41, 80, 200])
+def test_noise_floor_interval_is_never_narrower_than_nearest_rank(partitions: int) -> None:
+    """``low``/``high`` against the nearest-rank 2.5th and 97.5th percentiles of the same splits.
+
+    The nearest-rank percentile of ``n`` sorted values sits at index ``ceil(p n) - 1``. At the
+    default 20 partitions that is index 0 and index ``n - 1``, so the interval reported *is* the
+    observed range -- a sample-size limit, not an arithmetic slip. Away from the default the two
+    can differ by one index, and the claim pinned here is the direction: the reported interval is
+    **never narrower** than nearest rank, so a difference that clears this floor clears that one
+    too. If it ever becomes narrower, a gap could be called significant that a textbook percentile
+    would not.
+
+    ``build`` is a stand-in that returns a cheap diagonal matrix whose entries depend on the
+    probes chosen, so the splits vary across partitions without any model being built. This is
+    about the index arithmetic, which cannot see where the numbers came from.
+    """
+    import math  # noqa: PLC0415
+
+    def build(indices):
+        value = 1.0 + (sum(int(i) for i in indices) % 97) / 97.0
+        return torch.tensor([[value, 0.0], [0.0, 2.0 * value]], dtype=DTYPE)
+
+    floor = metrics.noise_floor(build, 64, partitions=partitions, seed=3)
+    ordered = sorted(floor.splits)
+    assert len(ordered) == partitions
+    near_low = ordered[min(max(math.ceil(0.025 * partitions) - 1, 0), partitions - 1)]
+    near_high = ordered[min(max(math.ceil(0.975 * partitions) - 1, 0), partitions - 1)]
+    assert floor.low <= near_low, (floor.low, near_low)
+    assert floor.high >= near_high, (floor.high, near_high)
+    if partitions == 20:
+        # The default, and the only partition count any result file in this package was produced
+        # with: the two agree exactly, and both are the observed range.
+        assert floor.low == near_low == ordered[0]
+        assert floor.high == near_high == ordered[-1]
+
+
+# ----------------------------------------------------------------------------------------------
+# meta.json across several checkpoints
+# ----------------------------------------------------------------------------------------------
+
+
+def test_p1_runner_meta_records_every_fraction(tmp_path: Path) -> None:
+    """``meta["blocks"]`` gets one entry per checkpoint, not only the first one's.
+
+    ``setdefault("blocks", {str(fraction): ...})`` builds the inner dict on every call and returns
+    the one already stored, so from the second fraction on the freshly built layer inventory was
+    computed and dropped. A five-checkpoint run recorded one. Its sibling ``meta["references"]``
+    uses the other spelling and was always complete, which is what made the hole hard to see.
+    """
+    from benchmarks.common.checkpoints import CheckpointWriter  # noqa: PLC0415
+    from fisher_ref.runners import p1_structural  # noqa: PLC0415
+
+    bench = discover_benchmarks()["mlp_ln_mnist"]
+    seed_all(72)
+    model = bench.build_model()
+    arm_dir = tmp_path / "outputs" / "mnist" / "mlp_ln_mnist" / "diag"
+    writer = CheckpointWriter(output_dir=arm_dir, fractions=(0.5, 1.0), total_steps=100, seed=0)
+    writer.save(0.5, 50, 1, model, scheduled=True)
+    writer.save(1.0, 100, 2, model, scheduled=True)
+    (tmp_path / "outputs" / "mnist" / "mlp_ln_mnist" / "manifest.json").write_text(
+        json.dumps({"config": {"seed": 0}, "arms": {"diag": {}}}))
+
+    out = tmp_path / "results"
+    p1_structural.main([
+        "--model", "mlp_ln_mnist", "--arm", "diag", "--fractions", "0.5,1", "--probes", "32",
+        "--batch", "32", "--modules", "head", "--noise-partitions", "0", "--alphas", "1e-3",
+        "--sources", "type2", "--outputs-root", str(tmp_path / "outputs"), "--out-dir", str(out),
+        "--data-root", str(REPO_ROOT / "benchmarks" / "data"), "--device", "cpu",
+    ])
+
+    base = out / "mlp_ln_mnist" / "diag" / "seed0"
+    meta = json.loads((base / "1.0" / "meta.json").read_text())
+    assert set(meta["blocks"]) == {"0.5", "1.0"}
+    assert set(meta["references"]) == {"0.5/type2", "1.0/type2"}
+    assert set(meta["checkpoints"]) == {"0.5", "1.0"}
+    for fraction in ("0.5", "1.0"):
+        assert set(meta["blocks"][fraction]) == {"head"}
+        assert meta["references"][f"{fraction}/type2"]["n_rows"] == 32 * 10
+
+
+# ----------------------------------------------------------------------------------------------
+# The measurement drivers under fisher_ref/experiments/
+# ----------------------------------------------------------------------------------------------
+
+
+def test_read_epochs_csv_keeps_the_two_curves_aligned(tmp_path: Path) -> None:
+    """A row is taken whole or dropped whole, so the two per-epoch curves stay index-aligned.
+
+    Reading each field under its own guard let a row whose accuracy parsed but whose loss did not
+    append to one list only. From that row on the two curves are one epoch out of step, and every
+    later comparison between them reads the wrong pair -- with no error anywhere.
+    """
+    from fisher_ref.experiments.e0_placebo_val_wobble import read_epochs_csv  # noqa: PLC0415
+
+    path = tmp_path / "epochs.csv"
+    path.write_text(
+        "arm,epoch,val_loss,val_acc\n"
+        "diag,0,1.0,0.10\n"
+        "diag,1,,0.20\n"          # loss missing, accuracy fine: the row that used to desync them
+        "diag,2,0.8,\n"           # the mirror image
+        "diag,3,0.7,0.40\n"
+        "adam,0,nan,0.50\n"       # nan parses: an MSE bench writes val_acc = nan every epoch
+    )
+    out = read_epochs_csv(path)
+    assert set(out) == {"diag", "adam"}
+    assert len(out["diag"]["val_acc"]) == len(out["diag"]["val_loss"]) == 2
+    assert out["diag"]["val_loss"] == [1.0, 0.7]
+    assert out["diag"]["val_acc"] == [0.10, 0.40]
+    import math  # noqa: PLC0415
+    assert len(out["adam"]["val_loss"]) == 1 and math.isnan(out["adam"]["val_loss"][0])
+    assert out["adam"]["val_acc"] == [0.50]
+
+
+@pytest.mark.parametrize("name", ["early_curvature", "curvature_max_per_layer"])
+def test_experiment_drivers_import_under_both_invocation_forms(name: str) -> None:
+    """Two drivers reuse ``lambda_vs_curvature``'s machinery; both ways of running them must work.
+
+    A bare ``from lambda_vs_curvature import ...`` resolves only when the file is run by path,
+    because that is the one case where its own directory is on the import path. Under
+    ``python -m fisher_ref.experiments.<name>`` it is a ``ModuleNotFoundError`` before a single
+    line of the script runs. The package path resolves in both, provided the repository root is on
+    the import path -- which each of the two files arranges for itself.
+    """
+    import importlib  # noqa: PLC0415
+
+    module = importlib.import_module(f"fisher_ref.experiments.{name}")
+    assert module.spectra.__module__ == "fisher_ref.experiments.lambda_vs_curvature"
+    source = (REPO_ROOT / "fisher_ref" / "experiments" / f"{name}.py").read_text()
+    assert "from lambda_vs_curvature import" not in source, (
+        "a bare sibling import is back; it breaks `python -m` silently at import time")
+    # The path form needs the repository root on sys.path, and the file has to put it there
+    # itself: nothing else does when it is run as `python fisher_ref/experiments/<name>.py`.
+    assert "sys.path" in source and "parents[2]" in source

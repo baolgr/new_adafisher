@@ -1,48 +1,56 @@
-"""``tekfac`` mode: Gao et al.'s Trace-restricted Eigenvalue-corrected Kronecker Factorization
-(TEKFAC). Linear (lot 3, ``docs/reports/plan_lot3.md``) and Conv2d with ``groups=1``,
-``dilation=(1,1)`` (lot 4, ``docs/reports/plan_lot4.md``).
+"""``tekfac`` mode: Gao et al.'s trace-restricted, eigenvalue-corrected Kronecker factorization.
 
-TEKFAC combines TKFAC's trace-restricted factors with EKFAC's eigenbasis correction
-(``tekfac_2011.13609.pdf`` §3.1). It reuses **the same** ``(delta, Phi_raw, Psi_raw)`` triple
-``tkfac.py`` maintains (Eq. 2.9-2.10, identical to TKFAC's own Eq. 4.9) -- see
-``docs/reports/plan_lot3.md`` §0.4 -- rather than the undivided K-FAC factors ``A``, ``B``:
+TEKFAC is TKFAC's pair of factors with EKFAC's eigenbasis correction on top
+(``tekfac_2011.13609.pdf`` section 3.1). It eigendecomposes the *same* trace-restricted
+``(delta, Phi, Psi)`` triple ``tkfac`` maintains, not the undivided K-FAC factors::
 
-    F_l ~= delta_l * Phi_l (x) Psi_l = delta_l * (Q_Phi (x) Q_Psi)(Lambda_Phi (x) Lambda_Psi)(Q_Phi (x) Q_Psi)^T   (Eq. 3.1)
+    F_l ~= delta * Phi (x) Psi
+         = (Q_Phi (x) Q_Psi) (delta * Lambda_Phi (x) Lambda_Psi) (Q_Phi (x) Q_Psi)^T   (eq. 3.1)
 
-Exactly EKFAC's own Lemma 1 argument, applied to the orthogonal basis ``Q_Phi (x) Q_Psi`` instead
-of ``Q_A (x) Q_B``, replaces the still-inexact rescaling ``delta_l*(Lambda_Phi (x) Lambda_Psi)`` by
-the directly-estimated optimal diagonal (Eq. 3.2-3.3; note the absence of a separate ``delta``
-multiplying ``Theta`` -- it is already the right scale, estimated directly from the raw gradient):
+and then replaces that still-inexact rescaling by the directly estimated optimal diagonal, exactly
+EKFAC's Lemma 1 argument applied to a different orthogonal basis (eq. 3.2-3.3)::
 
-    Theta_ii = E[((Q_Phi (x) Q_Psi)^T grad_omega h)_i^2],   F_l ~= (Q_Phi (x) Q_Psi) Theta_l (Q_Phi (x) Q_Psi)^T
+    Theta_ii = E[((Q_Phi (x) Q_Psi)^T grad)_i^2]
+    F_l      ~= (Q_Phi (x) Q_Psi) Theta (Q_Phi (x) Q_Psi)^T
 
-Theorem 3.1: ``||F - F~_TEKFAC||_F <= ||F - F~_TKFAC||_F``, by the same Lemma-1 optimality argument
-EKFAC's Theorem 2/3 uses. ``Theta``'s estimator (below) is structurally identical to ``ekfac.py``'s
-``s*`` estimator with ``(Q_A,Q_B) -> (Q_Phi,Q_Psi)`` -- the degenerate-case test
-(``tests/test_ekfac_tekfac_equiv.py``) checks exactly this correspondence.
+There is no ``delta`` multiplying ``Theta``: ``Theta`` is estimated from the raw gradient and is
+already on the right scale. Theorem 3.1 then gives ``||F - TEKFAC||_F <= ||F - TKFAC||_F``.
 
-Damping (Eq. 3.4-3.5): a plain additive ``lambda`` to ``Theta`` for dense layers. The paper's own
-conv-only trace-adaptive ``lambda``/CNN-wide ``beta`` rescaling of Eq. 3.5 is not implemented — this
-mode's existing, dimension-agnostic additive ``lambda`` is reused unchanged for Conv2d (lot 4,
-``docs/reports/plan_lot4.md`` §0.6).
+The eigenvectors of ``Phi`` are the eigenvectors of ``Phi * delta``, since dividing a symmetric
+matrix by a positive scalar does not move them, so the decomposition can skip the division and run
+straight on the stored numerators.
 
-Decoupled cadences (Algorithm 1, plan_lot3.md §0.4): ``T_eig`` gates the eigenbasis refresh (as in
-``ekfac``); ``T_re`` independently gates ``Theta``'s own EMA update. No separate ``T_fim`` --
-``(delta, Phi_raw, Psi_raw)`` update on every hook fire, like ``kfac``/``ekfac``'s ``A``/``B``.
-``beta_factors``/``beta_theta`` are this project's own ``gammas``-shaped EMA rate for
-``(delta,Phi_raw,Psi_raw)`` and for ``Theta`` respectively (TEKFAC's own beta_1/beta_2 of Eq.
-3.6-3.8, renamed to avoid the notation collision with Adam/AdaFisher's beta_1 -- CLAUDE.md).
+**Damping** (eq. 3.4) is a plain additive ``lambda`` on ``Theta``, as in ``ekfac``. The paper's
+convolution-only trace-adaptive ``lambda`` and its network-wide rescaling of dense layers (eq. 3.5)
+are deliberately not implemented.
 
-**Conv2d (lot 4, plan_lot4.md §0.5).** Same two swaps as ``tkfac.py``:
-``augment_input``/``flatten_output_grad`` replace lot 3's ``Linear``-only
-``augment_linear_input``/inline reshape in ``update_input_factor``/``update_output_factor``; nothing
-else changes.
+**Cadence.** Algorithm 1 of the paper gives the eigendecomposition and the rescaling separate
+intervals, and so does this class: ``T_eig`` gates the eigenbasis refresh and ``T_re`` gates
+``Theta``'s own running-average update. There is no separate interval for the ``(delta, Phi, Psi)``
+triple; it is updated on every hook fire, like ``A`` and ``B`` in ``kfac`` and ``ekfac``.
 
-**SUA (lot 6, docs/reports/plan_lot6.md).** ``conv_sua=True`` selects the channel-only SUA input
-factor (``kfac_conv_1602.01407.pdf`` p. 14) for ``Conv2d`` modules: ``update_input_factor`` caches
-``augment_input(h, module, sua=self.conv_sua)``. ``precondition`` applies the small operator
-independently at each of the ``k_h*k_w`` kernel offsets instead of one flat matmul (plan_lot6.md
-§0.4).
+**Which basis ``Theta`` is measured in (``eig_before_rescale``, off by default).** Algorithm 1 of
+the paper orders one iteration eigenbasis first, rescaling second. By default this class does the
+opposite, because the hooks fire before ``step()``: ``Theta`` is folded in against the *current*
+basis, ``refresh`` then replaces that basis, and ``precondition`` divides using the new basis and
+the old ``Theta``. Eq. (3.2)'s optimality argument -- EKFAC's Lemma 1 in TKFAC's basis -- holds for
+the basis ``Theta`` was measured in and for no other. ``eig_before_rescale=True`` rebuilds the
+basis inside the backward hook, before the projection, so the two agree. It is off by default
+because turning it on changes every trajectory; see
+:mod:`adafisher_modes.approximations.ekfac` for the same knob and the measured size of the
+difference.
+
+**Two smoothing rates, and a name clash to keep straight.** ``beta_factors`` smooths
+``(delta, Phi, Psi)`` and ``beta_theta`` smooths ``Theta``; both default to the shared ``gammas``.
+These are the paper's own ``beta_1`` and ``beta_2`` of eq. 3.6-3.8, renamed here because
+Adam and AdaFisher already use ``beta_1`` for the momentum of the first moment, which is an
+unrelated quantity.
+
+**SUA** (``conv_sua=True``, ``Conv2d`` only) makes the input factor channel-only instead of
+patch-based (``kfac_conv_1602.01407.pdf`` p. 14), and ``precondition`` then applies the small
+operator independently at each kernel offset.
+
+``f_tilde`` builds the dense operator and exists only for tests; ``precondition`` never forms it.
 """
 
 from __future__ import annotations
@@ -52,7 +60,7 @@ from typing import Dict, Optional, Sequence, Tuple, Union
 from torch import Tensor, diag, kron
 from torch.nn import Conv2d, Module
 
-from adafisher_modes.ema import update_running_avg
+from adafisher_modes.ema import seed_or_accumulate, update_running_avg
 from adafisher_modes.factors import augment_input, flatten_output_grad
 
 from ._eigh_utils import eigenbasis
@@ -63,7 +71,7 @@ from ._kron_utils import (
     split_direction,
 )
 from ._tkfac_utils import bootstrap_raw_factors, instantaneous_raw_factors
-from .base import FisherApproximation
+from .base import FisherApproximation, pop_cached_input
 
 
 class TEKFACApproximation(FisherApproximation):
@@ -76,6 +84,8 @@ class TEKFACApproximation(FisherApproximation):
         T_eig: int = 100,
         T_re: int = 1,
         conv_sua: bool = False,
+        ema_seed_first: bool = False,
+        eig_before_rescale: bool = False,
     ) -> None:
         self.Lambda = Lambda
         self.beta_factors = tuple(beta_factors) if beta_factors is not None else tuple(gammas)
@@ -83,6 +93,10 @@ class TEKFACApproximation(FisherApproximation):
         self.T_eig = T_eig
         self.T_re = T_re
         self.conv_sua = conv_sua
+        self.ema_seed_first = ema_seed_first
+        self.eig_before_rescale = eig_before_rescale
+        self._theta_observed: set = set()
+        self._eig_step: Dict[Module, int] = {}
         self._delta: Dict[Module, Tensor] = {}
         self._Phi_raw: Dict[Module, Tensor] = {}
         self._Psi_raw: Dict[Module, Tensor] = {}
@@ -95,45 +109,81 @@ class TEKFACApproximation(FisherApproximation):
         self._cached_h_bar[module] = augment_input(h, module, sua=self.conv_sua)
 
     def update_output_factor(self, module: Module, s: Tensor, step: int) -> None:
-        h_bar = self._cached_h_bar.pop(module)
+        h_bar = pop_cached_input(self._cached_h_bar, module)
         s_flat = flatten_output_grad(s, module)
         delta_i, phi_raw_i, psi_raw_i = instantaneous_raw_factors(h_bar, s_flat)
-        if step == 0:
-            self._delta[module], self._Phi_raw[module], self._Psi_raw[module] = (
-                bootstrap_raw_factors(h_bar.size(1), s_flat.size(1), h_bar.dtype, h_bar.device)
-            )
-        update_running_avg(delta_i, self._delta[module], self.beta_factors)
-        update_running_avg(phi_raw_i, self._Phi_raw[module], self.beta_factors)
-        update_running_avg(psi_raw_i, self._Psi_raw[module], self.beta_factors)
+        # Same start-up condition as seed_or_accumulate's: step 0, or the first time this module is
+        # seen at all, which can be any step if it sits behind a conditional branch.
+        boot = (
+            bootstrap_raw_factors(h_bar.size(1), s_flat.size(1), h_bar.dtype, h_bar.device)
+            if (step == 0 or module not in self._delta) and not self.ema_seed_first
+            else (None, None, None)
+        )
+        for new, store, identity in (
+            (delta_i, self._delta, boot[0]),
+            (phi_raw_i, self._Phi_raw, boot[1]),
+            (psi_raw_i, self._Psi_raw, boot[2]),
+        ):
+            seed_or_accumulate(new, store, module, lambda t=identity: t,
+                               self.beta_factors, step, self.ema_seed_first)
 
+        if self.eig_before_rescale and step % self.T_eig == 0:
+            # Rebuild the eigenbasis from Phi_raw and Psi_raw as they stand for *this* step, before
+            # the gradient is projected into it, so that Theta is measured in the basis
+            # precondition() will then use -- the order Algorithm 1 of the paper gives. refresh()
+            # sees _eig_step and does not redo it. Off by default; see the class docstring.
+            self._rebuild_eigenbasis(module)
+            self._eig_step[module] = step
         if module in self._Q_Phi and step % self.T_re == 0:
             h_kfe = h_bar @ self._Q_Phi[module]
             s_kfe = s_flat @ self._Q_Psi[module]
-            # Intra-batch estimate of Theta (Eq. 3.2), same construction as ekfac's s* estimator
-            # (plan_lot2.md §0.3) with (Q_A,Q_B) -> (Q_Phi,Q_Psi).
+            # Intra-batch estimate of Theta (eq. 3.2), the same construction as ekfac's s*
+            # estimator with (Q_A, Q_B) replaced by (Q_Phi, Q_Psi).
             theta_i = (s_kfe.t() ** 2) @ (h_kfe**2) / h_bar.size(0)
-            update_running_avg(theta_i, self._Theta[module], self.beta_theta)
+            if self.ema_seed_first and module not in self._theta_observed:
+                # Same one-step handover as ekfac's s*: refresh() must leave a value behind for
+                # precondition() to read on the step the eigenbasis is created, and the first
+                # projected gradient then replaces it outright instead of averaging into it.
+                self._Theta[module] = theta_i.detach().clone()
+                self._theta_observed.add(module)
+            else:
+                update_running_avg(theta_i, self._Theta[module], self.beta_theta)
 
-    def refresh(self, module: Module, step: int) -> None:
-        if step % self.T_eig != 0:
-            return
-        # Eigenvectors of Phi_raw/Psi_raw == eigenvectors of Phi_raw/delta, Psi_raw/delta
-        # (plan_lot3.md §0.4): dividing a symmetric matrix by a positive scalar leaves its
-        # eigenvectors unchanged, so eigh can skip the division.
+    def _rebuild_eigenbasis(self, module: Module) -> None:
+        """Eigenvectors of the current ``Phi_raw`` and ``Psi_raw``, and, the first time round, a
+        seed for ``Theta``. Split out of ``refresh`` because ``eig_before_rescale`` calls it from
+        the backward hook instead.
+        """
+        # Dividing a symmetric matrix by a positive scalar leaves its eigenvectors unchanged, so
+        # the eigenvectors of Phi_raw are those of Phi = Phi_raw/delta and the decomposition can run
+        # straight on the stored numerators.
         Q_Phi = eigenbasis(self._Phi_raw[module])
         Q_Psi = eigenbasis(self._Psi_raw[module])
         if module not in self._Q_Phi:
-            # Bootstrap, the direct generalisation of ekfac's `s*` bootstrap (plan_lot2.md §0.3):
-            # no Theta estimate exists before an eigenbasis does.
+            # No Theta estimate can exist before an eigenbasis does, so seed it with ones, exactly
+            # as ekfac seeds s*. Under ema_seed_first this value survives exactly one step; see
+            # update_output_factor.
             self._Theta[module] = Q_Psi.new_ones(Q_Psi.size(0), Q_Phi.size(0))
         self._Q_Phi[module] = Q_Phi
         self._Q_Psi[module] = Q_Psi
 
+    def refresh(self, module: Module, step: int) -> None:
+        if self._eig_step.get(module) == step:
+            return  # already rebuilt in this step's backward hook (eig_before_rescale)
+        # "or no eigenbasis yet" covers a module first reached after step 0, whose first step is
+        # not necessarily a multiple of T_eig; precondition() would otherwise read a basis that was
+        # never built. It cannot fire on a module present from step 0, since step 0 is a multiple
+        # of every T_eig, so no existing trajectory changes.
+        if step % self.T_eig != 0 and module in self._Q_Phi:
+            return
+        self._rebuild_eigenbasis(module)
+
     def f_tilde(self, module: Module) -> Tensor:
-        """Dense ``(d_out*d_in_aug)^2`` reconstruction of ``F~_TEKFAC = kron(Q_Psi, Q_Phi) @
-        diag(Theta+Lambda) @ kron(Q_Psi, Q_Phi)^T`` (B outer, A inner -- plan_lot2.md §0.4), from
-        the *current* eigenbasis/Theta. ``precondition`` never forms this matrix; it exists only
-        for the Frobenius-dominance test (plan_lot3.md §0.6).
+        """Dense ``(d_out * d_in_aug)^2`` reconstruction of
+        ``F~ = kron(Q_Psi, Q_Phi) diag(Theta + lambda) kron(Q_Psi, Q_Phi)^T``: output factor outer,
+        input factor inner, matching ``Theta``'s own row-major flattening. Built from the current
+        eigenbasis and ``Theta``. For tests and debugging only -- ``precondition`` never forms this
+        matrix.
         """
         Q_Phi, Q_Psi = self._Q_Phi[module], self._Q_Psi[module]
         scale = (self._Theta[module] + self.Lambda).flatten()

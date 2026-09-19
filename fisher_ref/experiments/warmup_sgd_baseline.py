@@ -1,43 +1,52 @@
-"""Is AdaFisherMulti, at its default operating point, indistinguishable from plain momentum-SGD
-with a matching warmup step size? (docs handoff, "2. Le test SGD avec momentum".)
+"""Is AdaFisherMulti, at its default operating point, indistinguishable from plain momentum SGD?
 
-``docs/reports/validation_noise_investigation.md`` and ``lambda_vs_curvature.py`` measured that the
-*applied* divisor (curvature + damping) sits within a few percent of ``Lambda`` almost everywhere,
-for every Kronecker mode, once each factor's EMA has warmed up (``0.08^k`` residual from the
-identity seed, ``k`` = number of ``TCov``-cadence updates). That is a claim about one scalar's
-*magnitude*; this script tests its behavioural consequence directly: replace ``kfac``'s per-module
-Kronecker-factored divisor with a single global scalar that follows the same warmup shape, and see
-whether training looks the same.
+Earlier measurements established that the *applied* divisor (curvature plus damping) sits within a
+few percent of the damping constant almost everywhere, for every Kronecker mode, once each factor's
+running average has warmed up. That is a claim about one scalar's *magnitude*; this script tests its
+behavioural consequence directly. It replaces ``kfac``'s per-module Kronecker-factored divisor with
+a single global scalar that follows the same start-up shape, and asks whether training looks the
+same.
 
-WarmupMomentumSGD:  m <- beta*m + (1-beta)*g  (+ coupled weight decay, AdaFisherMulti's own
-convention -- ``optimizer.py::_update_moment``), theta <- theta - (lr/divisor(t)) * m/(1-beta^t),
-divisor(t) = Lambda + (1 - gammas[0]) ** (t // TCov). This literally replays kfac.py's own
-identity-seeded-EMA shape (``_A``/``_B`` seeded to ``I`` at step 0, EMA'd by ``update_running_avg``
-with gain ``1 - gammas[0]`` every ``TCov`` steps -- see ``ema.py``, ``kfac.py:74-84``) collapsed to
-a scalar: divisor = 1 + Lambda for the first TCov steps, then multiplied by (1 - gammas[0]) at every
-TCov boundary, converging to ~Lambda once (1-gammas[0])^k is negligible (k=3 -> 5.1e-4, half of the
-project's own Lambda=1e-3 -- do not shorten the run below a few hundred steps or the two optimizers
-are compared before kfac's own EMA has warmed up either).
+``WarmupMomentumSGD`` is that stand-in: ``m <- beta m + (1-beta) g`` with the optimizer's own
+coupled weight decay, then ``theta <- theta - (lr / divisor(t)) * m / (1 - beta^t)`` with
+``divisor(t) = lam + (1 - gammas[0]) ** (t // TCov)``. That literally replays ``kfac``'s own
+identity-seeded running average collapsed to a scalar: the divisor is ``1 + lam`` for the first
+``TCov`` steps, then multiplied by ``1 - gammas[0]`` at every ``TCov`` boundary, converging to about
+``lam``. Do not shorten the run below a few hundred steps, or the two optimizers are compared before
+``kfac``'s own average has warmed up either -- at three factor updates the residue is 5.1e-4, half
+of the default damping constant.
 
-Protocol: for each model, run kfac twice (seed 0, seed 1 -- the seed-noise floor) and
-WarmupMomentumSGD once (seed 0, so its init and data order are IDENTICAL to kfac/seed0 -- the only
-thing that differs is the optimizer). All three share one nominal-cosine LR schedule over the same
---epochs, the model's own bench.py hyperparameters (lr, weight_decay, Lambda, gammas, TCov),
---budget-mode epochs (no WCT confound: identical step count for every arm).
+Protocol: for each model, run ``kfac`` twice (seeds 0 and 1, which gives the seed-noise floor) and
+``WarmupMomentumSGD`` once (seed 0, so its initial weights and data order are **identical** to
+``kfac`` at seed 0 -- the only thing that differs is the optimizer). All three share one cosine
+schedule over the same epoch count, the model's own benchmark hyperparameters, and a fixed epoch
+budget so no wall-clock confound enters.
 
-Success reads on (train loss trajectory, val accuracy trajectory, test accuracy, final-theta
-distance from init): |kfac_seed0 - warmup_sgd_seed0| should be of the same order as
-|kfac_seed0 - kfac_seed1|. If kfac-vs-SGD is instead a large multiple of kfac-vs-kfac (seed noise),
-the "divisor ~= Lambda everywhere" measurement is missing something (a checkpoint region, a layer
-type, ...).
+Success reads on the training-loss trajectory, the validation-accuracy trajectory, the test
+accuracy and the final distance from initialisation: the stand-in's gap from ``kfac`` should be of
+the same order as ``kfac``'s own seed-to-seed gap. If it is instead a large multiple of it, the
+"divisor is about the damping constant everywhere" measurement is missing something -- a region of
+the trajectory, a layer type.
 
-Env vars: WARMUP_SGD_MODELS (comma-separated benchmarks/<name> folders, default
-"mlp_ln_mnist,cnn_gn_cifar,resnet20_cifar"), WARMUP_SGD_MODES (comma-separated Fisher modes,
-default "kfac"), WARMUP_SGD_EPOCHS (default 15), WARMUP_SGD_SEEDS (comma-separated, default "0,1"
--- the first is shared with WarmupMomentumSGD, the rest are extra seeds for the noise floor),
-WARMUP_SGD_LAMBDAS (comma-separated Lambda overrides, e.g. "1e-4,1e-6,1e-8"; unset = each bench's
-own Lambda, one output file per value otherwise), WARMUP_SGD_DEVICE (default "auto"),
-WARMUP_SGD_DATA_ROOT, WARMUP_SGD_NUM_WORKERS (default 4), WARMUP_SGD_ALLOW_DOWNLOAD ("1" to allow).
+Environment variables::
+
+    WARMUP_SGD_MODELS          comma-separated benchmark folders
+                               (default: mlp_ln_mnist,cnn_gn_cifar,resnet20_cifar)
+    WARMUP_SGD_MODES           comma-separated Fisher modes to compare against (default: kfac)
+    WARMUP_SGD_EPOCHS          epochs per arm (default: 15)
+    WARMUP_SGD_SEEDS           comma-separated seeds (default: 0,1)
+    WARMUP_SGD_SGD_ALL_SEEDS   "1" runs the stand-in at every seed, not at seed 0 only
+    WARMUP_SGD_LAMBDAS         comma-separated damping values to sweep; unset uses each benchmark's
+    WARMUP_SGD_DEVICE          cuda, cpu or auto (default: auto)
+    WARMUP_SGD_DATA_ROOT       dataset root (default: benchmarks/data)
+    WARMUP_SGD_NUM_WORKERS     data-loader workers (default: 4)
+    WARMUP_SGD_ALLOW_DOWNLOAD  "1" allows torchvision to download
+    WARMUP_SGD_OUT             output path
+                               (default: fisher_ref/outputs/warmup_sgd_baseline.json)
+
+Output: the JSON at ``WARMUP_SGD_OUT`` plus a table on standard output. Three sibling scripts
+import ``WarmupMomentumSGD``, ``hooked_param_ids``, ``run_variant`` and ``flatten_params`` from
+here.
 """
 from __future__ import annotations
 
@@ -164,13 +173,24 @@ def flatten_params(model: nn.Module) -> torch.Tensor:
 
 def run_variant(bench: Benchmark, seed: int, optimizer_arm: Optional[str],
                  warmup_sgd: bool, schedule: str = "kfac",
-                 lam_override: Optional[float] = None) -> Dict[str, Any]:
+                 lam_override: Optional[float] = None,
+                 lr_override: Optional[float] = None) -> Dict[str, Any]:
     """``optimizer_arm='kfac'`` uses the real production path (``build_optimizer``); ``warmup_sgd``
     builds :class:`WarmupMomentumSGD` at the same hyperparameters instead. Mirrors
     ``benchmarks/common/runner.py::run_arm`` (same seeding order, same NominalCosine schedule) minus
     checkpoints/plots, which this analysis does not need.
     """
-    hp = bench.hparams if lam_override is None else replace(bench.hparams, lam=lam_override)
+    # lr_override exists so a Lambda sweep can hold lr/Lambda -- the step-size CAP, which is what
+    # the update degenerates to wherever the curvature is negligible -- constant while Lambda moves.
+    # Without it a Lambda sweep changes the conditioning and the step size at once, which is what
+    # made Step 15 of docs/reports/validation_noise_investigation.md uninterpretable. Additive and
+    # inert by default: both None reproduces the previous behaviour exactly.
+    overrides = {}
+    if lam_override is not None:
+        overrides["lam"] = lam_override
+    if lr_override is not None:
+        overrides["lr"] = lr_override
+    hp = bench.hparams if not overrides else replace(bench.hparams, **overrides)
     torch.manual_seed(seed)  # identical init + data order for kfac/seed0 vs warmup_sgd/seed0
     model_kwargs = {k: v[0] for k, v in bench.model_choices.items()}
     model = bench.build_model(**model_kwargs).to(DEVICE)

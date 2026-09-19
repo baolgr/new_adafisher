@@ -46,7 +46,7 @@ DATA_ROOT="${DATA_ROOT:-$SLURM_SUBMIT_DIR/dataset}"
 # climbed back up, while an expensive arm stopped before reaching the floor — both measured, both
 # documented in benchmarks/common/schedules.py. The reference arm is unbudgeted and keeps the
 # nominal schedule; it is what defines the budget.
-python -m benchmarks.mlp_ln_mnist.bench \
+python -m benchmarks.models.mlp_ln_mnist.bench \
   --arms diag kfac ekfac tkfac tekfac adam adamw \
   --epochs 20 \
   --budget-mode wct \

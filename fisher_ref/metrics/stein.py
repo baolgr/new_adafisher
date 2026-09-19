@@ -1,22 +1,40 @@
-"""M3 — the Stein / KL gap between the two preconditioner Gaussians (``plan_exp_draft.md`` §5).
+"""The Kullback-Leibler gap between the two preconditioner Gaussians.
 
-``D_lam(K || R) = 0.5 [ tr(K_lam R_lam^{-1}) - P - logdet K_lam + logdet R_lam ]``, the KL between
-``N(0, R_lam^{-1})`` and ``N(0, K_lam^{-1})``. It is the **affine-invariant** comparison: unlike
-``e_F`` it does not care how the two operators are scaled relative to each other, only how one
-would precondition the other's geometry.
+    D_lam(K || R) = 0.5 [ tr(K_lam R_lam^{-1}) - P - logdet K_lam + logdet R_lam ]
 
-Regime A computes it densely, and that is affordable for a reason worth stating: a Cholesky is
-``P^3/3`` and threads, against ``syevd``'s ``(4/3)P^3`` which — measured in ``plan_exp_lot1.md``
-§6.1 — does not. At A1's ``P = 26 634`` the eigendecomposition took 1 280 s; the Cholesky is minutes
-(``plan_exp_lot2.md`` §0.5). §5.1's Woodbury form is regime B's, i.e. lot 4's.
+which is the KL divergence from ``N(0, R_lam^{-1})`` to ``N(0, K_lam^{-1})``. It is the
+**affine-invariant** comparison: unlike a Frobenius gap it does not care how the two operators are
+scaled relative to each other, only how one would precondition the other's geometry. Applied to the
+reference against itself it is exactly zero, which is the self-consistency check.
 
-T7 is the self-consistency check: ``D_lam(R || R) = 0`` exactly.
+On a materialised reference this is affordable for a reason worth stating: a Cholesky is ``P^3/3``
+and threads well, against the ``(4/3) P^3`` of a symmetric eigendecomposition, which on the
+machines this campaign runs on does not thread at all. At ``P`` around 27 000 the
+eigendecomposition took 1 280 s while the Cholesky takes minutes.
+
+Public API
+----------
+
+:func:`dense_logdet`  ``logdet(M + lam I)`` by Cholesky.
+
+:func:`stein_kl`  the gap. ``tr(K_lam R_lam^{-1})`` is computed by solving ``R_lam X = K_lam`` once,
+with a single Cholesky reused for the solve and for ``logdet R_lam``. ``k_lam`` is the damping
+applied to ``K`` when it is not the reference's; it exists so that an operator carrying its own
+damping is described by the **same** matrix in both halves of the expression, since overriding only
+the solve would leave the log-determinant talking about a different object.
+
+:func:`lambda_grid`  ``lam = alpha * tr(R)/P`` over a list of ``alpha``. No metric that goes through
+an inverse is reported at a single damping: on a real network a fifth of the directions have
+exactly zero curvature, so every damped inverse reads ``lam I`` there whatever ``alpha`` is, and the
+sweep is what separates "the approximation is wrong" from "the damping is doing the work".
+
+Dependencies: :mod:`fisher_ref.approx.base`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import torch
 from torch import Tensor
@@ -45,22 +63,29 @@ def dense_logdet(matrix: Tensor, lam: float) -> Tensor:
     return 2.0 * torch.log(factor.diagonal()).sum()
 
 
-def stein_kl(R: Tensor, K: BlockOps, lam: float) -> SteinReport:
+def stein_kl(R: Tensor, K: BlockOps, lam: float, *, k_lam: Optional[float] = None) -> SteinReport:
     """``D_lam(K || R)`` in regime A.
 
     ``tr(K_lam R_lam^{-1})`` is computed by solving ``R_lam X = K_lam`` once — a single Cholesky
     reused for the solve and for ``logdet R_lam``, rather than two factorisations.
+
+    ``k_lam`` is the damping applied to ``K``, when it is not the reference's; ``None`` (the
+    default) means ``k_lam = lam`` and is bit-identical to this function before lot 5. It exists so
+    that an operator carrying its own damping — P2's, ``plan_exp_lot5.md`` §0.3 — is described by
+    the **same** matrix in both halves of the expression: overriding only ``K.solve`` would leave
+    ``logdet K`` talking about a different object from the trace term.
     """
     size = R.shape[0]
+    k_damping = lam if k_lam is None else k_lam
     identity = torch.eye(size, dtype=R.dtype, device=R.device)
     damped_R = R + lam * identity
     factor = torch.linalg.cholesky(damped_R)
     logdet_R = 2.0 * torch.log(factor.diagonal()).sum()
 
-    damped_K = K.to_dense() + lam * identity
+    damped_K = K.to_dense() + k_damping * identity
     solved = torch.cholesky_solve(damped_K, factor)
     trace_term = solved.diagonal().sum()
-    logdet_K = K.logdet(lam)
+    logdet_K = K.logdet(k_damping)
 
     kl = 0.5 * (trace_term - size - logdet_K + logdet_R)
     return SteinReport(kl=float(kl), trace_term=float(trace_term), logdet_K=float(logdet_K),

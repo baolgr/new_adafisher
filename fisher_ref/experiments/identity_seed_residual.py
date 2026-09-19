@@ -1,20 +1,29 @@
-"""How long does a fresh optimizer's IDENTITY seed dominate its own state? (cnn_gn_cifar)
+"""How long does a fresh optimizer's IDENTITY seed dominate its own state?
 
-update_input_factor sets the EMA to `I` at step 0, then contracts by 0.08 per TCov. So after k
-factor updates the state is  0.08^k * I  +  0.008 * sum_{j<k} 0.08^j X_{t-j}.  The seed enters with
-norm sqrt(d) while the accumulated part is only ~0.0087*||X||, so "how many updates until the seed
-is negligible" is NOT answered by 0.08^k alone. Measured here, at frozen theta (lr=0), for the
-widest layer of each mode's own state.
+Every Fisher mode starts its running average at the identity on step 0, then contracts the stored
+value by ``1 - gammas[0] = 0.08`` at every factor update. So after ``k`` updates the state is
+``0.08^k * I + 0.008 * sum_{j<k} 0.08^j X_{t-j}``. The seed enters with norm ``sqrt(d)`` while the
+accumulated part is only about ``0.0087 * ||X||``, so "how many updates until the seed is
+negligible" is **not** answered by ``0.08^k`` alone. This script measures it, at frozen weights
+(learning rate zero), for the widest layer of each mode's own state.
 
-Result, 2026-09-11, cnn_gn_cifar's widest conv (``features.8``), as a fraction of ||state||:
+Measured on ``cnn_gn_cifar``'s widest convolution, as a fraction of the state's norm::
 
     kfac   k=1 7.7e-1  k=2 1.0e-1  k=3 8.2e-3  k=5 5.2e-5  k=10 1.7e-10
     diag   k=1 9.7e-1  k=2 7.3e-1  k=3 1.6e-1  k=5 1.2e-3  k=10 3.8e-09
 
-Read with ``rewarm_fidelity.py``: the seed is small in *norm* by k=3, yet the applied preconditioner
-is still 12 % off there, because what matters is the inverse. The seed shifts every eigenvalue of
-the factor by 0.08^k, i.e. it is an extra damping — at k=3 that is 5.1e-4, half of lambda=1e-3.
-Hence the protocol rule 0.08^k << lambda (plan_exp_draft.md §3.2).
+Read this together with ``rewarm_fidelity.py``: the seed is small in *norm* by three updates, yet
+the applied preconditioner is still about 12 % off there, because what matters is the inverse. The
+seed shifts every eigenvalue of the factor by ``0.08^k``, i.e. it acts as an extra damping -- at
+three updates that is 5.1e-4, half of a typical ``lambda = 1e-3``. Hence the rule
+``0.08^k << lambda``, met at ten updates.
+
+Configuration: module-level constants only (``TCOV = 100``, ``BATCH = 128``, ``STEPS = 1200``,
+the model ``cnn_gn_cifar``). No environment variables.
+
+Output: a table on standard output. Nothing is written to disk.
+
+Needs the dataset staged under ``benchmarks/data``.
 """
 import sys
 from pathlib import Path

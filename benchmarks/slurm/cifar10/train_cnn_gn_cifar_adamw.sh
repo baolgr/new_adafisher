@@ -45,7 +45,7 @@ else
   BUDGET_ARGS=(--budget-mode epochs)
 fi
 
-python -m benchmarks.cnn_gn_cifar.bench \
+python -m benchmarks.models.cnn_gn_cifar.bench \
   --arms adamw \
   --epochs 30 \
   "${BUDGET_ARGS[@]}" \

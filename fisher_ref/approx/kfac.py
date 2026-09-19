@@ -1,22 +1,43 @@
-"""K-FAC: the Kronecker structure ``K = G (x) A``, and the two ways of building its factors from a
-weight-shared layer (``plan_exp_draft.md`` §4).
+"""K-FAC: the Kronecker structure ``K = G (x) A``, and the two ways of building its factors.
 
-Convention, and it is the one this repository already fixed in ``conventions.kron_rvec``: with a
-direction ``M`` shaped ``(d_out, d_in)`` and ``rvec`` flattening, ``K rvec(M) = rvec(G M A^T)``,
-i.e. the papers' ``A (x) B`` is ``kron(G, A)`` here — **output factor outer, input factor inner**.
-``A`` is the input second moment (bias-augmented), ``G`` the output-gradient one.
+Convention, and it is this repository's row-major one: with a direction ``M`` shaped
+``(d_out, d_in)``, ``K rvec(M) = rvec(G M A^T)``, so the papers' ``A (x) B`` is ``kron(G, A)``
+here -- **output factor outer, input factor inner**. ``A`` is the input second moment
+(bias-augmented), ``G`` the output-gradient one.
 
-The two normalisations differ only in what they average over, and the difference *is* HF2
-(Eschenhagen et al., arXiv:2311.00636):
+The two normalisations differ only in what they average over, and that difference is the whole
+weight-sharing question (Eschenhagen et al., arXiv:2311.00636):
 
-* **expand**: ``A = (1/NT) sum_{n,t} a a^T``, ``G = (1/N) sum_{n,c,t} g g^T`` — exact in the expand
-  setting for a deep linear network (Prop. 1);
-* **reduce**: the factors are built on the *summed* statistics ``sum_t a_{n,t}`` and
-  ``sum_t g_{n,c,t}`` — exact in the reduce setting, e.g. mean pooling (Prop. 2).
+* **expand**: ``A = (1/NT) sum_{n,t} a a^T``, ``G = (1/N) sum_{n,c,t} g g^T``. Exact in the expand
+  setting for a deep linear network with a Gaussian likelihood (§3.2, Eq. 7, Prop. 1).
+* **reduce**: ``A`` built on the position-**averaged** input ``(1/T) sum_t a_{n,t}``, ``G`` on the
+  **summed** gradient ``sum_t g_{n,c,t}``. Exact in the reduce setting, e.g. mean pooling (§3.3,
+  Eq. 10, Prop. 2). Summing on both sides instead makes the structure exactly ``T^2`` times too
+  large, which is invisible on a model with one position per example.
 
-A1 has no weight sharing (``T = 1``), so the two coincide there and HF2 is lot 3's question, on
-A2/A3. Both are implemented now because they are one branch apart and the accumulator has to choose
-at capture time, not afterwards.
+A model with no weight sharing has ``T = 1``, where the two coincide. Both are implemented because
+they are one branch apart and the accumulator has to choose at capture time, not afterwards.
+
+Public API
+----------
+
+:class:`Kron`  ``K = G (x) A``, never materialised. ``trace``, ``fro2``, ``diag`` and
+``inner_dense`` are closed forms; ``solve`` and ``logdet`` go through the Kronecker eigenbasis,
+``(G (x) A + lam I)^{-1} = (Q_G (x) Q_A) diag(1/(lam_G lam_A + lam)) (Q_G (x) Q_A)^T``, which is
+the only exact way to damp a Kronecker product since ``G (x) A + lam I`` is not one.
+``inner_rearranged`` takes an already-rearranged reference, so several structures share one
+rearrangement.
+
+:func:`kfac_from_factors`  the trivial constructor.
+
+:func:`af_raw_from_factors`  AdaFisher's raw estimator ``diag(A) (x) diag(G)``. Since
+``diag(A) (x) diag(G) = diag(A (x) G)``, it **is** K-FAC's diagonal, which is the point of
+comparing them: the two paths from the exact block to this object differ entry-wise by the
+covariance of ``a_j^2`` and ``g_i^2``. The optional division by the number of shared positions
+follows AdaFisher's own convolution appendix, which divides both diagonal factors by ``|T|`` where
+K-FAC-expand divides only the input one.
+
+Dependencies: :mod:`fisher_ref.approx.base`.
 """
 
 from __future__ import annotations
@@ -67,7 +88,11 @@ class Kron(BlockOps):
         """``<R, G (x) A> = vec(G)^T R(R) vec(A)`` — the rearrangement identity, so the Kronecker
         product is never formed (``plan_exp_lot2.md`` §0.4).
         """
-        rearranged = rearrange(R, self.d_out, self.d_in)
+        return self.inner_rearranged(rearrange(R, self.d_out, self.d_in))
+
+    def inner_rearranged(self, rearranged: Tensor) -> Tensor:
+        """``<R, K>`` from an already-rearranged ``R(R)``, so several structures share one
+        rearrangement — a 2.7 GB copy per call on A2's last convolution (``plan_exp_lot3.md`` §1)."""
         return self.G.reshape(-1) @ rearranged @ self.A.reshape(-1)
 
     # -- everything needing an inverse goes through the Kronecker eigenbasis ----------------------

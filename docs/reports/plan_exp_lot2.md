@@ -532,7 +532,138 @@ No code was changed on the strength of a guess. If it recurs, the full output wi
 
 ---
 
-## 6. The A1 P1 result (pending)
+## 6. The A1 P1 result
 
-*Empty until the cluster run. Steps 1-6's code is done and verified (566 tests, `ruff` and `mypy`
-clean), and the job is pushed; what remains is to submit it.*
+Two jobs ran, together covering every layer of `mlp_ln_mnist`, both ways of building the exact
+curvature (from the model's own predicted probabilities, and from the training labels), and all
+five checkpoints (0%, 1%, 10%, 50%, 100% of training): job `21128864` (the whole model) and job
+`21141581` (a follow-up restricted to the first layer, `features.0`, needed because the main job's
+size guard also skipped that layer's cheapest metric — see `p1_features0_a1.sh`). The raw numbers
+are under `fisher_ref/outputs/mlp_ln_mnist/diag/seed0/<fraction>/` and
+`fisher_ref/outputs/features0/mlp_ln_mnist/diag/seed0/<fraction>/`.
+
+### 6.1 How much of this can be trusted
+
+Sampling noise was measured once, on the whole network, at the last checkpoint only: two
+independent estimates built from the same 55 000 training images, split in half, disagree by 0.343
+purely by chance (95% range 0.332–0.352); two fully independent estimates of that size would
+disagree by about 0.24. That is the yardstick for whole-network comparisons.
+
+It was **not** re-measured for each individual layer — a smaller block has its own, different,
+sampling noise, and none of the per-layer numbers below have been checked against it (that is a
+follow-up job, not something this run answers; the SLURM script for the first-layer job says so
+explicitly). What makes the findings below trustworthy anyway is that every one of them repeats, in
+the same direction, at all five checkpoints and under both ways of building the reference — noise
+repeating five times in a row, in the same direction, on two independently-built quantities, is a
+much less likely explanation than the effect being real.
+
+### 6.2 HF3 — does AdaFisher's own shortcut for its diagonal cost anything?
+
+AdaFisher estimates each parameter's own curvature by combining two separate averages — one over a
+layer's inputs, one over its output errors — instead of tracking how the two move together. The two
+ways of computing it agree exactly only when nothing about the inputs and the errors is correlated;
+otherwise the shortcut is biased. On A1 that correlation can be measured directly, layer by layer:
+
+- On the very first layer (`features.0`), the shortcut costs almost nothing — the two readings
+  agree to within 0.001 in relative error at every one of the five checkpoints (e.g. 0.994 vs 0.995
+  at the end of training). This is not a coincidence: about 130 of MNIST's 784 pixels are exactly
+  zero across the whole dataset (already found earlier in this project), and a quantity that is
+  identically zero cannot correlate with anything, so the shortcut has nothing to be biased about
+  on that part of the layer.
+- On every layer downstream of it, the shortcut costs something real, and the cost grows as
+  training proceeds. On the output layer (`head`): at initialisation the two readings are
+  indistinguishable (0.922 relative error either way); by the end of training the true diagonal
+  reads 0.906 against 0.949 for AdaFisher's own diagonal — a real, and by then sizeable, gap. The
+  same ordering, and the same growth over training, shows up on `features.3`, and holds whether the
+  curvature is estimated from the model's own predictions or from the training labels.
+
+**HF3 is decided**: the shortcut is not free. What it costs tracks how much genuine variability a
+layer's inputs actually have — close to zero where the inputs are mostly zero (the first layer),
+real and growing everywhere else.
+
+### 6.3 HF4 — do the two normalisation layers need the scale/shift coupling term?
+
+> **Erratum (lot 3, `plan_exp_lot3.md` §0.7).** The numbers below stand; two readings of them do
+> not. (1) Reading (d) is **not** the formula the shipped `diag` mode uses: the code emitted
+> `diag(H)·diag(S)`, which is exactly the diagonal of reading (b), while `diag.py` sums the raw input
+> over batch and positions before squaring. Lot 3 renames it `hadamard_diag` and adds the shipped
+> formula as `diag_py`. (2) Three of the four orderings are theorems, not findings: the exact
+> diagonal is the Frobenius-optimal diagonal, so (c) always beats (d); and (a) is the
+> Frobenius-optimal matrix with no scale/shift cross terms, so it always beats (b) and (c). Only
+> (b) vs (c) was an empirical comparison. Also, (b) as coded keeps **no** scale/shift cross term,
+> so the sentence attributing (b)'s advantage over (c) to "the coupling term" is not supported;
+> the cross-term share itself (`cross_term_share_total`) is the measurement of that coupling.
+
+A1 has two normalisation layers (`features.1`, `features.4`), each with 64 parameters: 32 for a
+per-channel scale, 32 for a per-channel shift. Four simplified readings of their exact curvature
+were compared: (a) keeping each 32-parameter half in full, but dropping any coupling between them;
+(b) the reduced form the underlying theory actually prescribes, which keeps a small coupling term
+rather than dropping it; (c) collapsing everything to one number per parameter (a plain diagonal);
+and (d) the formula the shipped `diag` optimizer mode already uses for these layers.
+
+Ranked from closest to the true curvature to furthest, the order is the same on both layers at
+every one of the five checkpoints: **(a) > (b) > (c) > (d)**. On `features.1` at the end of
+training, relative error is 0.667 for (a), 0.754 for (b), 0.795 for (c) and 0.821 for (d); the same
+ordering, with the same spacing, holds on `features.4` and at every earlier checkpoint.
+
+Two things follow from that ordering. First, the coupling term the theory keeps is doing real work:
+about two thirds of a normalisation layer's whole curvature magnitude sits in the coupling between
+its scale and its shift, measured directly rather than assumed — dropping it (c) is consistently
+worse than keeping it (b). That supports the earlier decision (lot 5) not to force that term to
+zero. Second, and new: the formula the optimizer actually ships today for these layers (d) is, on
+this real trained network, consistently the **least** accurate of the four readings — worse even
+than the plain diagonal (c), at every checkpoint on both layers. This is not a bug — the two were
+already known to estimate different quantities, not the same one two different ways — but it is
+now a measured fact about which one sits closer to the truth, where before there was only a
+structural argument.
+
+**HF4 is decided**: the coupling term is real and worth keeping; the currently-shipped
+normalisation-layer diagonal is, measurably, the weakest of the readings tested.
+
+### 6.4 The headline result, and it wasn't one of the two questions being asked
+
+The same run also measured, at every checkpoint and every layer, how much of the *ideal* parameter
+update each approximation would actually deliver if it were used to precondition a real gradient
+(the "M5" metric), across a range of damping strengths.
+
+The pattern is the same on every layer, and it is large. At initialisation, the good structured
+approximations (K-FAC and its refinements) recover 61–97% of the ideal step, depending on the layer
+and how much damping is used; the plain diagonal approximations — including AdaFisher's own —
+recover only 12–37%. By the end of training, on the very same layers, every approximation has
+gotten markedly worse at this: the structured ones now recover only 13–46% of the ideal step, and
+the diagonal ones recover next to nothing — a fraction of a percent on the first two linear layers,
+6–12% on the output layer.
+
+In other words: the curvature is not just shrinking as the network trains (its overall size drops
+by roughly two orders of magnitude between the first and last checkpoint, matching the loss
+flattening out) — its *shape* is also becoming much harder for any of this project's structures to
+capture. An approximation that was nearly exact at the start of training is a poor stand-in for the
+truth by the end. This is exactly the kind of change the whole campaign exists to measure, and A1 is
+the first model on which it has actually been measured, rather than argued for.
+
+### 6.5 Two smaller findings worth recording
+
+- How "clean" a single Kronecker-shaped simplification is differs sharply by layer. On the first
+  linear layer, the best such simplification already explains most of the block's shape (a second,
+  competing pattern is only about a quarter its size); on the output layer, the two patterns are
+  much closer in size (nearly half), which is exactly why the Kronecker-based approximations do
+  noticeably worse there than on the first layer, at every checkpoint.
+- Curvature does not stay confined to one layer at a time: the measured coupling between any two
+  layers' curvature is large everywhere it was checked (0.72–0.92, on a scale where 1 would mean two
+  layers' curvature moves in lockstep and 0 would mean no relationship at all). No pair of layers in
+  this network can safely be treated as independent of the others.
+
+The one metric that needed a full matrix decomposition too expensive to run for every structure and
+every damping level (a Stein-style divergence, "M3") was, as planned, skipped on the first layer and
+**recorded as skipped** rather than silently missing; it ran to completion everywhere else.
+
+### 6.6 What is still open
+
+- A per-layer version of §6.1's noise measurement, so the individual-layer numbers above can be
+  checked against their own sampling noise instead of borrowing the whole-network one.
+- The full damping sweep behind §6.3/§6.4 is in the underlying data (`metrics.csv`'s
+  `lambda_alpha` column); only the lighter end of it is summarised above, since that is the regime
+  this project's earlier stall investigation (on the auto-encoder bench) flagged as the practically
+  relevant one.
+- Both jobs used here are seed 0 only. A2/A3 — lot 3's models, which do have parameter sharing — and
+  additional seeds are still to come.

@@ -1,20 +1,61 @@
-"""The noise floor of the reference itself (``plan_exp_draft.md`` §3.4).
+"""The reference's own sampling error: the floor below which no difference is interpretable.
 
-**Any difference between approximations below this floor is not interpretable** (§10.3's reading
-rule, HF8). Lot 1 measured it from a *single* two-way split, which gives a point estimate and no
-error bar — and then had to read a "1.33x the null" result with no way to say whether 1.33 was
-significant (``plan_exp_lot1.md`` §6.2). This module does what §3.4 actually asks: 20 random
-partitions, a 95 % interval, and the ``d(F_{N'}, F_N)`` curve against ``N'``.
+Any gap between two approximations that is smaller than this floor is not a finding.
 
-The scaling that turns a split into a floor, derived once here because lot 1 got it right only in
-passing: ``F^(1) - F^(2)`` is the difference of two *independent* ``N/2`` estimates, so its size is
-``sqrt(2) sigma_{N/2} = 2 sigma_N``. Hence
+The scaling that turns a split into a floor. ``F^(1) - F^(2)`` is the difference of two
+*independent* half-size estimates, so its size is ``sqrt(2) sigma_{N/2} = 2 sigma_N``. Hence
 
-    sigma_N          = d_split / 2                 (one N-probe estimate's own error)
-    null(two runs)   = sqrt(2) sigma_N = d_split / sqrt(2)
+    sigma_N        = d_split / 2                  (one N-probe estimate's own error)
+    null(two runs) = sqrt(2) sigma_N = d_split / sqrt(2)
 
 and a gap between two independent ``N``-probe references must clear ``null(two runs)``, not
 ``sigma_N``, before it means anything.
+
+**What the interval is.** :func:`noise_floor` sorts the measured split distances and reports the
+element at index ``max(int(0.025 n) - 1, 0)`` as ``low`` and at ``min(int(0.975 n), n - 1)`` as
+``high``. For fewer than 80 partitions -- which includes the default of 20 -- those indices are 0
+and ``n - 1``, so ``low`` and ``high`` are the observed **minimum and maximum**, not a 95 %
+quantile interval. ``median`` is the upper of the two central values at even ``n``. Read them as
+the observed range of the splits.
+
+That is a sample-size limit, not an arithmetic slip. The textbook nearest-rank 2.5th percentile of
+``n`` sorted values sits at index ``ceil(0.025 n) - 1``, which is index 0 for every ``n`` up to 40:
+with 20 splits there is simply no value below the minimum to report, whatever formula is used.
+
+Against nearest rank the indices here differ by at most one, and **only outwards**. Measured over
+every ``n`` from 2 to 5000: 0 values of ``n`` where this interval is narrower than nearest rank,
+4960 where it is one index wider on one side or both. Side by side::
+
+    n     low here / nearest rank    high here / nearest rank    covers
+    10        0 / 0                     9 / 9                    100.0 %
+    20        0 / 0                    19 / 19                   100.0 %
+    40        0 / 0                    39 / 38                   100.0 %
+    41        0 / 1                    39 / 39                    97.6 %
+    80        1 / 1                    78 / 77                    97.5 %
+    200       4 / 4                   195 / 194                   96.0 %
+
+("covers" is the share of the sorted sample between the two indices, inclusive; a true 95 %
+interval covers 95 %.) ``low`` first moves off the minimum at ``n = 80`` and ``high`` off the
+maximum at ``n = 41``. The bias is towards a *wider* interval, so a difference that clears this
+floor also clears the nearest-rank one -- the safe direction for a threshold something has to beat.
+The arithmetic is left as it is for that reason, and because every result file this package has
+produced used 20 partitions, where the two agree exactly.
+
+Public API
+----------
+
+:class:`NoiseFloor`  the split distances, their median, the range, ``sigma_n``, the two-run null,
+and the partition count.
+
+:func:`noise_floor`  ``d(F^(1), F^(2))`` over random disjoint halves of the probes. ``build(indices)``
+returns the dense reference over those probes, so this module stays a pure statistic and the caller
+owns the model and the probe set. The distance used is the gap normalised by the geometric mean of
+the two norms.
+
+:func:`convergence_curve`  ``d(F_{N'}, F_N)`` against ``N'``, which is what says whether the
+residual is a genuine systematic floor or a heavier-tailed variance.
+
+Dependencies: :mod:`fisher_ref.metrics.frobenius`.
 """
 
 from __future__ import annotations
@@ -51,10 +92,14 @@ class NoiseFloor:
 
 def noise_floor(build: Callable[[Sequence[int]], Tensor], n_probes: int, *,
                 partitions: int = 20, seed: int = 0) -> NoiseFloor:
-    """``d(F^(1), F^(2))`` over ``partitions`` random halves → a 95 % interval.
+    """``d(F^(1), F^(2))`` over ``partitions`` random halves, with ``low``/``high`` around it.
 
     ``build(indices)`` returns the dense reference over those probes; the caller owns the model and
     the probe set, so this module stays a pure statistic.
+
+    ``low`` and ``high`` are the observed **range** of the splits at the default 20 partitions, not
+    a 95 % quantile interval -- 20 samples cannot resolve one. This module's header has the index
+    table and the comparison against nearest rank.
     """
     generator = torch.Generator().manual_seed(seed)
     half = n_probes // 2

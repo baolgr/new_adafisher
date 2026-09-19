@@ -19,20 +19,37 @@
 # train_cnn_gn_cifar_all.sh. The only remaining variable between cnn_gn_cifar_cpu/ and
 # cnn_gn_cifar_bn/ is --norm (gn vs bn), which is the point.
 #
+# SECOND ATTEMPT (job 21122754 discarded). The first version of this script requested no --gpus
+# and landed on the "cpubackfill" partition (opportunistic leftover CPU on a GPU node, def-msh-ab
+# has no dedicated CPU-only allocation). Per-epoch elapsed deltas in that run's epochs.csv show a
+# clear non-stationary slowdown — diag itself drifts from ~15-20s/epoch early to ~26-37s/epoch
+# late, kfac ramps from ~16-21s to ~45-49s over its own run, ekfac (which started already inside
+# the degraded window) sits uniformly at ~68-92s/epoch — the signature of a co-scheduled job
+# contending for the same node's shared resources despite AllocCPUS being nominally exclusive
+# (86.91% CPU efficiency in `seff`, not the near-100% a quiet node gives). Effect: ekfac/tekfac
+# happened to run during the worst of it and got far fewer epochs than their own lot-7-measured
+# cost ratio predicts (8 and 11 of 30, vs an expected ~15-16), and adam (which ran after the
+# contention eased) outpaced diag by an implausible margin. Every other campaign job — including
+# fisher_ref/slurm/dense_reference_a1.sh, whose own heavy step (eigh) is CPU-only and does not
+# thread — requests the h100_1g.10gb slice anyway, apparently for exactly this reason: it is the
+# only way on this account to land on a dedicated, non-backfill node. This version does the same,
+# purely as a resource reservation — --device cpu below means the GPU itself is never touched, so
+# the computed numbers stay CPU numbers, matching cnn_gn_cifar_bn's device.
+#
 # Submit from the repository root:  sbatch benchmarks/slurm/cifar10/train_cnn_gn_cifar_cpu_all.sh
 
-#SBATCH --account=def-msh-ab_cpu
+#SBATCH --account=def-msh-ab
 #SBATCH --job-name=cnn_gn_cifar_cpu_all
+#SBATCH --gpus=h100_1g.10gb:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=8G
-#SBATCH --time=03:00:00
+#SBATCH --time=02:30:00
 #SBATCH --output=benchmarks/slurm/logs/%x-%j.out
 
-# --time: ESTIMATED, not measured on this cluster. Extrapolated from cnn_gn_cifar_bn's own local
-# CPU run: sum of all 7 arms' total_s there is ~7194s (~2h00m) under the same WCT-budget protocol
-# (diag runs the nominal 30 epochs unbudgeted, its measured time becomes every other arm's budget).
-# 03:00:00 leaves ~1h of headroom for a slower cluster CPU node plus env setup, since this is the
-# first time this model has run under --device cpu on this cluster.
+# --time: ESTIMATED. cnn_gn_cifar_bn's own local CPU run sums to ~7194s (~2h00m) across the 7 WCT-
+# budgeted arms; 02:30:00 leaves ~30min of headroom. A dedicated GPU node's CPU may well be faster
+# than both the contended backfill run and the laptop this was benchmarked on, so this is
+# deliberately generous rather than tight.
 # Dataset: cifar10, read from $DATA_ROOT (default $SLURM_SUBMIT_DIR/dataset).
 
 set -euo pipefail
@@ -50,7 +67,7 @@ export PYTHONPATH="$SLURM_SUBMIT_DIR/src:$SLURM_SUBMIT_DIR"
 export OMP_NUM_THREADS="$SLURM_CPUS_PER_TASK"
 DATA_ROOT="${DATA_ROOT:-$SLURM_SUBMIT_DIR/dataset}"
 
-python -m benchmarks.cnn_gn_cifar.bench \
+python -m benchmarks.models.cnn_gn_cifar.bench \
   --arms diag kfac ekfac tkfac tekfac adam adamw \
   --norm gn \
   --device cpu \

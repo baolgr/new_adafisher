@@ -595,15 +595,18 @@ fisher_ref/
   reference/
     dense.py          # regime A: F, E_hat, B_l, dense fp64                                [lot 1: done]
     factor.py         # regime B: per-layer U_l or ghost Grams, streamed                   [lot 4]
+  folds.py            # one traversal over K folds -> full result + per-layer intervals      [lot 3: done]
     matfree.py        # regime C: curvlinops operators (or a hand-written Fv)              [lot 6]
   approx/
     base.py           # the CurvatureBlock protocol                                        [lot 2]
     kfac.py ekfac.py tkfac.py diag.py blockdiag.py norm_layers.py                          [lot 2]
-    adafisher_state.py # P2: reads AdaFisherMulti's live state, no re-implementation       [lot 5]
+    sharing.py embed.py # B^exp decomposition; pos_embed structures                          [lot 3: done]
+    adafisher_state.py # P2: reads AdaFisherMulti's live state, no re-implementation  [lot 5: done]
   metrics/            # frobenius, spectral, stein_kl, ngd, subspace, kron_diag, coupling, noise_floor [lot 2]
   runners/
     p1_structural.py  # fixed theta from a checkpoint, fixed probes, lambda sweep          [lot 2]
-    p2_operational.py # EMA re-warm from a checkpoint, state snapshot                      [lot 5]
+    p2_operational.py # the P1 runner with three more rungs; extras injected, not copied  [lot 5: done]
+  rewarm.py           # frozen-theta re-warm from a checkpoint; refuses < 10*TCov steps    [lot 5: done]
   experiments/        # measurement drivers, not tests: one script per protocol question, its
                       # answer recorded in this file. rewarm_fidelity.py (§3.2),
                       # identity_seed_residual.py (the 0.08^k seed acting as extra damping)
@@ -674,9 +677,9 @@ non-curvature half carved out, for the reason `plan_exp_lot0.md` §0.1 gives.
 | **0** | `conventions.py`, TF32 flags, `probes.py`, `registry.py`, **`checkpoints.py` (the bridge)** | `fisher_ref/` importable, green CI | **T0.1-T0.8** (§10.1) pass; the pre-existing test suite is untouched and still green |
 | **1** *(done, bar the cluster run)* | A1 end to end: `capture.py`, `sources.py`, `reference/dense.py`; `F`, `Ê`, `B_ℓ` in fp64 at one checkpoint | the first exact references | T1, T2, T6 pass; `curvlinops` decided (§2.4) — all met (`plan_exp_lot1.md` §3). The full `N = 4000` A1 run is its phase 5 |
 | **2** | the zoo (`approx/`) + the metrics (`metrics/`) + `p1_structural.py`, on A1: 5 checkpoints × the available seeds, noise floor | the first figure set, `metrics.csv` | T3-T5, T7-T9 pass; the noise floor is plotted; HF3, HF4 decided on A1 |
-| **3** | A2 (conv, GN and BN-eval), A3 (fused `qkv`, mean pooling); sharing/independence decomposition | the complete regime-A map | HF2 decided; every Q4 conclusion holds on ≥ 2 models |
+| **3** *(**done** — `plan_exp_lot3.md`; jobs 21276894/95/96, `N = 45 000`)* | A2 (conv, GN and BN-eval), A3 (fused `qkv`, mean pooling, `pos_embed`); sharing/independence decomposition | the complete regime-A map | **HF2 confirmed on all three models** by §0.10's pre-registered rule (14/15, 15/15, 40/45 cells for reduce), the sharing term measured at 0.971 of the block against 0.45-0.60 for independence, and `ρ` disagreeing with `e_F` in 70-72 % of cells; Q4.1/Q4.2 transport, Q4.3/Q4.4/Q4.5 do not (§6 there). T5 passes — and failed on lot 2's reduce branch, which was `T²` too large (§0.1) |
 | **4** | regime B: `factor.py`, per-layer Grams, ghost, Woodbury — **validated against A1-A3's dense first**, then B1, B2 and **B0 (`mnist_autoencoder`, §3.6)** | the regime-B map + the stall diagnosis | T10, T11 pass; §3.6's `ρ` / `‖F̃^{-1}m̂‖` measurement produced |
-| **5** | P2: `adafisher_state.py`, the EMA re-warm (§3.2, **≥ 10·TCov steps**, `0.08^k ≪ λ`), on A2, B1, B2, all five modes | P1 vs P2 | T12 passes; the re-warm's fidelity re-measured on the lot's own models (§3.2 did it on A2); HF7 decided |
+| **5** *(**done** — `plan_exp_lot5.md`; jobs 21388028-33, all COMPLETED)* | P2: `adafisher_state.py`, `rewarm.py`, `p2_operational.py`, the EMA re-warm (§3.2, **≥ 10·TCov steps**, `0.08^k ≪ λ`), all five modes. **Not on B1 and B2**: those are regime-B models, so both the P2 *and* the P1 halves of the comparison need lot 4 (`plan_exp_lot5.md` §0.0). Run on **every regime-A model instead** — A1, A2-GN, A2-BN, A3 | P1 vs P2, on four models | T12 passes; the re-warm **confirmed on all four** at `k = 10` (gap/floor 0.37-1.82); **HF7 is ill-posed at the operational point** — the spread between the five modes is 0.0000-0.0003 against a per-layer noise floor of 0.026-0.167, i.e. 100-1000× below §10.3's own reporting threshold, because **`cond(F̃) ≈ 1` and `λ` is 99.2-100 % of `F̃`'s mean eigenvalue**: the operational preconditioner is the identity and `ρ(P2) = ρ(identity)` to one part in 10⁴-10⁶. The **damping**, not the averaging, is what destroys the structure (139× to 5.8 M× closer to the identity after `λ` than before it) |
 | **6** *(options)* | `vit_small_cifar` at realistic width; `resnet50_cifar` in regime C; then, only if the map calls for them, new benchmark folders for A4 (GPT-micro) and B3 (RoBERTa-LoRA) | extensions | decided after lot 5 |
 
 The order is forced: regime A is regime B's oracle; P2 needs the zoo P1 builds; a new model folder
@@ -714,7 +717,7 @@ is a `benchmarks/` change and is the last thing this campaign should do.
 | T9 | EKFAC: `tr(K) = tr(B_ℓ)`; cross-check against `EKFAC-pytorch` | ≤ `1e-10` / `1e-6` | 2 |
 | T10 | regime B against regime A on A1-A3, every metric | rel. ≤ `1e-8` | 4 |
 | T11 | ghost Gram against the materialised Gram on a layer where both fit | ≤ `1e-10` fp64 | 4 |
-| T12 | P2's state reader against `AdaFisherMulti`'s own state, same batch and seed; and `diag` against the upstream optimizer | exact, or ≤ `1e-7` if reduction order differs | 5 |
+| T12 | P2's state reader against `AdaFisherMulti`'s own state, same batch and seed; and `diag` against the upstream optimizer | exact, or ≤ `1e-7` if reduction order differs | 5 — **passes**: the applied preconditioner agrees to `≤ 1e-10` for all five modes on all four hooked layer types, and `diag` to `1e-7` against `FisherAdapTune` |
 | **T13** *(new)* | each P1 structure against `adafisher_modes`' own, at the degenerate setting (one update, identity EMA, empirical source, `λ=0`) | ≤ `1e-10` | 2 |
 
 ### 10.3 Reading rules
@@ -735,6 +738,7 @@ is a `benchmarks/` change and is the last thing this campaign should do.
 | structure error (type-2) ≫ source error, concentrated on shared-weight layers | prioritise rank-`r` Kronecker and a per-layer expand/reduce choice |
 | source error dominant | prioritise iEF and the exact dual Fisher in PEFT |
 | P2 ≫ P1 (HF7) | the weakness is the EMA / min-max / damping, not the structure: geodesic EMA, determinant gauge, directional forgetting |
+| **P2 ≫ P1, and it is the *damping* alone** (lot 5 §6.5: the operator still carries 0.01-0.43 of structure after the EMA, the min-max, train mode and a 150-example effective sample; `λ` then takes it to 10⁻⁸-10⁻⁴) | the three candidates above separate, and only one is guilty. Prioritise a **scale-aware `λ`** — fix S1 of `plan_lambda_dominance.md` — over any change to the smoothing. Lot 5 §6.6(b) adds the positive control: `tkfac`, the only mode damping with `√(λ/δ)` against `tr Φ = tr Ψ = 1`, is the only one whose operational preconditioner measurably still does something |
 | strong diagonal independence bias on normalisations (HF3-HF4) | a corrected normalisation estimator (Hadamard + the `γ`-`β` cross term): cheap, and directly opposable to Prop. 3.1 |
 | `ρ(BD(F)) ≈ 1` (HF5 confirmed) | drop the inter-layer directions |
 | differences below the noise floor at AdaFisher's own App. B.2 sample size | a methodological criticism: that validation is not falsifiable at that `N` |

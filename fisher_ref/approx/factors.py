@@ -1,19 +1,60 @@
-"""Building the zoo from the shared traversal (``plan_exp_lot2.md`` §0.2, §1.2).
+"""Building the whole zoo from one traversal of the probe set.
 
-One sweep of ``capture.iter_probe_columns`` accumulates, per layer, everything every structure
-needs: the K-FAC factors ``A`` and ``G``, TKFAC's un-normalised numerators, and a normalisation
-layer's ``H``/``S``. EKFAC needs a **second** sweep, because ``s`` is defined in an eigenbasis that
-only exists once ``A`` and ``G`` do.
+One sweep of :func:`fisher_ref.capture.iter_probe_columns` accumulates, per layer, everything every
+structure needs: the K-FAC factors ``A`` and ``G``, TKFAC's un-normalised numerators, and a
+normalisation layer's second moments of the normalised input and of the output gradient. EKFAC
+needs a **second** sweep, because its eigenvalues are defined in an eigenbasis that only exists once
+``A`` and ``G`` do.
 
-The reference and the structures therefore see the same probes and the same Monte-Carlo draws by
-construction, which is the point: with two independent loops ``||R - K||`` would carry a sampling
-difference between ``R`` and ``K`` that no metric could tell from structure error.
+The reference and the structures therefore see the same probes by construction, which is the point:
+with two independent loops the gap ``||R - K||`` would carry a sampling difference between the two
+that no metric could tell apart from structure error. That guarantee holds for the deterministic
+sources; with the Monte-Carlo source the two sweeps draw independently unless the caller re-seeds
+between them.
+
+Normalisations
+--------------
+
+``A`` and ``G`` are accumulated for a normalisation layer too, but they are not what the
+normalisation readings use: ``A`` there is the ``(C+1) x (C+1)`` second moment of the *normalised*
+input, which does not even have the size of a ``2C``-parameter block. The readings use
+``norm_stats()`` instead, built from the raw ``x_hat`` and ``g``. The reduce mode does not apply to
+a normalisation layer, so its statistics are always the expand-style ones.
+
+Public API
+----------
+
+:data:`KFAC_MODES`  ``("expand", "reduce")``.
+
+:func:`augmented_input`, :func:`output_grad`  the per-mode pooled statistics. In ``reduce`` mode the
+input is **averaged** over positions and the gradient **summed**, following Eschenhagen et al.
+(arXiv:2311.00636 §3.3, Eq. 10); the bias entry of the mean of ``[a_t; 1]`` is ``1``.
+
+:func:`per_sample_gradient`  ``G_n = sum_t g_t a_bar_t^T``, the **true** per-example gradient in
+``rvec([W | b])`` layout, whatever mode supplies the basis it is projected into. EKFAC's optimal
+diagonal is defined on the per-example gradient, so a reduced statistic must not be substituted
+here.
+
+:func:`project_per_sample`  ``sum_n [(Q_G^T G_n Q_A)_ij]^2`` for one traversal step.
+
+:class:`LayerFactors`  one layer's accumulated sums, with ``A`` and ``G`` as properties that apply
+the right normalisation, ``kfac()`` / ``tkfac()`` / ``tkfac_eigenbases()`` / ``norm_stats()`` as
+constructors, and ``to()`` / ``merge()`` for the fold engine. ``merge`` adds every raw sum and every
+count, so merging folds equals a single accumulation over their union up to reduction order.
+
+:func:`accumulate_factors`  the first sweep.
+
+:func:`accumulate_ekfac`  the second sweep.
+
+Dependencies: :mod:`fisher_ref.capture`, :mod:`fisher_ref.approx.kfac`,
+:mod:`fisher_ref.approx.ekfac`, :mod:`fisher_ref.approx.tkfac`,
+:mod:`fisher_ref.approx.norm_layers`.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Dict, Mapping, Optional
+from dataclasses import dataclass, field, fields
+from typing import Dict, Mapping, Optional, Sequence
 
 import torch
 import torch.nn as nn
@@ -29,24 +70,46 @@ KFAC_MODES = ("expand", "reduce")
 
 
 def augmented_input(layer: CapturedLayer, mode: str = "expand") -> Tensor:
-    """``(N, T, d_in[+1])`` for ``expand``; ``(N, 1, d_in[+1])`` of summed statistics for ``reduce``.
+    """``(N, T, d_in[+1])`` for ``expand``; ``(N, 1, d_in[+1])`` of position-**averaged** statistics
+    for ``reduce``.
 
-    The ones column is appended *after* the reduction for ``reduce``, so the bias sees ``T`` rather
-    than ``1`` — Eschenhagen et al.'s Prop. 2 normalisation, not a re-derivation
-    (``plan_exp_draft.md`` §4).
+    K-FAC-reduce's input factor is ``1/(N R^2) sum_n (sum_r a_{n,r})(sum_r a_{n,r})^T``
+    (arXiv:2311.00636 §3.3, Eq. 10) — the mean over the ``R`` shared positions — while its gradient
+    factor keeps the **sum** (:func:`output_grad`). The bias entry of the mean of ``[a_t; 1]`` is
+    ``1``. Lot 2 summed here and appended ``T``, which made every reduce structure exactly ``T^2``
+    times too large; invisible on A1 (``T = 1``), measured at 24.000 relative error for ``T = 5``
+    (``plan_exp_lot3.md`` §0.1, pinned by T5).
     """
     a = layer.a
     if mode == "reduce":
-        a = a.sum(dim=1, keepdim=True)
+        a = a.mean(dim=1, keepdim=True)
     if getattr(layer.module, "bias", None) is not None:
-        ones = a.new_full((a.shape[0], a.shape[1], 1), float(layer.positions) if mode == "reduce"
-                          else 1.0)
-        a = torch.cat([a, ones], dim=2)
+        a = torch.cat([a, a.new_ones((a.shape[0], a.shape[1], 1))], dim=2)
     return a
 
 
 def output_grad(layer: CapturedLayer, mode: str = "expand") -> Tensor:
+    """``(N, T, d_out)`` for ``expand``; ``(N, 1, d_out)`` summed over positions for ``reduce``."""
     return layer.g.sum(dim=1, keepdim=True) if mode == "reduce" else layer.g
+
+
+def per_sample_gradient(layer: CapturedLayer) -> Tensor:
+    """``G_n = sum_t g_t a_bar_t^T``, ``(N, d_out, d_in[+1])`` — the **true** per-example gradient in
+    ``rvec([W | b])`` layout, whatever K-FAC mode supplies the basis it is projected into.
+
+    EKFAC's ``s* = E[((Q_G (x) Q_A)^T grad)^2]`` is defined on the per-example gradient
+    (``ekfac_1806.03884.pdf`` §3.2). Lot 2's reduce branch projected ``(sum_t a)(sum_t g)^T``
+    instead, which is not a gradient unless the layer is in the reduce setting, so ``s`` was not the
+    optimal diagonal and ``tr(K) = tr(B)`` failed (``plan_exp_lot3.md`` §0.2, T9-shared).
+    """
+    return torch.einsum("ntd,nte->ned", augmented_input(layer, "expand"),
+                        output_grad(layer, "expand"))
+
+
+def project_per_sample(layer: CapturedLayer, q_a: Tensor, q_g: Tensor) -> Tensor:
+    """``sum_n [(Q_G^T G_n Q_A)_ij]^2`` for one ``(micro-batch, column)`` step, ``(d_out, d_in)``."""
+    projected = torch.einsum("oi,boj,jk->bik", q_g, per_sample_gradient(layer), q_a)
+    return (projected * projected).sum(dim=0)
 
 
 @dataclass
@@ -93,23 +156,59 @@ class LayerFactors:
         return TkfacStats(delta=self.tkfac_delta, phi_raw=self.tkfac_phi, psi_raw=self.tkfac_psi,
                           count=self.tkfac_count).build()
 
+    def tkfac_eigenbases(self) -> "tuple":
+        """``(Q_Phi, Q_Psi)`` — TKFAC's own eigenbasis, which TEKFAC rescales inside (lot 5,
+        ``plan_exp_lot5.md`` §0.5).
+
+        Read off the **un-normalised** numerators: dividing a symmetric matrix by the positive
+        scalar ``delta`` leaves its eigenvectors alone, so ``eigh(Phi_raw)`` and ``eigh(Phi)`` give
+        the same basis — which is also the shortcut ``adafisher_modes/approximations/tekfac.py``
+        already takes in its own ``refresh``.
+        """
+        assert self.tkfac_phi is not None and self.tkfac_psi is not None
+        return ekfac_eigenbases(self.tkfac_phi, self.tkfac_psi)
+
     def to(self, device: object) -> "LayerFactors":
         """Every accumulated tensor on ``device``.
 
         The accumulation runs where the traversal runs (the GPU), while the metrics run against the
         host-resident dense reference — so the two must be brought together explicitly. Leaving
         them apart is not a crash at the boundary but a crash *later*, deep inside a metric's
-        einsum, which is how the first P1 cluster job died.
+        einsum, which is how the first P1 cluster job died. The fields are enumerated from the
+        dataclass itself (lot 3), so a tensor field added later cannot be forgotten here.
         """
         moved = LayerFactors(name=self.name, kind=self.kind, d_in=self.d_in, d_out=self.d_out,
-                             positions=self.positions, n_probes=self.n_probes,
-                             a_rows=self.a_rows, g_rows=self.g_rows,
-                             tkfac_count=self.tkfac_count, norm_h_rows=self.norm_h_rows)
-        for field_name in ("A_raw", "G_raw", "tkfac_delta", "tkfac_phi", "tkfac_psi",
-                           "norm_h", "norm_s"):
-            value = getattr(self, field_name)
-            setattr(moved, field_name, None if value is None else value.to(device))
+                             positions=self.positions, n_probes=self.n_probes)
+        for spec in fields(self):
+            value = getattr(self, spec.name)
+            setattr(moved, spec.name, value.to(device) if isinstance(value, Tensor) else value)
         return moved
+
+    @classmethod
+    def merge(cls, entries: Sequence["LayerFactors"]) -> "LayerFactors":
+        """The factors of the union of several disjoint probe sets: every raw sum and every count
+        added, so ``merge(folds)`` equals a single accumulation over their probes up to reduction
+        order (``plan_exp_lot3.md`` §0.8). The entries must be on one device.
+        """
+        if not entries:
+            raise ValueError("nothing to merge")
+        first = entries[0]
+        merged = LayerFactors(name=first.name, kind=first.kind, d_in=first.d_in,
+                              d_out=first.d_out, positions=first.positions, n_probes=0)
+        for spec in fields(first):
+            if spec.name in ("name", "kind", "d_in", "d_out", "positions"):
+                continue
+            values = [getattr(entry, spec.name) for entry in entries]
+            if all(value is None for value in values):
+                setattr(merged, spec.name, None)
+                continue
+            if any(value is None for value in values):
+                raise ValueError(f"cannot merge {first.name!r}: {spec.name} missing on some folds")
+            total = values[0]
+            for value in values[1:]:
+                total = total + value
+            setattr(merged, spec.name, total)
+        return merged
 
     def norm_stats(self) -> NormStats:
         assert self.norm_h is not None and self.norm_s is not None
@@ -138,13 +237,18 @@ def _accumulate(store: Dict[str, LayerFactors], layer: CapturedLayer, n_probes: 
     entry.G_raw = flat_g.T @ flat_g if entry.G_raw is None else entry.G_raw + flat_g.T @ flat_g
     entry.g_rows += flat_g.shape[0]
 
-    # TKFAC's un-normalised numerators, per (example, column): tr(Lambda) = ||a||^2 summed over
-    # positions, tr(Gamma) = ||g||^2. Keeping them raw is what makes tr(K) = tr(B_l) exact.
-    trace_lambda = (a * a).sum(dim=(1, 2))
-    trace_gamma = (g * g).sum(dim=(1, 2))
-    entry.tkfac_delta = entry.tkfac_delta + (trace_lambda * trace_gamma).sum()
-    weighted_a = torch.einsum("n,ntd,nte->de", trace_gamma, a, a)
-    weighted_g = torch.einsum("n,ntd,nte->de", trace_lambda, g, g)
+    # TKFAC's un-normalised numerators, one (Lambda, Gamma) = (a a^T, g g^T) per (example, column,
+    # position): positions are flattened into the batch, exactly as adafisher_modes'
+    # instantaneous_raw_factors does. Then tr(K) = delta = (1/N) sum ||a_t||^2 ||g_t||^2 = tr(B^exp)
+    # (T8-exp); in reduce mode T = 1 after the reduction, so the same lines give the reduced block's
+    # trace. Lot 2 used per-*example* traces sum_t ||a_t||^2, whose product carries every
+    # cross-position pair and matches neither tr(B) nor tr(B^exp) (plan_exp_lot3.md §0.3); at T = 1
+    # the two coincide. Keeping the numerators raw is what makes tr(K) exact.
+    trace_lambda = (a * a).sum(dim=2)
+    trace_gamma = (g * g).sum(dim=2)
+    entry.tkfac_delta = entry.tkfac_delta.to(a) + (trace_lambda * trace_gamma).sum()
+    weighted_a = torch.einsum("nt,ntd,nte->de", trace_gamma, a, a)
+    weighted_g = torch.einsum("nt,ntd,nte->de", trace_lambda, g, g)
     entry.tkfac_phi = weighted_a if entry.tkfac_phi is None else entry.tkfac_phi + weighted_a
     entry.tkfac_psi = weighted_g if entry.tkfac_psi is None else entry.tkfac_psi + weighted_g
     # Counted per *probe*, not per (probe, column): the reference normalises B_l by N while summing
@@ -186,9 +290,12 @@ def accumulate_ekfac(model: nn.Module, inputs: Tensor, targets: Tensor, *, sourc
     """The **second** sweep: ``s_ij = (1/N) sum_{n,c} [(Q_G^T G_{n,c} Q_A)_ij]^2``.
 
     Only the layers whose ``A``/``G`` were built in the first sweep are eligible, and the bases come
-    from those factors — so the two sweeps must have traversed the same probes, which is what
-    ``iter_probe_columns`` guarantees.
+    from those factors (of whichever ``mode`` they were built in) — so the two sweeps must have
+    traversed the same probes, which is what ``iter_probe_columns`` guarantees. ``G_{n,c}`` is
+    always the true per-sample gradient (:func:`per_sample_gradient`), never a reduced statistic.
     """
+    if mode not in KFAC_MODES:
+        raise ValueError(f"mode must be one of {KFAC_MODES}; got {mode!r}")
     bases = {name: ekfac_eigenbases(entry.A, entry.G) for name, entry in factors.items()
              if entry.kind != "norm"}
     sums: Dict[str, Tensor] = {}
@@ -199,11 +306,7 @@ def accumulate_ekfac(model: nn.Module, inputs: Tensor, targets: Tensor, *, sourc
             if layer.name not in bases:
                 continue
             q_a, q_g = bases[layer.name]
-            a = augmented_input(layer, mode)
-            g = output_grad(layer, mode)
-            per_sample = torch.einsum("ntd,nte->ned", a, g)      # (N, d_out, d_in), G_{n,c}
-            projected = torch.einsum("oi,boj,jk->bik", q_g, per_sample, q_a)
-            contribution = (projected * projected).sum(dim=0)
+            contribution = project_per_sample(layer, q_a, q_g)
             sums[layer.name] = (contribution if layer.name not in sums
                                 else sums[layer.name] + contribution)
     return {name: EKFAC(QA=bases[name][0], QG=bases[name][1], s=value / n_probes)
@@ -211,4 +314,4 @@ def accumulate_ekfac(model: nn.Module, inputs: Tensor, targets: Tensor, *, sourc
 
 
 __all__ = ["KFAC_MODES", "LayerFactors", "accumulate_ekfac", "accumulate_factors",
-           "augmented_input", "output_grad"]
+           "augmented_input", "output_grad", "per_sample_gradient", "project_per_sample"]

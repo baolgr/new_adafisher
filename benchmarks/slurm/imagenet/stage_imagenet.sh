@@ -11,8 +11,8 @@
 #     ILSVRC2012_img_val.tar       6 GB      50 000 images, flat (no class directories)
 #
 # Usage:
-#     benchmarks/data/stage_imagenet.sh full   <tar-dir> <out-dir>          # -> <out-dir>/imagenet
-#     benchmarks/data/stage_imagenet.sh resize <out-dir> 32                 # -> <out-dir>/imagenet32
+#     benchmarks/slurm/imagenet/stage_imagenet.sh full   <tar-dir> <out-dir>   # -> <out-dir>/imagenet
+#     benchmarks/slurm/imagenet/stage_imagenet.sh resize <out-dir> 32          # -> <out-dir>/imagenet32
 #
 # `full` produces the tree the 224 px benches read (resnet50_imagenet, vit_small_imagenet).
 # `resize` derives the pre-downsampled tree the 32 px benches read (cnn_gn/vit_micro/resnet20/

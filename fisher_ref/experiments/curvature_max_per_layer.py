@@ -1,34 +1,43 @@
-"""How big does curvature ever get, per layer, on *every* network tested -- not just the two that
-made ``warmup_sgd_baseline.py`` (docs handoff "test 2") disagree with real ``kfac``?
+"""How big does curvature ever get, per layer, on every network tested?
 
 Follow-up to ``lambda_vs_curvature.py``, which established that the **typical** (median) curvature
-is a small fraction of ``Lambda`` in every layer of every mode of every network -- but only checked
-the **largest** value per layer on two networks (``mlp_ln_mnist``, ``cnn_gn_cifar`` with
-BatchNorm), by hand, in a since-discarded scratch script. Step 9 of
-``docs/reports/validation_noise_investigation.md`` found that plain momentum with a matched step
-size reproduces real ``kfac`` almost exactly on ``mlp_ln_mnist`` but not on either convolutional
-network tried (``cnn_gn_cifar``, ``resnet20_cifar``) -- a result the median-only view cannot
-explain, since a handful of large outlier directions is invisible in a median. This script closes
-that gap: the same per-layer maximum check, on all seven networks ``lambda_vs_curvature.py``
-already covers, not just two.
+is a small fraction of the damping constant in every layer of every mode of every network -- but
+only checked the **largest** value per layer on two networks. A median cannot see a handful of large
+outlier directions, and those are exactly what would explain why a plain-momentum stand-in
+reproduces one network's training almost exactly and neither convolutional network's.
 
-Reuses ``lambda_vs_curvature.py``'s own re-warm and spectrum machinery unchanged (same checkpoint,
-same 1000-step re-warm, same five modes) -- only the summary changes, from "median of the spectrum"
-to "how much of the spectrum's tail clears Lambda".
+This script closes that gap: the same per-layer maximum check, on every network
+``lambda_vs_curvature.py`` covers. It reuses that module's re-warm and spectrum machinery
+unchanged -- same checkpoint, same re-warm length, same five modes -- and only the summary changes,
+from "median of the spectrum" to "how much of the spectrum's tail clears the damping constant".
 
-Per (network, mode, layer): max/p99.9/p99/p50 of the *undamped* curvature, each read as a multiple
-of Lambda, plus the fraction of directions whose curvature alone (before Lambda is added) exceeds
-Lambda.
+Per (network, mode, layer): the maximum, the 99.9th, 99th and 50th percentile of the *undamped*
+curvature, each read as a multiple of the damping constant, plus the fraction of directions whose
+curvature alone exceeds it.
 
-Env vars: same as ``lambda_vs_curvature.py`` (REWARM_STEPS, CKPT_FRACTION, DATA_ROOT, MODELS).
+Environment variables: the same as ``lambda_vs_curvature.py`` -- ``REWARM_STEPS`` (default 1000),
+``CKPT_FRACTION`` (default 0.5), ``DATA_ROOT`` (default ``benchmarks/data``), ``MODELS``.
+
+Output: ``fisher_ref/outputs/curvature_max_per_layer.json`` plus a table on standard output.
+
+It reuses ``lambda_vs_curvature``'s re-warm and spectrum machinery, imported by its full package
+path, so both ``python -m fisher_ref.experiments.curvature_max_per_layer`` and running this file by
+path work. The repository root and ``src`` go on the import path first, which is what makes the
+package path resolvable in the second form.
 """
 import json
+import sys
 import time
 from pathlib import Path
 
 import torch
 
-from lambda_vs_curvature import (
+_ROOT = Path(__file__).resolve().parents[2]
+if str(_ROOT) not in sys.path:
+    sys.path[:0] = [str(_ROOT), str(_ROOT / "src")]
+
+from adafisher_modes.optimizer import SUPPORTED_MODULES
+from fisher_ref.experiments.lambda_vs_curvature import (
     ALL_RUNS,
     BENCHES,
     DEV,
@@ -42,7 +51,6 @@ from lambda_vs_curvature import (
     rewarm,
     spectra,
 )
-from adafisher_modes.optimizer import SUPPORTED_MODULES
 
 
 def summarise_max(und: torch.Tensor, lam: float) -> dict:

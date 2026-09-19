@@ -1,47 +1,60 @@
-"""The bridge to ``benchmarks/outputs/``: which θ exist, and how to load one
-(``docs/reports/plan_exp_draft.md`` §3.5; lot 0 of its §9).
+"""The bridge to the training harness's outputs: which weights exist, and how to load one.
 
-The campaign does not train anything. Its θ axis is the trajectory checkpoints the benchmark
-harness already writes, in three layouts:
+The campaign trains nothing. Its weight axis is the trajectory checkpoints the benchmark harness
+already writes, in three directory layouts::
 
-```
-benchmarks/outputs/<model>/<arm>/ckpt_{0,0.01,0.1,0.5,1}.pt          # seed 0, up to 7 arms
-benchmarks/outputs/<group>/<model>/<arm>/ckpt_*.pt                   # ... grouped by dataset
-benchmarks/outputs/seeds/<model>/seed<n>/<arm>/ckpt_*.pt             # extra seeds, diag + adamw
-```
+    benchmarks/outputs/<model>/<arm>/ckpt_{0,0.01,0.1,0.5,1}.pt        # seed 0, flat
+    benchmarks/outputs/<group>/<model>/<arm>/ckpt_*.pt                 # grouped by dataset
+    benchmarks/outputs/seeds/<model>/seed<n>/<arm>/ckpt_*.pt           # extra seeds
 
-``<group>`` is a bench's ``output_group`` (``mnist``, ``cifar10``, ``cifar100``, ``imagenet``), and
-only a directory named after a *declared* group is descended into — never a bare guess, so
-``_calibration`` and legacy trees such as ``outputs/lot8_cifar10/`` cannot be mistaken for one.
-Both layouts coexist on purpose: a model's results do not move when its bench gains a group.
+``<group>`` is a benchmark's declared dataset group (``mnist``, ``cifar10``, ``cifar100``,
+``imagenet``). Only a directory named after a group some benchmark actually declares is descended
+into, so a calibration directory or a legacy result tree cannot be mistaken for one. Both layouts
+coexist on purpose: a model's results do not move when its benchmark gains a group.
 
-Three rules, all of them consequences of the wall-clock-time protocol, and all enforced here rather
-than left to each consumer:
+Three rules, all consequences of the wall-clock-time training protocol, enforced here rather than
+left to each consumer.
 
-1. **A fraction is relative to the *nominal* trajectory** (``--epochs`` x batches), shared by every
-   arm of a model, so ``ckpt_0.5`` is the same amount of *training* in every arm — but not the same
-   wall-clock time, and not the same position inside an arm's own run. Read ``progress`` (=
-   ``step / total_steps``) when an x-axis has to be honest.
-2. **``scheduled=False`` means "the arm's own end"**, not the nominal 100 %: a budgeted arm that
-   stopped short has its largest fraction pinned there by ``CheckpointWriter.save_final``.
-3. **Pre-fix payloads are rejected.** Every checkpoint written before the campaign-1 denominator
-   fix used ``max_epochs`` as the denominator, i.e. is mislabelled on every arm but ``diag``
-   (``CLAUDE.md``'s status block). Such a payload has neither ``total_steps`` nor ``scheduled``;
-   ``load_theta`` refuses it unless ``strict=False``, which then marks the record
-   ``mislabelled=True``.
+1. **A fraction is relative to the nominal trajectory** (the configured epoch count times the
+   batches per epoch), shared by every arm of a model. So ``ckpt_0.5`` means the same amount of
+   *training* in every arm, but not the same wall-clock time and not the same position inside an
+   arm's own run. Read :attr:`LoadedCheckpoint.progress` (step over total steps) when an x-axis has
+   to be honest.
+2. **``scheduled=False`` means "the arm's own end"**, not the nominal 100 %. A budgeted arm that
+   stopped short has its largest fraction pinned there by the harness's final save.
+3. **Pre-fix payloads are rejected.** Checkpoints written before the harness's denominator fix used
+   the maximum epoch count as the denominator, which mislabels every arm except the unbudgeted one.
+   Such a payload carries neither ``total_steps`` nor ``scheduled``; :func:`load_theta` refuses it
+   unless ``strict=False``, which then marks the record ``mislabelled=True``.
 
-The network is rebuilt through its own ``bench.build_model``, with the architecture variants
-(``cnn_gn_cifar``'s ``--norm``) taken from the run's ``manifest.json`` — so a ``bn`` run cannot be
-silently reloaded into a ``gn`` network. Which bench that is comes from the manifest too
-(``config["model"]``), **not** from the run directory's name: ``--output-dir`` is free-form, and
-A2's BatchNorm variant lives in ``outputs/cifar10/cnn_gn_cifar_bn/`` with no folder of that name
-``benchmarks/``. :attr:`RunRef.model` remains the directory label a consumer groups by;
-:attr:`RunRef.bench_name` is what rebuilds the network.
+The network is rebuilt through its own benchmark's ``build_model``, with architecture variants
+taken from the run's ``manifest.json``, so a BatchNorm run cannot be silently reloaded into a
+GroupNorm network. Which benchmark that is comes from the manifest too, **not** from the run
+directory's name: the output directory is free-form, so the directory name is a label and never an
+identifier. :attr:`RunRef.model` stays the directory label a consumer groups and plots by;
+:attr:`RunRef.bench_name` is what rebuilds the network, with a small compatibility map for trees
+written before the manifest recorded it.
 
-A run launched with ``--checkpoint-optimizer-state`` also carries the optimizer's own state
-(``LoadedCheckpoint.optimizer_state``: its ``state_dict`` plus, for ``AdaFisherMulti``, the EMA'd
-Fisher factors keyed by module name). It is ``None`` everywhere today — the flag is off by default
-and no campaign has used it yet — so P2 re-warms from θ (§3.2) unless a future run opted in.
+A run launched with the harness's optional optimizer-state flag also carries the optimizer's own
+state in :attr:`LoadedCheckpoint.optimizer_state`. That flag is off by default and no campaign has
+used it, so the field is ``None`` everywhere today and the operational protocol rebuilds the
+optimizer's memory from the weights instead (see :mod:`fisher_ref.rewarm`).
+
+Public API
+----------
+
+:class:`RunRef`  one ``(model, arm, seed)`` run directory, the checkpoint fractions it holds, its
+manifest, and the model keyword arguments that rebuild its network.
+
+:class:`LoadedCheckpoint`  a rebuilt network at one checkpoint, with the labelling metadata.
+
+:func:`discover_runs`, :func:`available_seeds`  what exists on disk. Missing seeds are simply absent
+from the result, so a consumer must report the seeds it found rather than assume a number.
+
+:func:`load_theta`  rebuild one checkpoint's network.
+
+Dependencies: ``benchmarks.common.optimizers`` (the arm names) and ``benchmarks.common.runner``
+(benchmark discovery). Nothing from the rest of ``fisher_ref``.
 """
 
 from __future__ import annotations
@@ -72,10 +85,10 @@ def _output_groups() -> frozenset:
 
 _CKPT_RE = re.compile(r"^ckpt_(?P<fraction>[0-9]*\.?[0-9]+)\.pt$")
 _SEED_RE = re.compile(r"^seed(?P<seed>\d+)$")
-#: Keys only the post-denominator-fix writer emits (``plan_exp_draft.md`` §3.5, rule 3).
+#: Keys only the post-fix checkpoint writer emits; their absence dates a payload (rule 3 above).
 REQUIRED_PAYLOAD_KEYS = ("total_steps", "scheduled")
 
-#: Run directories whose name is not a ``benchmarks/<name>/`` folder, written before
+#: Run directories whose name is not a ``benchmarks/models/<name>/`` folder, written before
 #: ``manifest.json`` recorded the bench that produced it. ``cnn_gn_cifar_bn`` is A2's BatchNorm
 #: variant — ``--norm bn --output-dir outputs/cifar10/cnn_gn_cifar_bn`` — and it is precisely the
 #: protocol P2 (``plan_exp_draft.md`` §7) compares the GroupNorm one against, so leaving its 28
@@ -109,7 +122,7 @@ class RunRef:
 
     @property
     def bench_name(self) -> str:
-        """The ``benchmarks/<name>/bench.py`` that produced this run.
+        """The ``benchmarks/models/<name>/bench.py`` that produced this run.
 
         **Not** the same thing as :attr:`model`, which is the run *directory*'s name and stays the
         label a consumer groups and plots by (``cnn_gn_cifar`` and ``cnn_gn_cifar_bn`` are two
@@ -173,7 +186,7 @@ def _bench(model: str) -> Benchmark:
         _BENCH_CACHE.update(discover_benchmarks())
     if model not in _BENCH_CACHE:
         raise KeyError(
-            f"no benchmarks/{model}/bench.py; known models: {sorted(_BENCH_CACHE)}. If this is a "
+            f"no benchmarks/models/{model}/bench.py; known models: {sorted(_BENCH_CACHE)}. If this is a "
             f"run directory name rather than a bench name, its manifest.json predates "
             f"config['model'] — add it to fisher_ref.checkpoints._LEGACY_BENCH_OF_DIRECTORY."
         )

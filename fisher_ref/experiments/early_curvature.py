@@ -1,21 +1,33 @@
-"""Is curvature negligible next to Lambda in the FIRST few TCov cycles of a FRESH ``kfac`` run --
-the assumption every scalar-schedule stand-in (Steps 9, 11, 12 of
-``docs/reports/validation_noise_investigation.md``) makes, but that no measurement in this project
-has actually checked?
+"""Is curvature negligible next to the damping constant in the FIRST few factor updates of a fresh run?
 
-Every earlier curvature-vs-Lambda measurement (Steps 7, 8, 10) was taken mid-training, at
-``ckpt_0.5``, after a 1000-step re-warm -- an ALREADY-WARM network. None of it says anything about
-steps 0-300 of a network at its random initialization, which is exactly the window Steps 9/11/12
-retrain from scratch and compare against a scalar stand-in, and where Step 12 found the
-mathematically-corrected schedule helping two networks (``mlp_ln_mnist``, ``resnet20_cifar``) and
-hurting a third (``cnn_gn_cifar``) -- a difference a scalar formula alone cannot explain if
-curvature really is negligible everywhere, on every network, the whole time.
+Every scalar-schedule stand-in for a Fisher mode assumes so, and no measurement in this project had
+checked it. Every earlier curvature-versus-damping measurement was taken mid-training, at a
+half-trajectory checkpoint, after a thousand-step re-warm -- an already-warm network. None of it
+says anything about the first few hundred steps of a network at its random initialisation, which is
+exactly the window a stand-in retrains from scratch, and where a mathematically corrected schedule
+was found to help two networks and hurt a third. A scalar formula alone cannot explain that
+difference if curvature really is negligible everywhere, on every network, the whole time.
 
-This script trains a real, fresh ``AdaFisherMulti(fisher_mode="kfac")`` (no checkpoint) on the
-same three networks and the same seed Steps 9/11/12 use, and snapshots the undamped curvature
-spectrum, per hooked layer, immediately after the 1st, 2nd, 3rd, 4th and 5th EMA update (steps
-1, 101, 201, 301, 401 -- ``k = 1..5`` in ``WarmupMomentumSGD``'s own schedule, ``docs`` handoff),
-exactly the window where the schedule correction changes the divisor the most.
+This script trains a real, fresh ``AdaFisherMulti`` in ``kfac`` mode (no checkpoint) on three
+networks and snapshots the undamped curvature spectrum, per hooked layer, immediately after the
+first five factor updates -- absolute steps 0, 100, 200, 300 and 400, exactly the window where a
+start-up schedule changes the divisor the most. It reports, per snapshot, the layer with the worst
+maximum-over-damping ratio and the layer with the worst dynamic range (the 99th over the 1st
+percentile of the undamped spectrum), since those are two different failure modes: a large ratio
+means curvature is not negligible, a large dynamic range means no scalar can reproduce it however
+well its magnitude is calibrated.
+
+Configuration: module-level constants (``MODELS`` = ``mlp_ln_mnist``, ``cnn_gn_cifar``,
+``resnet20_cifar``; ``SEED = 0``; ``TCOV = 100``; five updates).
+
+Environment variables: ``DATA_ROOT`` (default ``benchmarks/data``).
+
+Output: a table on standard output. Nothing is written to disk.
+
+It reuses the spectrum helper from ``lambda_vs_curvature`` rather than duplicating it, imported by
+its full package path so that both ``python -m fisher_ref.experiments.early_curvature`` and running
+this file by path work. The repository root is put on the import path above, which is what makes
+the package path resolvable in the second form.
 """
 from __future__ import annotations
 
@@ -28,7 +40,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
 import torch
 
-from lambda_vs_curvature import spectra  # reused, not duplicated
+from fisher_ref.experiments.lambda_vs_curvature import spectra  # reused, not duplicated
 
 from benchmarks.common.loop import train_under_budget
 from benchmarks.common.optimizers import build_optimizer

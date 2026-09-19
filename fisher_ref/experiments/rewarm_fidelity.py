@@ -1,29 +1,40 @@
-"""Re-warm fidelity on cnn_gn_cifar, v2 (plan_exp_draft.md §3.2).
+"""How long must a re-warm be before the optimizer's state is the state a real run would hold?
 
-v1 was invalidated by its own numbers: a "noise floor" of 4.6e-7 between two re-warms on *different*
-batches is impossible unless the state is dominated by something batch-independent. It is — the EMA
-is seeded with the IDENTITY at step 0 (kfac.py:77 and friends), and that seed decays as 0.08^k while
-carrying norm sqrt(d), against an accumulated state of norm ~0.0087*||X||. At k = 3 updates the seed
-still dominates. v1's "real" run had 4 updates; a real checkpoint (cnn_gn_cifar ckpt_0.5, step 5265)
-has 52.
+The trajectory checkpoints keep weights only, so the operational protocol has to rebuild the
+optimizer's running averages. This script measures how long that takes, on ``cnn_gn_cifar``.
 
-v2 therefore: trains 2000 steps (20 updates, seed residual 0.08^19 ~ 0) before snapshotting, and
-sweeps the re-warm length k*TCov in {300, 600, 1000} inside ONE re-warm run per variant (the state
-is snapshotted in passing). It also compares the *primary* EMA state only — the derived caches
-(inverses, eigenbases) are recomputed by refresh() and would otherwise dominate the aggregate with
-their 1/lambda scale — and reports per family.
+A first version of this measurement was invalidated by its own numbers: a "noise floor" of 4.6e-7
+between two re-warms on *different* batches is impossible unless the state is dominated by
+something batch-independent. It is -- the running average is seeded with the **identity** on step
+0, and that seed decays as ``0.08^k`` while carrying norm ``sqrt(d)``, against an accumulated state
+of norm about ``0.0087 ||X||``. At three factor updates the seed still dominates. That first run
+had four updates; a real mid-training checkpoint has fifty-two.
 
-  S_real  the state a real run holds at theta*
-  S_f1    re-warm from theta*, theta FROZEN (lr=0), fresh optimizer, batch order A
-  S_f2    same, batch order B      -> ||S_f1 - S_f2|| is the estimator's own NOISE FLOOR
-  S_m     re-warm, theta MOVING    -> the staleness term
+So this version trains 2 000 steps (twenty updates, seed residue about zero) before snapshotting,
+and sweeps the re-warm length inside **one** re-warm run per variant, snapshotting in passing. It
+compares the *primary* running-average state only -- the derived caches (inverses, eigenbases) are
+recomputed on refresh and would otherwise dominate the aggregate with their one-over-damping
+scale -- and reports per family::
 
-Result, 2026-09-11 (the table recorded in ``plan_exp_draft.md`` §3.2): at k = 3 updates the four
-Kronecker modes are 12-87 % wrong on the *applied preconditioner* and tkfac/tekfac's raw state is
-off by six orders of magnitude; at k = 10 every mode sits within 1.3-4.5x of its own batch-draw
-noise floor. The cause is not the EMA forgetting its history (0.08^k) but the identity seed acting
-as a **spurious extra damping of 0.08^k on top of lambda** — so the rule is ``0.08^k << lambda``,
-not ``0.08^k << 1``. See ``identity_seed_residual.py`` for the seed's own decay.
+    S_real  the state a real run holds at the snapshot weights
+    S_f1    re-warm from those weights, weights FROZEN, fresh optimizer, batch order A
+    S_f2    same, batch order B      -> ||S_f1 - S_f2|| is the estimator's own NOISE FLOOR
+    S_m     re-warm with the weights MOVING -> the staleness term
+
+Measured: at three factor updates the four Kronecker modes are 12 % to 87 % wrong on the *applied
+preconditioner*, and the two trace-restricted modes' raw state is off by six orders of magnitude;
+at ten updates every mode sits within 1.3 to 4.5 times its own batch-draw noise floor. The cause is
+not the running average forgetting its history but the identity seed acting as a spurious extra
+damping of ``0.08^k`` on top of ``lambda`` -- so the rule is ``0.08^k << lambda``, not
+``0.08^k << 1``. See ``identity_seed_residual.py`` for the seed's own decay.
+
+Configuration: module-level constants only (``TRAIN_STEPS = 2000``, ``REWARM_AT = (300, 600,
+1000)``, ``TCOV = 100``, ``LR = 1e-3``, ``BATCH = 128``, all five modes, ``cnn_gn_cifar``, CPU). No
+environment variables.
+
+Output: a table on standard output. Nothing is written to disk.
+
+Needs the dataset staged under ``benchmarks/data``.
 """
 import copy
 import sys

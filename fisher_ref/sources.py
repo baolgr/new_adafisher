@@ -1,29 +1,51 @@
-"""The backprop vectors a reference is built from: the *source* axis of the campaign's factorial
-design (``docs/reports/plan_exp_draft.md`` §3.1, §4; lot 1 of its §9).
+"""The backprop vectors a curvature reference is built from: the *source* axis of the campaign.
 
 A reference curvature matrix is ``F = U^T U`` where each row of ``U`` is the parameter gradient of
 one scalar ``<v, f(x_n)>``. This module produces the ``v``: the columns of a **root** of the
-output-space matrix ``Lambda_n``, per source.
+output-space matrix ``Lambda_n = d^2 l_n / d f_n^2``, one set of columns per source.
 
-* ``type2``   -- the closed-form root of the true Fisher's output factor. For softmax + cross
-  entropy ``Lambda_n = diag(p_n) - p_n p_n^T`` and ``S_n[:, c] = sqrt(p_c) (e_c - p_n)`` satisfies
-  ``S_n S_n^T = Lambda_n`` exactly (``papers/kfac_from_scratch_2507.05127.pdf``, cheat sheet §6).
-  It gives ``C`` columns for a rank of ``C - 1``: the null vector is ``sqrt(p_n)``.
-* ``mc``      -- ``K`` samples ``y~ ~ p_n``, column ``K^{-1/2}(p_n - e_{y~})``. The ``K^{-1/2}`` is
-  that paper's own errata item; without it K-FAC-MC does not converge to the GGN.
-* ``empirical`` -- the single vector ``p_n - e_{y_n}``, i.e. ``d l_n / d f_n``, giving ``E_hat``.
+* ``type2``  the closed-form root of the true Fisher's output factor. For softmax plus cross
+  entropy ``Lambda_n = diag(p_n) - p_n p_n^T``, and ``S_n[:, c] = sqrt(p_c) (e_c - p_n)`` satisfies
+  ``S_n S_n^T = Lambda_n`` exactly (``papers/kfac_from_scratch_2507.05127.pdf``, the test-case
+  section). It gives ``C`` columns for a rank of ``C - 1``: the null vector is ``sqrt(p_n)``.
+* ``mc``  ``K`` labels drawn from ``p_n``, column ``j`` being ``K^{-1/2} (p_n - e_{y_j})``. The
+  ``K^{-1/2}`` is that paper's own errata item; without it a Monte-Carlo K-FAC does not converge to
+  the generalised Gauss-Newton matrix. The estimator is unbiased: averaging over draws gives
+  ``diag(p) - p p^T``.
+* ``empirical``  the single vector ``p_n - e_{y_n}``, i.e. ``d l_n / d f_n`` at the true label,
+  which gives the empirical Fisher rather than the Fisher.
 
 Two conventions this module fixes, because getting either wrong is invisible until a metric is
-compared across models:
+compared across models.
 
-1. **``l_n`` is the per-sample loss, never the batch mean.** Every bench's ``loss_fn`` is a
-   ``reduction="mean"`` criterion, so ``bench.loss_fn`` is *not* the object differentiated here and
-   is deliberately never called. For ``nn.MSELoss`` the per-sample loss consistent with that mean is
-   ``l_n = (1/D) sum_d (f_d - y_d)^2``, hence ``Lambda_n = (2/D) I`` -- the loss's own ``1/D`` is
-   inside ``Lambda``. ``F = GGN`` there by the canonical link (Martens arXiv:1412.1193 §9).
-2. **The columns are unscaled.** ``plan_exp_draft.md`` §2.1 puts an ``N^{-1/2}`` on every row of
-   ``U``; it is applied by the driver, which is the only place that knows the *total* probe count,
-   not by a function that sees one micro-batch.
+1. **``l_n`` is the per-sample loss, never the batch mean.** Every benchmark's ``loss_fn`` is a
+   ``reduction="mean"`` criterion, so it is *not* the object differentiated here and is
+   deliberately never called. For ``nn.MSELoss`` the per-sample loss consistent with that mean is
+   ``l_n = (1/D) sum_d (f_d - y_d)^2``, hence ``Lambda_n = (2/D) I``: the loss's own ``1/D`` is
+   inside ``Lambda``. There ``F`` is the generalised Gauss-Newton matrix by the canonical link
+   (Martens, arXiv:1412.1193 §9).
+2. **The columns are unscaled.** The ``N^{-1/2}`` that turns the stacked rows into an average is
+   applied by the driver, which is the only place that knows the *total* probe count; a function
+   that sees one micro-batch cannot apply it.
+
+Public API
+----------
+
+:data:`SOURCES`, :data:`LOSSES`  the three sources and the two loss kinds.
+
+:class:`OutputRoot`  the ``(N, R, d_out)`` columns, with ``column(i)`` returning the ``(N, d_out)``
+backprop vector of column ``i``.
+
+:func:`output_root`  build the root columns for one batch. ``generator`` seeds the Monte-Carlo
+draws, so a caller sweeping seeds gets reproducible draws without touching the global RNG. **Two
+traversals that must see the same draws have to be handed the same generator state**, not just the
+same generator object, because a generator advances as it is used.
+
+:func:`loss_kind`  reads the loss kind off a benchmark's criterion rather than from a second
+model-to-loss table that could drift from the harness's own.
+
+Dependencies: none from the rest of ``fisher_ref``. :mod:`fisher_ref.capture` imports this module
+lazily, to avoid an import cycle.
 """
 
 from __future__ import annotations

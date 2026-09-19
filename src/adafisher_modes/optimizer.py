@@ -1,59 +1,78 @@
-"""AdaFisher with an interchangeable Fisher approximation mode.
+"""``AdaFisherMulti``: AdaFisher with a selectable Fisher approximation mode.
 
-Ports ``AdaFisherBackbone`` / ``AdaFisher``
-(``reference_repos/FisherAdapTune/scripts/adafisher.py:157-307``) almost verbatim: hook
-registration, the ``_check_dim`` module/parameter pairing, and the index-bookkeeping ``step()``
-loop are kept structurally unchanged (that bookkeeping is brittle and out of scope to rewrite, see
-docs/reports/plan.md §2.1). Three deltas, all consequences of moving the second-moment construction
-behind ``FisherApproximation`` (docs/reports/plan_lot1.md §0):
+This is a port of ``AdaFisherBackbone`` / ``AdaFisher`` from
+``reference_repos/FisherAdapTune/scripts/adafisher.py``, with the construction of the second moment
+moved behind the :class:`~adafisher_modes.approximations.base.FisherApproximation` interface so that
+it can be swapped for K-FAC, EKFAC, TKFAC or TEKFAC. The optimizer itself is Adam's update with the
+square root removed: momentum on the gradient, Adam's bias correction, and a division by a
+Fisher estimate instead of by a running average of squared gradients (AdaFisher Table 1,
+``adafisher_2405.16397.pdf``).
 
-1. The forward/backward hooks delegate to ``approx.update_input_factor`` /
-   ``update_output_factor`` instead of computing the EMA inline.
-2. ``_step`` becomes ``_step_module``: weight and (if present) bias are preconditioned together in
-   one ``approx.precondition`` call, so an expensive mode only pays its dominant cost once per
-   module, not once per parameter.
-3. ``precondition`` receives the raw ``exp_avg``; bias correction is folded into the optimizer's
-   own step size (``alpha=-lr/bias_correction``), mirroring the original's ``step_size =
-   lr/bias_correction`` (adafisher.py:272) as closely as possible.
+**What happens in one step.** Forward and backward hooks on every supported layer hand the raw input
+and the raw output gradient to the active mode, but only on steps that are multiples of ``TCov``
+(100 by default), so the curvature comes from one minibatch in every hundred. ``step()`` then walks
+this optimizer's parameters, and for each hooked module calls ``refresh`` once (to redo any
+amortised inverse or eigendecomposition) and ``precondition`` once, with the weight and bias
+directions together. A parameter belonging to no hooked module -- a ViT's class token, a positional
+embedding -- falls through to a plain momentum step, which is what dividing by an identity Fisher
+would give.
 
-Lot 8 (docs/reports/plan_lot8.md §0.3, §0.4, §0.6) makes three changes here, the first since lot 1:
+Supported layer types are ``Linear``, ``Conv2d``, ``BatchNorm2d`` and ``LayerNorm``. A normalisation
+layer with ``affine=False`` has no weight to precondition and is skipped.
 
-4. The index-bookkeeping parameter/module pairing is replaced by an explicit, identity-keyed map
-   built once in ``_prepare_model``. The ported loop ran exactly ``len(self.modules)`` iterations
-   and consumed one iteration per *unpaired* parameter, so a model with ``k`` raw ``Parameter``s
-   outside the four hooked module types (a ViT's ``cls_token``/``pos_embed``) silently never
-   stepped its last ``k`` modules — measured on ViT-S/4: the final ``LayerNorm`` and the whole
-   classification head were never updated (plan_lot8.md §0.3). Identity pairing cannot mis-pair,
-   and reproduces the old loop exactly on every net where the old loop was correct.
-5. ``fisher_batch_samples`` optionally restricts the *curvature statistic* to the first ``k``
-   examples of each batch (plan_lot8.md §0.4): dimension 0 is the example axis for all four
-   supported layer types, so slicing it identically in both hooks keeps ``h``/``delta`` row-paired
-   by construction, which ``ekfac``/``tekfac``'s intra-batch estimators require. Default ``None``
-   = unchanged behaviour.
-6. ``decoupled_weight_decay`` implements the official ``AdaFisherW`` rule
-   (``reference_repos/AdaFisher/optimizers/AdaFisher.py:685``, ``_step``:
-   ``param -= lr * (exp_avg / bc / F_tilde + weight_decay * param)``), needed for a like-for-like
-   comparison against ``AdamW`` on a ViT (plan_lot8.md §0.6). Default ``False`` = unchanged
-   behaviour.
+**Three differences from the reference that are on by default.**
 
-Lot-1 scope: no ``dist_training`` support yet (the original's distributed all-reduce over H, S,
-adafisher.py:210-214, has no equivalent here) — silently accepting and ignoring that flag would be
-worse than omitting it, so it is simply not part of this constructor yet.
+1. *The update is unfused.* ``precondition`` returns a direction and the optimizer applies it with
+   ``param.add_(direction, alpha=-lr/bias_correction)``. The reference uses the fused ``addcdiv_``,
+   which is an element-wise division and therefore assumes the preconditioner is diagonal in the
+   parameter basis -- true only for ``diag``. The two paths differ by a few units in the last place
+   per step on a ``Linear``; with ``BatchNorm2d`` in the network that gap is amplified to about
+   1e-4 over six steps by the running statistics feeding back into the forward pass.
+2. *Parameters are paired to modules by identity*, through a ``id(param) -> module`` map built once.
+   **This is a bug fix, not a preference.** The reference walks both lists by position and runs
+   exactly ``len(self.modules)`` iterations, spending one on each *unpaired* parameter, so a network
+   with ``k`` parameters outside the four hooked types silently never steps its last ``k`` modules.
+   Measured on a 32 x 32 ViT-S/4: the class token and the positional embedding cost the final
+   ``LayerNorm`` and the whole classification head, which were never updated, with finite gradients
+   and a still-falling loss. Do not restore the positional loop.
+3. *``diag`` applies its min-max normalisation before the running average*, following the official
+   AdaFisher repository rather than Algorithm 1 of the paper. See
+   :mod:`adafisher_modes.approximations.diag`.
 
-``gamma`` (``docs/reports/audit_step.md`` §4, §4.7): the published Eq. (3) time-average is
-``H^(t) = gamma*H^(t-1) + (1-gamma)*H_new``, one scalar with coefficients summing to 1. Both
-reference repositories instead compute ``0.08*old + 0.008*new`` at their own tuned
-``gammas=(0.92, 0.008)`` default — a discrepancy with the paper, not a porting bug (§4.2-§4.3).
-Passing ``gamma`` here reproduces Eq. (3) exactly through the existing ``update_running_avg(new,
-current, gammas)`` machinery unchanged: that function computes ``(1-gammas[0])*current +
-gammas[1]*new``, so ``gammas=(1-gamma, 1-gamma)`` collapses it to Eq. (3)'s single-coefficient
-form. ``gamma=None`` (default) leaves ``gammas`` exactly as passed — bit-identical to today's
-behaviour. When both are given, ``gamma`` wins.
+**Knobs that are off by default.** Each reproduces today's exact behaviour when left alone.
 
-``minmax_after_average`` (``diag`` mode only, ``docs/reports/audit_step.md`` §4.4, §4.7): Algorithm
-1 applies Eq. (4)'s min-max normalisation after the EMA (its line 4 then line 5); the official code
--- and this port's default -- does it before. Passed straight through to ``DiagApproximation``; see
-its own docstring for why the two orders are not equivalent.
+``gamma``
+    Overrides ``gammas`` with ``(1 - gamma, 1 - gamma)``, which turns the running average into a
+    convex one: ``gamma * old + (1 - gamma) * new``. The shipped ``gammas = (0.92, 0.008)`` has
+    coefficients summing to 0.088, so the stored curvature settles at about 1/115 of what it
+    estimates. Note that eq. (3) of the paper, read literally, puts ``gamma`` on the *new* term
+    instead; both reference implementations put it on the history term, which is what this knob
+    follows.
+``fisher_batch_samples``
+    Estimate the factors from the first ``k`` examples of each batch only. Dimension 0 is the
+    example axis for all four supported layer types, so slicing it identically in both hooks keeps
+    the input and gradient rows paired, which the intra-batch estimators of ``ekfac`` and ``tekfac``
+    require. It changes the *estimator*, not the gradient that is applied. It exists for memory:
+    every forward hook fires before any backward hook, so ``ekfac`` and ``tekfac`` hold every
+    layer's cached input batch at once -- measured at 3.37 GB across ResNet-50 at batch 128, or
+    1.51 GB with SUA on.
+``decoupled_weight_decay``
+    The official ``AdaFisherW`` rule: decay the parameter directly instead of adding
+    ``weight_decay * param`` to the gradient. Needed to compare like-for-like against ``AdamW``.
+``ema_seed_first``
+    Start each running average from its first observation instead of from an identity, so no residue
+    of that identity is left in the state.
+``minmax_after_average``
+    ``diag`` only; moves the min-max to where Algorithm 1 puts it.
+``eig_before_rescale``
+    ``ekfac`` and ``tekfac`` only. Rebuild the eigenbasis inside the backward hook, before the
+    gradient is projected into it, so that the rescaling is measured in the basis ``precondition``
+    then uses. By default the eigenbasis is replaced afterwards, in ``step()``, which leaves the
+    two out of step -- the order both source papers' own algorithms and
+    ``reference_repos/EKFAC-pytorch/ekfac.py`` put the other way round.
+
+Distributed training is not supported: the reference's all-reduce over the two factors has no
+equivalent here, and silently accepting the flag would be worse than omitting it.
 """
 
 from __future__ import annotations
@@ -61,7 +80,7 @@ from __future__ import annotations
 from typing import Callable, Dict, List, Optional, Sequence
 
 from torch import Tensor, is_grad_enabled, no_grad, zeros_like
-from torch.nn import Module, Parameter
+from torch.nn import BatchNorm2d, LayerNorm, Module, Parameter
 from torch.optim import Optimizer
 
 from adafisher_modes.approximations import MODES
@@ -72,7 +91,11 @@ SUPPORTED_MODULES = ("Linear", "Conv2d", "BatchNorm2d", "LayerNorm")
 class AdaFisherMulti(Optimizer):
     """AdaFisher (Martins Gomes et al., ICLR 2025) with a selectable Fisher approximation mode.
 
-    Only ``fisher_mode="diag"`` (AdaFisher's own Prop. 3.2 / Eq. 4) is implemented so far.
+    ``fisher_mode`` is one of ``"diag"`` (AdaFisher's own Prop. 3.2 / Eq. 4), ``"kfac"``,
+    ``"ekfac"``, ``"tkfac"`` or ``"tekfac"``. Extra keyword arguments are forwarded to the mode:
+    ``T_inv`` for ``kfac``/``tkfac``, ``T_eig`` for ``ekfac``/``tekfac``, ``T_re`` for ``tekfac``,
+    ``pi`` for ``kfac``, ``conv_sua`` for all four. Passing one that the selected mode does not
+    take is a ``TypeError`` rather than a silent no-op.
     """
 
     def __init__(
@@ -90,6 +113,8 @@ class AdaFisherMulti(Optimizer):
         minmax_after_average: bool = False,
         fisher_batch_samples: Optional[int] = None,
         decoupled_weight_decay: bool = False,
+        ema_seed_first: bool = False,
+        eig_before_rescale: bool = False,
         **mode_kwargs,
     ) -> None:
         if fisher_mode not in MODES:
@@ -112,7 +137,19 @@ class AdaFisherMulti(Optimizer):
                 "minmax_after_average": minmax_after_average,
                 **mode_kwargs,
             }
-        self.approx = MODES[fisher_mode](Lambda=Lambda, gammas=gammas, **mode_kwargs)
+        # ema_seed_first applies to all five modes and is inert by default: it starts each running
+        # average from its first observation instead of from an identity, so no residue of that
+        # identity is ever left in the state.
+        if fisher_mode in ("ekfac", "tekfac"):
+            mode_kwargs = {"eig_before_rescale": eig_before_rescale, **mode_kwargs}
+        elif eig_before_rescale:
+            raise ValueError(
+                f"eig_before_rescale only applies to the two modes that have an eigenbasis to "
+                f"order against a rescaling, 'ekfac' and 'tekfac'; got fisher_mode={fisher_mode!r}."
+            )
+        self.approx = MODES[fisher_mode](
+            Lambda=Lambda, gammas=gammas, ema_seed_first=ema_seed_first, **mode_kwargs
+        )
         self._prepare_model()
         super().__init__(model.parameters(), defaults)
 
@@ -121,11 +158,11 @@ class AdaFisherMulti(Optimizer):
     # ------------------------------------------------------------------
 
     def _fisher_slice(self, tensor: Tensor) -> Tensor:
-        """First ``fisher_batch_samples`` examples of ``tensor`` (plan_lot8.md §0.4), or ``tensor``
-        itself when the knob is unset. Dimension 0 is the example axis for all four supported layer
-        types, so applying this identically in both hooks selects the same examples in the same
-        order on the ``h`` and ``delta`` sides — which is what ``ekfac``/``tekfac``'s intra-batch
-        estimators need.
+        """First ``fisher_batch_samples`` examples of ``tensor``, or ``tensor`` itself when the
+        knob is unset. Dimension 0 is the example axis for all four supported layer types, so
+        applying this identically in both hooks selects the same examples in the same order on the
+        input and gradient sides -- which is what ``ekfac`` and ``tekfac``'s intra-batch estimators
+        need.
         """
         if self.fisher_batch_samples is None or tensor.size(0) <= self.fisher_batch_samples:
             return tensor
@@ -149,6 +186,18 @@ class AdaFisherMulti(Optimizer):
                 # e.g. BatchNorm2d(affine=False) / LayerNorm(elementwise_affine=False): nothing to
                 # precondition, and no weight to pair a parameter to.
                 continue
+            if isinstance(module, (BatchNorm2d, LayerNorm)) and module.bias is None:
+                # A normalisation layer's input factor is always two columns wide, one for the
+                # scale and one for the shift, in every mode. LayerNorm(d, bias=False) has the
+                # scale and not the shift, so that factor describes a parameter the layer does not
+                # have -- which used to surface only as a shape error inside the mode, several
+                # calls away from its cause.
+                raise NotImplementedError(
+                    f"{module} has a scale parameter but no shift parameter, which this optimizer "
+                    f"cannot precondition: the curvature factor of a normalisation layer covers "
+                    f"the pair (scale, shift) jointly, in all five modes. Use the layer's default "
+                    f"bias, or elementwise_affine=False, which leaves it with no parameters at all."
+                )
             self.modules.append(module)
             self._owner[id(module.weight)] = module
             if module.bias is not None:
@@ -197,7 +246,7 @@ class AdaFisherMulti(Optimizer):
         self, hparams: Dict, param: Parameter, direction: Tensor, bias_correction: float
     ) -> None:
         """``param -= lr * direction / bias_correction``, preceded by the decoupled decay factor
-        when ``decoupled_weight_decay`` is on (plan_lot8.md §0.6). ``p*(1 - lr*wd) - lr*d/bc`` is
+        when ``decoupled_weight_decay`` is on. ``p*(1 - lr*wd) - lr*d/bc`` is
         algebraically the official ``AdaFisherW._step`` expression
         ``p - lr*(d/bc + wd*p)``; with the flag off this is bit-identical to the pre-lot-8
         ``param.add_(direction, alpha=-lr/bc)``.
@@ -221,16 +270,22 @@ class AdaFisherMulti(Optimizer):
         (weight and bias together, ``base.py``'s point 2) and falling back to plain
         momentum-SGD for every parameter that belongs to no hooked module.
 
-        Replaces the reference's index-bookkeeping loop (adafisher.py:275-307), which paired
+        Replaces the reference's index-bookkeeping loop (``adafisher.py:275-307``), which paired
         parameters to modules positionally and by shape and silently skipped its last ``k`` modules
-        on any model carrying ``k`` unpaired parameters — see this module's header and
-        docs/reports/plan_lot8.md §0.3.
+        on any model carrying ``k`` unpaired parameters. See this module's header.
         """
         if closure is not None:
             raise NotImplementedError("Closure not supported.")
+        # One set for the whole walk, not one per parameter group. A module is preconditioned once,
+        # with its weight and bias together, so "already stepped" is a property of the module and
+        # not of the group the parameter happens to sit in. Built per group, the standard
+        # decay/no-decay split stepped every hooked module twice -- once from its weight's group
+        # and once from its bias's -- moving both parameters twice as far as intended. Measured on
+        # a two-layer net with that split: the parameters moved exactly 2.0000 times as far as
+        # under a single group.
+        stepped: set[int] = set()
         for group in self.param_groups:
             hparams = {k: group[k] for k in ("lr", "beta", "weight_decay")}
-            stepped: set[int] = set()
             for param in group["params"]:
                 if param.grad is None:
                     continue
@@ -245,11 +300,19 @@ class AdaFisherMulti(Optimizer):
                     self._step_fallback(hparams, param)
                     continue
                 stepped.add(id(module))
-                bias_param = (
-                    module.bias
-                    if module.bias is not None and module.bias.grad is not None
-                    else None
-                )
+                if module.bias is not None and module.bias.grad is None:
+                    # The input factor of a module with a bias carries a constant-one column for
+                    # it, so the direction handed to precondition() must carry a bias column too.
+                    # Dropping it silently used to fail inside the mode: an assertion with no
+                    # message in diag, a matrix-shape error in the four Kronecker modes.
+                    raise RuntimeError(
+                        f"{module} has a weight gradient but no bias gradient. A module cannot be "
+                        f"preconditioned with only part of its direction: its Fisher factor treats "
+                        f"the bias as one more input coordinate. The usual cause is "
+                        f"bias.requires_grad = False on a layer whose weight is still trained. "
+                        f"Freeze the whole module (weight and bias), or train the whole module."
+                    )
+                bias_param = module.bias
                 self.approx.refresh(module, self.steps)
                 self._step_module(hparams, module, module.weight, bias_param)
         self.steps += 1

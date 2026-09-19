@@ -1,27 +1,54 @@
-"""Regime A: the dense, exact reference ``F = U^T U`` in fp64 (``plan_exp_draft.md`` §2.1-§2.2,
-lot 1 of its §9).
+"""The dense, exact curvature reference ``F = U^T U`` in float64.
 
 ``U`` stacks one row per (probe ``n``, root column ``c``), the row being the parameter gradient of
-the scalar ``<Lambda_n^{1/2} e_c, f(x_n)>``, so ``F = U^T U`` holds exactly with a ``1/N`` in front
-(applied once at the end, not as an ``N^{-1/2}`` per row: one division instead of ``m`` multiplies).
-The same function at ``source="empirical"`` gives ``E_hat``, and ``B_l`` is a **slice** of the
-result — there is no second construction to be wrong.
+the scalar ``<Lambda_n^{1/2} e_c, f(x_n)>``. So ``F = U^T U`` holds exactly with a ``1/N`` in
+front, applied once at the end rather than as an ``N^{-1/2}`` per row: one division instead of
+``m`` multiplies. The same function with ``source="empirical"`` gives the empirical Fisher, and a
+single layer's block is a **slice** of the result -- there is no second construction to be wrong.
 
-Two decisions, both load-bearing for every later lot.
+Two decisions, both load-bearing for everything downstream.
 
 **The column layout is ``model.named_parameters()`` order**, each parameter contributing its own
-``numel`` in row-major (``rvec``) order — *not* the bias-augmented per-module ``rvec([W | b])``
-layout of ``adafisher_modes``. Three reasons, in increasing order of importance: a parameter-space
-vector (a gradient, a ``theta``, a random direction) needs no conversion, so the T1 oracle compares
-like with like; ``weight`` is registered before ``bias`` in every relevant module, so a module's
-block stays contiguous and ``B_l`` is a slice; and, decisively, ``F`` must span **every** parameter,
-including the ones that have no ``[W | b]`` slot at all (``pos_embed``, ``cls_token``, a
-``GroupNorm`` affine). Lot 2 adds the small permutation into ``rvec([W | b])`` when it has a K-FAC
-to compare against.
+``numel`` in row-major order -- *not* the bias-augmented per-module ``rvec([W | b])`` layout the
+Kronecker formulas are written in. Three reasons, in increasing order of importance: a
+parameter-space vector (a gradient, a set of weights, a random direction) needs no conversion, so
+an independent oracle compares like with like; ``weight`` is registered before ``bias`` in every
+relevant module, so a module's block stays contiguous and is a slice; and, decisively, ``F`` must
+span **every** parameter, including the ones that have no ``[W | b]`` slot at all (``pos_embed``,
+``cls_token``, a ``GroupNorm`` affine). :meth:`ParamLayout.augmented_permutation` converts one
+module's block into ``rvec([W | b])`` order when a Kronecker structure has to be compared against
+it.
 
 **``U`` is never materialised.** ``F`` is accumulated as ``F += U_blk^T U_blk`` over probe
-micro-batches; only ``U_blk`` (``batch_size x P``, 54 MB at ``P = 26 634``) and ``F`` itself
-(5.68 GB for A1) are resident. `plan_exp_draft.md` §2.2 sizes the rest.
+micro-batches with ``addmm_``, so only one ``batch_size x P`` buffer and ``F`` itself are resident.
+:func:`symmetrize_` then averages the two triangles block by block, because the obvious
+``0.5 * (M + M.T)`` allocates two more ``P x P`` tensors.
+
+Public API
+----------
+
+:class:`ParamLayout`  which columns belong to which parameter (``block_slice``,
+``augmented_permutation``), plus :func:`to_augmented` which applies that permutation to a block.
+
+:class:`DenseReference`  the matrix with its provenance: source, loss, probe count, probe digest,
+trace and Frobenius norm. Both norms are recorded, never a bare ratio, so any later comparison can
+be re-normalised after the fact.
+
+:class:`DenseAccumulator`  the row-filling loop, shared with the fold engine. Its matrix is the
+**raw sum**: dividing by the probe count is the caller's job, because a fold of a larger probe set
+is divided by the whole set's count and not by its own.
+
+:func:`build_dense_reference`  the driver.
+
+:func:`check_rows_against_autograd`  two independent checks of one traversal step's rows. The **sum
+rule** compares their sum against one plain backward through the unmodified model, which catches a
+wrong tap, a wrong layout, a missing position, a patch-extraction error or a scale error. The
+**single-example** check compares the first row against a one-example forward, which catches what
+the sum rule cannot: a statistic that mixes examples.
+
+:func:`symmetrize_`, :func:`reference_parameter_names`  helpers.
+
+Dependencies: :mod:`fisher_ref.capture` and :mod:`fisher_ref.conventions`.
 """
 
 from __future__ import annotations
@@ -34,13 +61,15 @@ import torch.nn as nn
 from torch import Tensor
 
 from ..capture import (
+    ProbeColumn,
     capturable_modules,
     coverage,
     iter_probe_columns,
     per_sample_gradients,
     prepare_model,
+    raw_parameter_names,
 )
-from ..conventions import REFERENCE_DTYPE, run_metadata
+from ..conventions import REFERENCE_DTYPE, reference_mode, run_metadata
 
 
 @dataclass(frozen=True)
@@ -81,6 +110,9 @@ class ParamLayout:
         prefix = f"{module_name}." if module_name else ""
         owned = [name for name in self.names
                  if name.startswith(prefix) and "." not in name[len(prefix):]]
+        if not owned and module_name in self.slices:
+            # A raw parameter (``pos_embed``) is its own block (plan_exp_lot3.md §0.6).
+            return self.slices[module_name]
         if not owned:
             raise KeyError(f"no parameter of module {module_name!r} is in this layout")
         start = min(self.slices[name].start for name in owned)
@@ -245,6 +277,130 @@ def _selected_modules(model: nn.Module,
     return {name: available[name] for name in modules}
 
 
+class RowCheckError(AssertionError):
+    """The per-sample rows of ``U`` disagree with an independent autograd computation."""
+
+
+def check_rows_against_autograd(model: nn.Module, step: ProbeColumn, rows: Tensor,
+                                layout: ParamLayout, *, rtol: float = 1e-10) -> Dict[str, float]:
+    """Two independent checks of one ``(micro-batch, column)``'s rows (``plan_exp_lot3.md`` §0.6).
+
+    * **Sum rule**: ``sum_n rows_n`` is the parameter gradient of ``sum_n <v_n, f(x_n)>``, computed
+      here by one plain backward through the *unmodified* model (no capture hook, no substituted
+      raw parameter). Catches a wrong tap, a wrong layout, a missing position, a patch-extraction
+      error, a scale error.
+    * **Single example**: ``rows_0`` is the gradient of ``<v_0, f(x_0)>`` from a one-example forward.
+      Catches what the sum rule cannot — a per-sample statistic that mixes examples, e.g. a raw
+      parameter reduced over its batch copies, or a normalisation still using batch statistics.
+
+    Runs under ``capturer.paused()``, so the traversal's own capture is not overwritten.
+    """
+    if step.inputs is None or step.grad_output is None:
+        raise ValueError("the step carries no inputs/grad_output; it was not produced by "
+                         "iter_probe_columns")
+    parameters = dict(model.named_parameters())
+    wanted = [parameters[name] for name in layout.names]
+    batch = step.inputs.detach()
+    column = step.grad_output.detach()
+
+    def flat_gradient(inputs: Tensor, vector: Tensor) -> Tensor:
+        with reference_mode(model):
+            outputs = model(inputs)
+        grads = torch.autograd.grad(outputs, wanted, grad_outputs=vector, allow_unused=True)
+        return torch.cat([(torch.zeros_like(p) if g is None else g).reshape(-1)
+                          for p, g in zip(wanted, grads)])
+
+    with step.capturer.paused(), torch.enable_grad():
+        total = flat_gradient(batch, column)
+        single = flat_gradient(batch[:1], column[:1])
+
+    def relative(got: Tensor, expected: Tensor) -> float:
+        scale = max(float(expected.norm()), float(got.norm()), 1e-300)
+        return float((got - expected).norm()) / scale
+
+    report = {"sum_rule": relative(rows.sum(dim=0), total),
+              "single_example": relative(rows[0], single)}
+    for name, value in report.items():
+        if not value <= rtol:
+            raise RowCheckError(
+                f"per-sample rows fail the {name.replace('_', ' ')} check: relative gap "
+                f"{value:.3e} > {rtol:.1e} over {len(layout.names)} parameter(s). A capture path is "
+                "wrong for this model (plan_exp_lot3.md §0.6) — every reference built from these "
+                "rows would be silently wrong."
+            )
+    return report
+
+
+class DenseAccumulator:
+    """``sum U_blk^T U_blk`` over the steps it consumes — the row-filling loop of
+    :func:`build_dense_reference`, shared with the fold engine (``plan_exp_lot3.md`` §0.9).
+
+    The matrix is the **raw sum**: dividing by the probe count is the caller's job, because a fold
+    of a larger probe set is divided by the whole set's count, not its own.
+    """
+
+    def __init__(self, layout: ParamLayout, *, dtype: torch.dtype, device: Any) -> None:
+        self.layout = layout
+        self.dtype = dtype
+        self.device = device
+        self.matrix = torch.zeros(layout.P, layout.P, dtype=dtype, device=device)
+        self.n_probes = 0
+        self.n_columns = 0
+        self.check_report: Optional[Dict[str, float]] = None
+        self._rows: Optional[Tensor] = None
+
+    def consume(self, step: ProbeColumn, *, model: Optional[nn.Module] = None,
+                check: bool = False) -> None:
+        self.n_columns = step.n_columns
+        if step.column == 0:
+            self.n_probes += step.n_examples
+        if self._rows is None or self._rows.shape[0] != step.n_examples:
+            self._rows = torch.empty(step.n_examples, self.layout.P, dtype=self.dtype,
+                                     device=self.device)
+        rows = self._rows
+        written = []
+        for layer in step.capturer:
+            for p_name, gradient in per_sample_gradients(layer).items():
+                full = f"{layer.name}.{p_name}" if layer.name else p_name
+                if full not in self.layout.slices:
+                    continue
+                rows[:, self.layout.slices[full]] = gradient.reshape(step.n_examples, -1)
+                written.append(full)
+        for name, gradient in step.raw_grads.items():
+            rows[:, self.layout.slices[name]] = gradient.reshape(step.n_examples, -1)
+            written.append(name)
+        if set(written) != set(self.layout.names):
+            raise RuntimeError(
+                "the capture did not fill every column of U — missing "
+                f"{sorted(set(self.layout.names) - set(written))}, unexpected "
+                f"{sorted(set(written) - set(self.layout.names))}"
+            )
+        if check and self.check_report is None:
+            if model is None:
+                raise ValueError("check=True needs the model the traversal runs on")
+            self.check_report = check_rows_against_autograd(model, step, rows, self.layout)
+        self.matrix.addmm_(rows.T, rows)
+
+    def offload(self) -> Tensor:
+        """The raw sum as a **host copy**, and the device buffer zeroed for the next fold.
+
+        ``copy=True`` is not optional: on a CPU run ``.to("cpu")`` returns the *same* tensor, so the
+        ``zero_()`` below would erase the fold just stored — correct on the cluster's GPU, silently
+        all-zero in every local test (``plan_exp_lot3.md`` §5).
+        """
+        host = self.matrix.detach().to("cpu", copy=True)
+        self.matrix.zero_()
+        return host
+
+
+def reference_parameter_names(model: nn.Module, selected: Mapping[str, nn.Module],
+                              raw_parameters: Sequence[str] = ()) -> List[str]:
+    names = [f"{name}.{p_name}" if name else p_name
+             for name, module in selected.items()
+             for p_name, _ in module.named_parameters(recurse=False)]
+    return names + list(raw_parameters)
+
+
 def build_dense_reference(
     model: nn.Module,
     inputs: Tensor,
@@ -260,6 +416,8 @@ def build_dense_reference(
     modules: Optional[Sequence[str]] = None,
     probe_digest: Optional[str] = None,
     check_independence: bool = True,
+    raw_parameters: Optional[Sequence[str]] = None,
+    check_rows: bool = False,
 ) -> DenseReference:
     """Build ``F`` (``source="type2"``), ``E_hat`` (``source="empirical"``) or the Monte-Carlo
     Fisher (``source="mc"``) over ``inputs``/``targets``, in ``dtype``.
@@ -269,44 +427,45 @@ def build_dense_reference(
     modules' parameters — with ``None``, every parameter must be covered, and an uncovered one is
     an error rather than a silent block of zeros.
 
+    ``raw_parameters`` adds the columns of batch-broadcast raw parameters
+    (:func:`~fisher_ref.capture.raw_parameter_names`; ``"auto"`` is not accepted here — the caller
+    says what it wants). With ``modules=None`` and ``raw_parameters`` covering every uncovered
+    parameter, the reference spans the whole model (``plan_exp_lot3.md`` §0.6).
+
     ``check_independence`` runs :func:`~fisher_ref.conventions.assert_sample_independent` once, on
     the first micro-batch: with a ``BatchNorm`` left in train mode there are no per-sample
     gradients to stack and the whole object is undefined (``plan_exp_draft.md`` §2.5).
+    ``check_rows`` runs :func:`check_rows_against_autograd` on the first step.
     """
     model = prepare_model(model, dtype, device)
-    selected = _selected_modules(model, modules)
-    parameter_names = [f"{name}.{p_name}" if name else p_name
-                       for name, module in selected.items()
-                       for p_name, _ in module.named_parameters(recurse=False)]
-    layout = ParamLayout.of(model, parameter_names)
+    raw = list(raw_parameters or ())
+    if modules is None and raw:
+        _, uncovered = coverage(model)
+        missing = sorted(set(uncovered) - set(raw))
+        if missing:
+            raise NotImplementedError(
+                f"{len(missing)} parameter(s) are neither in a capturable module nor passed as raw "
+                f"parameters: {missing}"
+            )
+        unknown = sorted(set(raw) - set(raw_parameter_names(model)))
+        if unknown:
+            raise ValueError(f"not batch-broadcast raw parameters of this model: {unknown}")
+        selected = capturable_modules(model)
+    else:
+        selected = _selected_modules(model, modules)
+    layout = ParamLayout.of(model, reference_parameter_names(model, selected, raw))
 
-    matrix = torch.zeros(layout.P, layout.P, dtype=dtype, device=device)
+    accumulator = DenseAccumulator(layout, dtype=dtype, device=device)
     n_probes = int(inputs.shape[0])
-    n_columns = 0
-    rows: Optional[Tensor] = None
-
     for step in iter_probe_columns(model, inputs, targets, source=source, modules=selected,
                                    loss=loss, k=k, batch_size=batch_size, dtype=dtype,
                                    device=device, generator=generator,
-                                   check_independence=check_independence):
-        n_columns = step.n_columns
-        if rows is None or rows.shape[0] != step.n_examples:
-            rows = torch.empty(step.n_examples, layout.P, dtype=dtype, device=device)
-        written = []
-        for layer in step.capturer:
-            for p_name, gradient in per_sample_gradients(layer).items():
-                full = f"{layer.name}.{p_name}" if layer.name else p_name
-                rows[:, layout.slices[full]] = gradient.reshape(step.n_examples, -1)
-                written.append(full)
-        if set(written) != set(layout.names):
-            raise RuntimeError(
-                "the capture did not fill every column of U — missing "
-                f"{sorted(set(layout.names) - set(written))}, unexpected "
-                f"{sorted(set(written) - set(layout.names))}"
-            )
-        matrix.addmm_(rows.T, rows)
+                                   check_independence=check_independence, raw_parameters=raw):
+        accumulator.consume(step, model=model, check=check_rows)
 
+    matrix = accumulator.matrix
     matrix /= n_probes
     symmetrize_(matrix)
     return DenseReference(matrix=matrix, layout=layout, source=source, loss=loss,
-                          n_probes=n_probes, n_columns=n_columns, probe_digest=probe_digest)
+                          n_probes=n_probes, n_columns=accumulator.n_columns,
+                          probe_digest=probe_digest)

@@ -1,47 +1,89 @@
-"""Per-layer-type extraction of the diagonal Kronecker-factor statistics H_D, S_D.
+"""Per-layer extraction of the two Kronecker-factor statistics, for every supported layer type.
 
-This is a line-for-line port of ``_ComputeHBarD`` / ``_ComputeSD`` and ``_extract_patches`` from
-``reference_repos/FisherAdapTune/scripts/adafisher.py`` (lines 33-155), kept bit-exact on purpose:
-``tests/test_diag_bitexact.py`` checks ``torch.equal`` against that reference, and any deviation in
-reduction order (e.g. building the full Kronecker factor and slicing its diagonal instead of using
-``einsum`` directly) can change the floating-point result even though it is mathematically identical.
+Every mode in this package is built from the same two statistics of one layer:
 
-Scope note (lot 1): only the diagonal path is implemented. The full (non-diagonal) factors needed by
-K-FAC / EKFAC / TKFAC / TEKFAC are introduced in lot 2, as siblings of ``compute_h_diag`` /
-``compute_s_diag`` that reuse ``extract_patches``. See docs/reports/plan_lot1.md §1.
+* the input factor ``A = E[h_bar h_bar^T]``, where ``h_bar`` is the layer's input with a
+  constant-one column appended when the layer has a bias, so that the bias is one more input
+  coordinate;
+* the output factor ``B = E[delta delta^T]``, where ``delta`` is the gradient arriving at the
+  layer's output.
 
-Lot 2 adds ``augment_linear_input``, ``compute_h_full`` and ``compute_s_full`` for ``Linear`` only —
-the full ``A = E[h_bar h_bar^T]`` / ``B = E[delta delta^T]`` factors K-FAC and EKFAC need. ``Conv2d``,
-``BatchNorm2d`` and ``LayerNorm`` are lots 4-5 (docs/reports/plan_lot2.md §0.1): both functions raise
-``NotImplementedError`` for those types rather than silently falling back to something incorrect.
+The expectation is over examples, and over positions as well wherever a layer has them -- output
+locations for ``Conv2d``, positions for a normalisation layer, tokens for a ``Linear`` applied to a
+sequence. Each ``(example, position)`` pair is treated as one independent sample, which is the same
+reading the diagonal path already relies on implicitly.
 
-Lot 4 adds the ``Conv2d`` branch (``groups=1``, ``dilation=(1,1)`` only — docs/reports/plan_lot4.md
-§0.4), reusing ``extract_patches`` unmodified: every ``(example, output-location)`` pair becomes one
-pooled i.i.d. sample, exactly generalising the diagonal path's own pooling (§0.1). ``augment_input``
-and ``flatten_output_grad`` are new, layer-dispatching public helpers — the raw-batch analogues of
-``compute_h_full``/``compute_s_full`` that ``ekfac``/``tkfac``/``tekfac`` need (they cache the raw
-augmented batch, not just its reduction; see plan_lot2.md §0.3). See plan_lot4.md §0.2 for a scale
-discrepancy found in the existing, *unmodified* ``_h_conv2d`` diagonal path, deliberately not
-reproduced by the new ``compute_h_full`` ``Conv2d`` branch below.
+This module has two families of function.
 
-Lot 5 adds ``BatchNorm2d``/``LayerNorm`` (``normalized_shape`` a 1-tuple only — docs/reports/
-plan_lot5.md §0.4). Proposition 3.1's exact FIM for a normalisation layer is *Hadamard*-, not
-Kronecker-, structured (``FIM_nu = H|_nu (Hadamard) S``, ``FIM_beta = S`` exactly — plan_lot5.md
-§0.1); ``_h_full_norm``/``augment_norm_input`` build a ``2x2`` factor ``A = diag-ish(a_nu, 1)`` (a
-Frobenius-optimal, ``S``-independent scalar surrogate for the exact, full ``H|_nu``, plus a small,
-deliberately-kept, honest ``nu``-``beta`` coupling term — plan_lot5.md §0.2) so that the *same*
-``kron(A, B)`` machinery every other layer type already uses applies with zero changes to any
-``approximations/*.py`` file.
+**Diagonal statistics** (:func:`compute_h_diag`, :func:`compute_s_diag`) are what the ``diag`` mode
+uses, and they are a line-for-line port of ``_ComputeHBarD`` / ``_ComputeSD`` from
+``reference_repos/FisherAdapTune/scripts/adafisher.py``. They are deliberately kept bit-exact: the
+non-regression test compares them with ``torch.equal`` against that reference, and even a
+mathematically identical change of reduction order would break it. They compute the diagonal
+directly with ``einsum``; the full matrix is never formed.
 
-Lot 6 adds the SUA approximation for ``Conv2d`` (``kfac_conv_1602.01407.pdf`` p. 14, "spatially
-uncorrelated activations" — docs/reports/plan_lot6.md §0.1-§0.3): ``augment_conv2d_input_sua``/
-``_h_full_conv2d_sua`` replace the patch-based input factor (``C_in*k_h*k_w[+1]`` wide) by a
-channel-only one (``C_in[+1]`` wide), pooling the *center* offset of every patch ``extract_patches``
-already produces rather than the whole patch — row-aligned with ``flatten_conv2d_output_grad``'s own
-pooling by construction (plan_lot6.md §0.3), for any ``stride``/``padding``. ``compute_h_full``/
-``augment_input`` gain an optional ``sua`` flag, consulted only on their ``Conv2d`` branch; the
-output-factor side (``compute_s_full``/``flatten_output_grad``) is untouched, since SUA only concerns
-the input factor (plan_lot6.md §0.2).
+**Full factors** (:func:`compute_h_full`, :func:`compute_s_full`, and the ``augment_*`` /
+``flatten_*`` helpers) are what the four Kronecker modes use. They do not exist in the original
+AdaFisher code at all, which is the main structural cost of this project. The ``augment_*`` and
+``flatten_*`` helpers are public because ``ekfac``, ``tkfac`` and ``tekfac`` need the raw
+per-example batch, not only its reduction.
+
+Three layer-specific facts are worth knowing before reading any number out of this module.
+
+**A normalisation layer's exact Fisher is not a Kronecker product.** Proposition 3.1 of the
+AdaFisher paper (``adafisher_2405.16397.pdf``, proved as Proposition A.1) gives, for scale and shift
+parameters ``(nu, beta)``, ``FIM_nu = H|_nu (elementwise) S`` and ``FIM_beta = S``, where
+``H|_nu`` and ``S = E[s s^T]`` are both ``C x C``. The combination is element-wise, not Kronecker.
+To fit the shared machinery, the input factor built here is the 2 x 2 matrix
+``[[a_nu, mean(z)], [mean(z), 1]]``, where ``z`` is the mean over channels of the layer's input at
+one position. ``a_nu = mean(z^2)`` is exactly the mean of all entries of ``H|_nu``, which is the
+scalar ``a`` minimising ``||H|_nu - a * ones||_F``; the ``1`` reproduces ``FIM_beta = S`` exactly.
+The off-diagonal ``mean(z)`` is a correlation the Proposition assumes away; it is kept rather than
+forced to zero, for the same reason a ``Linear``'s own bias column is not centred either. Do not
+special-case it to zero. One caveat: the Proposition's proof writes ``H|_nu = E[h h^T]`` for the
+*normalised* activation, while this module -- like both reference implementations -- builds it from
+the forward hook's raw, pre-normalisation input. See :func:`augment_norm_input` for the measured
+size of that difference and for why swapping in the normalised activation is not a safe local fix.
+
+**The diagonal ``Conv2d`` input factor has two scale quirks, both inherited and both left alone.**
+With a bias, ``_h_conv2d`` divides by ``batch * S * P`` where ``P = C_in * k_h * k_w`` is the patch
+width, instead of by ``batch * S``. Without a bias it divides by ``batch`` alone, leaving out both
+``S`` and ``P``. Both reference repositories do exactly this. The new full-factor path deliberately
+does *not* reproduce either, because TKFAC's trace preservation needs the real scale; measured, the
+full factor's diagonal is ``P`` times the diagonal path's with a bias and ``1/S`` times it without
+one. The quirks are harmless for ``diag`` only because its min-max normalisation erases any
+per-layer constant.
+
+**``LayerNorm`` contracts different axes on the two sides, for a 3-D input.** ``_h_layernorm``
+reduces every dimension except dim 1, ``_s_layernorm`` reduces every dimension except the last. For
+a 2-D ``(N, C)`` input those coincide. For a transformer's ``(N, T, C)`` they do not: the input side
+then pools over batch and channel and indexes tokens, while the gradient side pools over batch and
+tokens and indexes channels. Both are verbatim ports of both reference repositories.
+
+Scope: ``Conv2d`` is supported with ``groups=1``, ``dilation=(1, 1)`` and
+``padding_mode="zeros"``, and ``LayerNorm`` with a one-dimensional ``normalized_shape`` and a shift
+parameter. Anything else raises ``NotImplementedError`` rather than silently computing a factor
+that ignores the structure. Two of those refusals were silent until they were measured:
+``padding_mode="reflect"`` was described by a zero-padded factor 48% off the right one in relative
+Frobenius norm, because :func:`extract_patches` always pads with zeros; and ``LayerNorm(bias=False)``
+got the usual 2 x 2 factor, whose second row and column describe a shift parameter the layer does
+not have. A string ``padding`` (``"same"``, ``"valid"``) is refused in :func:`extract_patches`
+itself, which is the one place both the diagonal and the full-factor paths go through.
+
+The SUA option (``sua=True``, ``Conv2d`` only) replaces the patch-based input factor by a
+channel-only one, ``C_in [+1]`` wide instead of ``C_in * k_h * k_w [+1]``
+(``kfac_conv_1602.01407.pdf`` p. 14, "spatially uncorrelated activations"). It is built by taking
+the centre offset of every patch the extraction already produces, which keeps it row-aligned with
+the pooled output gradients by construction, for any stride and padding. Pooling the raw input
+independently, as ``EKFAC-pytorch`` does, coincides with this only for stride 1 and "same" padding.
+
+Two things SUA here is *not*. It is not Theorem 4's "IAD + SH + SUA + WD": the output factor stays
+full, and "white derivatives" is deliberately not adopted. And even restricted to SUA alone, the
+exact block has a rank-1 coupling term between kernel offsets that this construction drops -- the
+offsets are treated as exactly independent, matching ``EKFAC-pytorch::_precond_sua_ra``'s own
+uncorrected convention. Both are documented gaps between the cited theorem and what is tractable
+here, not bugs. Measured on a 3 x 3, 2-input-channel toy convolution, the cross-offset terms SUA
+discards carry 29.5% of the exact patch covariance's Frobenius mass.
 """
 
 from __future__ import annotations
@@ -67,8 +109,20 @@ def extract_patches(
 ) -> Tensor:
     """Unfold a convolutional input into flattened receptive-field patches.
 
-    Port of ``_extract_patches`` (adafisher.py:33-50).
+    Port of ``_extract_patches`` (adafisher.py:33-50), plus one guard the port did not have.
+
+    ``padding`` must be a pair of integers. ``Conv2d`` also accepts the strings ``"same"`` and
+    ``"valid"``, and it keeps them verbatim in ``layer.padding``; arithmetic on them used to fail
+    here with ``TypeError: '>' not supported between instances of 'str' and 'int'``, from inside a
+    tensor reshape, which said nothing about the layer that caused it.
     """
+    if isinstance(padding, str):
+        raise NotImplementedError(
+            f"Conv2d(padding={padding!r}) is not supported: the patch extraction needs a pair of "
+            f"integers, and PyTorch keeps a string padding verbatim in layer.padding. Give the "
+            f"equivalent explicit padding instead -- for a stride-1 layer, padding='same' is "
+            f"(k_h // 2, k_w // 2) for odd kernel sizes, and padding='valid' is 0."
+        )
     if padding[0] + padding[1] > 0:
         x = pad(x, (padding[1], padding[1], padding[0], padding[0]))
     batch_size, in_channels, height, width = x.size()
@@ -177,7 +231,7 @@ def compute_s_diag(s: Tensor, layer: Module) -> Tensor:
 
 
 # ----------------------------------------------------------------------------------------------
-# Lot 2: full (non-diagonal) factors, Linear only. See docs/reports/plan_lot2.md §0.1, §1.1.
+# Full (non-diagonal) factors: the dispatchers, and the Linear branch.
 # ----------------------------------------------------------------------------------------------
 
 
@@ -185,7 +239,7 @@ def augment_linear_input(h: Tensor, layer: Linear) -> Tensor:
     """Flatten ``h`` to ``(N, d_in)`` and, iff ``layer`` has a bias, append a ones column: the
     bias-augmented ``h_bar`` batch of AdaFisher's header formula. Public (not just an internal
     helper of ``compute_h_full``) because ``EKFACApproximation`` also needs the raw augmented batch
-    itself, not only its reduction — see plan_lot2.md §0.3.
+    itself, not only its reduction.
     """
     if h.ndim > 2:
         h = h.reshape(-1, h.shape[-1])
@@ -200,12 +254,13 @@ def _h_full_linear(h: Tensor, layer: Linear) -> Tensor:
 
 
 def compute_h_full(h: Tensor, layer: Module, sua: bool = False) -> Tensor:
-    """Instantaneous full input factor A = E[h_bar h_bar^T] (Linear, Conv2d with groups=1 and
-    dilation=(1,1) — lot 4, docs/reports/plan_lot4.md §1.1; BatchNorm2d, LayerNorm with a 1-D
-    normalized_shape — lot 5, docs/reports/plan_lot5.md §1.1). ``sua`` (lot 6, docs/reports/
-    plan_lot6.md §0.3) is consulted only on the Conv2d branch: it selects the channel-only SUA
-    input factor instead of the patch-based one; meaningless (silently ignored) for every other
-    layer type, exactly like ``pi``/``T_inv`` are meaningless for layer types they don't apply to.
+    """Instantaneous full input factor ``A = E[h_bar h_bar^T]``.
+
+    Supports ``Linear``, ``Conv2d`` with ``groups=1`` and ``dilation=(1, 1)``, ``BatchNorm2d``, and
+    ``LayerNorm`` with a 1-D ``normalized_shape``. ``sua`` is consulted only on the ``Conv2d``
+    branch, where it selects the channel-only input factor instead of the patch-based one; it is
+    silently ignored for every other layer type, the same way ``pi`` and ``T_inv`` are ignored by
+    the modes they do not apply to.
     """
     if isinstance(layer, Linear):
         return _h_full_linear(h, layer)
@@ -225,10 +280,13 @@ def _s_full_linear(s: Tensor, layer: Linear) -> Tensor:
 
 
 def compute_s_full(s: Tensor, layer: Module) -> Tensor:
-    """Instantaneous full output factor B = E[delta delta^T] (Linear, Conv2d with groups=1 and
-    dilation=(1,1) — lot 4, docs/reports/plan_lot4.md §1.1; BatchNorm2d, LayerNorm with a 1-D
-    normalized_shape — lot 5, docs/reports/plan_lot5.md §1.1). For a normalisation layer this is
-    literally Proposition 3.1's S_i (full-rank, "square-then-sum"), no approximation involved.
+    """Instantaneous full output factor ``B = E[delta delta^T]``.
+
+    Same supported layer types as :func:`compute_h_full`. For a normalisation layer this is
+    literally Proposition 3.1's ``S_i``, the sum of per-position outer products: full-rank, and no
+    approximation is involved. Note that the ``diag`` mode's own normalisation-layer formula sums
+    the gradients first and squares afterwards, which is a different quantity; the two are not
+    compared anywhere, on purpose.
     """
     if isinstance(layer, Linear):
         return _s_full_linear(s, layer)
@@ -242,15 +300,18 @@ def compute_s_full(s: Tensor, layer: Module) -> Tensor:
 
 
 # ----------------------------------------------------------------------------------------------
-# Lot 4: full (non-diagonal) factors, Conv2d (groups=1, dilation=(1,1)). See
-# docs/reports/plan_lot4.md §0.1-§0.4, §1.1.
+# Full factors, Conv2d branch (groups=1, dilation=(1,1)). Every (example, output-location) pair
+# becomes one pooled sample, which generalises the Linear branch's per-example pooling.
 # ----------------------------------------------------------------------------------------------
 
 
 def _check_conv2d_supported(layer: Conv2d) -> None:
-    """Explicit, typed scope guard (plan_lot4.md §0.4) rather than silently computing a Kronecker
-    factor that ignores structural weight sparsity (``groups``) or an unfolding that ``extract_patches``
-    cannot express (``dilation``)."""
+    """Refuse the two ``Conv2d`` options this factorisation cannot express, rather than silently
+    computing a factor that ignores them: ``groups`` (structural weight sparsity, which needs a
+    per-group block-diagonal treatment, not one global ``A (x) B``), ``dilation`` (which
+    ``extract_patches`` has no parameter for) and ``padding_mode`` (the patch extraction always
+    pads with zeros, so a reflected or replicated padding would be described by a factor that does
+    not match the layer's own forward pass)."""
     if layer.groups != 1:
         raise NotImplementedError(
             f"Full Kronecker factors for Conv2d only support groups=1 so far (lot 4 scope); "
@@ -262,6 +323,15 @@ def _check_conv2d_supported(layer: Conv2d) -> None:
             f"Full Kronecker factors for Conv2d only support dilation=(1,1) so far (lot 4 scope); "
             f"got dilation={layer.dilation}. extract_patches has no dilation parameter."
         )
+    if layer.padding_mode != "zeros":
+        raise NotImplementedError(
+            f"Full Kronecker factors for Conv2d only support padding_mode='zeros'; got "
+            f"padding_mode={layer.padding_mode!r}. The patch extraction always pads with zeros, "
+            f"so the factor would describe a different layer from the one being trained: measured "
+            f"on a 2-channel 3x3 layer with padding_mode='reflect', the zero-padded input factor "
+            f"is 48% off the reflect-padded one in relative Frobenius norm. Refusing is better "
+            f"than returning that number."
+        )
 
 
 def augment_conv2d_input(h: Tensor, layer: Conv2d) -> Tensor:
@@ -269,8 +339,7 @@ def augment_conv2d_input(h: Tensor, layer: Conv2d) -> Tensor:
     ones column: the Conv2d analogue of ``augment_linear_input``, built on ``extract_patches``
     (lot 1, unmodified). Each pooled row is treated as an i.i.d. sample of the bias-augmented
     receptive-field patch, under the same spatial-independence reading the diagonal path already
-    relies on implicitly (TKFAC Assumption 4.1, ``tkfac_2011.10741.pdf`` §4.3 — see
-    docs/reports/plan_lot4.md §0.1).
+    relies on implicitly (TKFAC Assumption 4.1, ``tkfac_2011.10741.pdf`` §4.3).
     """
     _check_conv2d_supported(layer)
     patches = extract_patches(h, layer.kernel_size, layer.stride, layer.padding, layer.groups)
@@ -281,11 +350,11 @@ def augment_conv2d_input(h: Tensor, layer: Conv2d) -> Tensor:
 
 
 def augment_input(h: Tensor, layer: Module, sua: bool = False) -> Tensor:
-    """Dispatching sibling of ``augment_linear_input``/``augment_conv2d_input``/``augment_norm_input``
-    (docs/reports/plan_lot4.md §0.5, plan_lot5.md §0.5): used directly by ``ekfac``/``tkfac``/
-    ``tekfac``, which need the raw augmented batch, not just ``compute_h_full``'s reduction
-    (plan_lot2.md §0.3). ``sua`` (lot 6, docs/reports/plan_lot6.md §0.3) selects
-    ``augment_conv2d_input_sua`` in place of ``augment_conv2d_input`` on the Conv2d branch only.
+    """Dispatching sibling of ``augment_linear_input`` / ``augment_conv2d_input`` /
+    ``augment_norm_input``. Used directly by ``ekfac``, ``tkfac`` and ``tekfac``, which need the raw
+    augmented batch and not only ``compute_h_full``'s reduction of it. ``sua`` selects
+    ``augment_conv2d_input_sua`` in place of ``augment_conv2d_input``, on the ``Conv2d`` branch
+    only.
     """
     if isinstance(layer, Linear):
         return augment_linear_input(h, layer)
@@ -302,7 +371,8 @@ def _h_full_conv2d(h: Tensor, layer: Conv2d) -> Tensor:
     """Uses the *real* spatial size (``h_bar.size(0) = batch * S``), unlike ``_h_conv2d``'s
     diagonal reduction, which — for the ``Conv2d`` branch only — divides by ``batch * S * P``
     instead of ``batch * S`` (a pre-existing quirk in the ``FisherAdapTune``/official-repo
-    reference, verified and deliberately not reproduced here — docs/reports/plan_lot4.md §0.2).
+    reference, verified and deliberately not reproduced here — the trace-preservation property of
+    ``tkfac`` needs the real scale).
     """
     h_bar = augment_conv2d_input(h, layer)
     return h_bar.t() @ h_bar / h_bar.size(0)
@@ -310,18 +380,17 @@ def _h_full_conv2d(h: Tensor, layer: Conv2d) -> Tensor:
 
 def flatten_conv2d_output_grad(s: Tensor, layer: Conv2d) -> Tensor:
     """Pool (batch, output-location) gradients onto one axis: the same transpose/reshape sequence
-    as ``_s_conv2d`` (unmodified), minus its diagonal reduction. Unlike ``_h_conv2d``
-    (``augment_conv2d_input``'s docstring / plan_lot4.md §0.2), ``_s_conv2d``'s scale was already
-    correct — its ``spatial_size`` is computed before this reshape — so no deviation is introduced
-    here.
+    as ``_s_conv2d`` (unmodified), minus its diagonal reduction. Unlike ``_h_conv2d``, whose scale
+    is off (see the module docstring), ``_s_conv2d``'s was already right — it computes
+    ``spatial_size`` before this reshape — so no deviation is introduced here.
     """
     return s.transpose(1, 2).transpose(2, 3).reshape(-1, s.size(1))
 
 
 def flatten_output_grad(s: Tensor, layer: Module) -> Tensor:
-    """Dispatching sibling, output-gradient side (docs/reports/plan_lot4.md §0.5, plan_lot5.md §0.5).
-    The ``Linear`` branch is the same reshape ``ekfac``/``tkfac``/``tekfac`` each inlined before lot
-    4; extracted here now that ``Conv2d``/normalisation-layer branches must exist alongside it.
+    """Dispatching sibling of :func:`augment_input`, on the output-gradient side. Returns the
+    per-sample gradient batch, row-paired with what :func:`augment_input` returns for the same
+    layer and the same forward pass.
     """
     if isinstance(layer, Linear):
         return s.reshape(-1, s.shape[-1]) if s.ndim > 2 else s
@@ -341,8 +410,8 @@ def _s_full_conv2d(s: Tensor, layer: Conv2d) -> Tensor:
 
 
 # ----------------------------------------------------------------------------------------------
-# Lot 6: the SUA approximation, Conv2d input factor only (groups=1, dilation=(1,1), reusing lot
-# 4's own scope guard). See docs/reports/plan_lot6.md §0.1-§0.3, §1.1.
+# The SUA approximation: a channel-only Conv2d input factor, reusing the scope guard above. Only
+# the input side is affected; the output factor is unchanged.
 # ----------------------------------------------------------------------------------------------
 
 
@@ -350,7 +419,7 @@ def augment_conv2d_input_sua(h: Tensor, layer: Conv2d) -> Tensor:
     """Channel-only analogue of ``augment_conv2d_input`` (SUA, ``kfac_conv_1602.01407.pdf`` p. 14):
     pools the *center* offset of every receptive-field patch ``extract_patches`` produces, instead
     of the whole patch, dropping the input factor from ``(C_in*k_h*k_w[+1])^2`` to ``(C_in[+1])^2``
-    entries (docs/reports/plan_lot6.md §0.3). Row-aligned with ``flatten_conv2d_output_grad``'s
+    entries. Row-aligned with ``flatten_conv2d_output_grad``'s
     ``(N*S, C_out)`` pooling by construction, since both are built from ``extract_patches``'s own
     ``(H_out, W_out)`` grid — valid for any ``stride``/``padding``, not only "same" padding.
     """
@@ -370,28 +439,41 @@ def _h_full_conv2d_sua(h: Tensor, layer: Conv2d) -> Tensor:
 
 
 # ----------------------------------------------------------------------------------------------
-# Lot 5: full (non-diagonal) factors, BatchNorm2d / LayerNorm (normalized_shape a 1-tuple). See
-# docs/reports/plan_lot5.md §0.1-§0.4, §1.1.
+# Full factors, normalisation-layer branch (BatchNorm2d, and LayerNorm with a 1-D
+# normalized_shape). See the module docstring for why the 2 x 2 input factor looks the way it does.
 # ----------------------------------------------------------------------------------------------
 
 
 def _pool_batchnorm2d(x: Tensor) -> Tensor:
     """``(N, C, H, W) -> (N*H*W, C)``: move the channel axis (dim 1, ``BatchNorm2d``'s own
     convention, matching ``_h_batchnorm2d``/``_s_batchnorm2d``) last and flatten batch+spatial onto
-    one axis — Proposition 3.1's ``T_i = N*H*W`` (docs/reports/plan_lot5.md §0.3).
+    one axis — Proposition 3.1's ``T_i = N*H*W``.
     """
     return x.permute(0, 2, 3, 1).reshape(-1, x.size(1))
 
 
 def _check_layernorm_supported(layer: LayerNorm) -> None:
-    """Explicit, typed scope guard (plan_lot5.md §0.4), mirroring lot 4's ``groups``/``dilation``
-    guards: a multi-dimensional ``normalized_shape`` would need an axis convention this lot does not
-    define (and that the *existing* ``_h_layernorm``/``_s_layernorm`` port does not consistently
-    define either, for ``h.ndim > 2`` — plan_lot5.md §0.3)."""
+    """Refuse a multi-dimensional ``normalized_shape``, the same way the ``Conv2d`` guard above
+    refuses ``groups`` and ``dilation``. It would need an axis convention this module does not
+    define — and one the ported diagonal path does not define consistently either, since
+    ``_h_layernorm`` and ``_s_layernorm`` contract different axes as soon as the input has more
+    than two dimensions.
+
+    Also refuse ``LayerNorm(d, bias=False)``, which has a scale parameter and no shift. Every input
+    factor in this module appends a constant-one column for the shift, so the 2 x 2 factor it
+    returns would describe a shift parameter that does not exist, and the mismatch used to surface
+    as a bare shape error far from its cause."""
     if len(layer.normalized_shape) != 1:
         raise NotImplementedError(
             f"Full Kronecker factors for LayerNorm only support a 1-D normalized_shape so far "
             f"(lot 5 scope); got normalized_shape={tuple(layer.normalized_shape)}."
+        )
+    if layer.weight is not None and layer.bias is None:
+        raise NotImplementedError(
+            "LayerNorm(bias=False) is not supported: this module's input factor always appends a "
+            "constant-one column for the shift parameter, so it would describe a parameter the "
+            "layer does not have. Use LayerNorm with its default bias, or "
+            "elementwise_affine=False, which has no parameters to precondition at all."
         )
 
 
@@ -404,8 +486,8 @@ def _pool_layernorm(x: Tensor, layer: LayerNorm) -> Tensor:
 
 
 def _pool_norm_layer(x: Tensor, layer: Module) -> Tensor:
-    """Dispatching sibling: the ``(T, C)`` pooled view shared by the H and S sides of a
-    normalisation layer's full-factor construction (docs/reports/plan_lot5.md §0.3)."""
+    """The ``(T, C)`` pooled view shared by the input and gradient sides of a normalisation
+    layer's full-factor construction: one row per position, one column per channel."""
     if isinstance(layer, BatchNorm2d):
         return _pool_batchnorm2d(x)
     if isinstance(layer, LayerNorm):
@@ -417,12 +499,25 @@ def _pool_norm_layer(x: Tensor, layer: Module) -> Tensor:
 
 def augment_norm_input(h: Tensor, layer: Module) -> Tensor:
     """``(T, 2)`` matrix ``[z_x, 1]``, the normalisation-layer analogue of
-    ``augment_linear_input``/``augment_conv2d_input``. ``z_x`` is the per-position channel-mean
-    pre-activation — the Frobenius-optimal, ``S``-independent scalar surrogate
-    (docs/reports/plan_lot5.md §0.2) for Proposition 3.1's exact ``H_{i-1}|_{nu_i}`` (a full ``C x C``
-    matrix, Hadamard- not Kronecker-combined with ``S`` there — plan_lot5.md §0.1), fit into this
-    codebase's shared ``kron(A, B)`` machinery. Column 1 (the constant) reproduces
-    ``H_{i-1}|_{beta_i} = 11^T``'s exact contribution (``= S``) once run through that same machinery.
+    ``augment_linear_input`` / ``augment_conv2d_input``.
+
+    ``z_x`` is the mean over channels of the layer's input at position ``x``. Reducing the whole
+    ``C x C`` matrix ``H|_nu`` of Proposition 3.1 to the single number ``mean_x(z_x^2)`` is the one
+    approximation the normalisation-layer branch introduces: it is the scalar ``a`` minimising
+    ``||H|_nu - a * ones||_F``, chosen not to depend on the gradient factor so that the two factors
+    stay separate and separately invertible. Column 1, the constant, reproduces
+    ``H|_beta = ones`` exactly, so the shift parameters' block comes out as exactly ``S``.
+
+    **The input used here is the layer's own input, before normalisation.** The gradient with
+    respect to the scale parameter is ``sum_t delta_t * x_hat_t``, with the *normalised* activation
+    ``x_hat``, and the proof of Proposition A.1 writes ``h_{i-1}`` for that normalised activation.
+    Both reference implementations nevertheless feed the forward hook's raw input here, and this
+    port reproduces them. The difference is not small: measured on a ``BatchNorm2d(8)`` in train
+    mode with a positive, post-ReLU-like input, ``mean_x(z_x^2)`` is 1.311 from the raw input
+    against 0.126 from ``x_hat``, and the off-diagonal is 1.07 against 5e-17. Do not "fix" this in
+    isolation -- for ``LayerNorm``, ``x_hat`` sums to zero across channels by construction, so
+    ``z_x`` would be identically zero and the scale parameters' block would collapse to the damping
+    term alone.
     """
     pooled = _pool_norm_layer(h, layer)
     z = pooled.mean(dim=1)
@@ -437,7 +532,7 @@ def _h_full_norm(h: Tensor, layer: Module) -> Tensor:
 def flatten_norm_output_grad(s: Tensor, layer: Module) -> Tensor:
     """``(T, C)`` pooled gradient batch — literally Proposition 3.1's ``S_i`` once reduced
     (``_s_full_norm``), and the raw per-sample batch ``ekfac``/``tkfac``/``tekfac`` need for their
-    intra-batch estimators, row-paired with ``augment_norm_input``'s output (plan_lot5.md §0.3).
+    intra-batch estimators, row-paired with ``augment_norm_input``'s output.
     """
     return _pool_norm_layer(s, layer)
 

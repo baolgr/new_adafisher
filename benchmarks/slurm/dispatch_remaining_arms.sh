@@ -39,9 +39,17 @@ for model in "${MODELS[@]}"; do
   # Jobs and results are grouped by dataset (benchmarks/slurm/<group>/, outputs/<group>/<model>/).
   # The group is read straight out of the bench's own `output_group=` line rather than imported,
   # because this job loads a bare python module with no venv and no torch.
-  group=$(sed -n 's/.*output_group="\([^"]*\)".*/\1/p' "benchmarks/${model}/bench.py")
+  # The model folders live under benchmarks/models/ since the step-1 reorganisation. Checked
+  # explicitly: `set -e` would otherwise abort on sed's own exit status, with no message saying
+  # which file was missing.
+  bench="benchmarks/models/${model}/bench.py"
+  if [ ! -f "$bench" ]; then
+    echo "$bench does not exist — is $model a benchmarks/models/ folder? aborting" >&2
+    exit 1
+  fi
+  group=$(sed -n 's/.*output_group="\([^"]*\)".*/\1/p' "$bench")
   if [ -z "$group" ]; then
-    echo "benchmarks/${model}/bench.py declares no output_group — aborting" >&2
+    echo "$bench declares no output_group — aborting" >&2
     exit 1
   fi
   manifest="benchmarks/outputs/${group}/${model}/diag/manifest.json"

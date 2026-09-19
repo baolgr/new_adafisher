@@ -1,11 +1,29 @@
-"""Min-max normalisation of an instantaneous Kronecker-factor diagonal (AdaFisher Eq. 4).
+"""Min-max normalisation of an instantaneous factor diagonal (AdaFisher Eq. 4).
 
-Ports two pieces of the official AdaFisher repository (``reference_repos/AdaFisher/optimizers/
-AdaFisher.py:13-45``), independently of its EMA (which has the bug documented in
-docs/reports/plan.md §1.4): ``smart_detect_inf`` and ``MinMaxNormalization``. FisherAdapTune carries
-an unused copy of the former (``_smart_detect_inf``, adafisher.py:21-26) but never applies the
-latter — see docs/reports/plan.md §1.1, critical fact 2, and §5.1 for why the ``diag`` mode restores
-it, opt-out via ``minmax_normalization=False``.
+Equation (4) of the AdaFisher paper rescales each of the two diagonal factors to the range [0, 1]
+before combining them, so that the second moment ``F~_D`` lives in ``[lambda, 1 + lambda]``
+whatever the scale of the activations or the gradients. This module holds the two pieces of that
+rescaling, ported from the official AdaFisher repository
+(``reference_repos/AdaFisher/optimizers/AdaFisher.py``, lines 13-45):
+
+* :func:`smart_detect_inf` replaces ``+inf`` by 1 and ``-inf`` by 0 before anything else. NaN is
+  not handled, matching the reference exactly: one NaN makes the whole normalised factor NaN.
+* :func:`min_max_normalization` maps ``t`` to ``(t - min) / (max - min + 1e-6)``. The ``1e-6``
+  guards a constant factor, which then maps to all zeros.
+
+Neither function mutates its argument; both work on the clone :func:`smart_detect_inf` makes.
+
+Only the ``diag`` mode uses this, and only when ``minmax_normalization=True`` (its default). The
+FisherAdapTune reference carries an unused copy of ``smart_detect_inf`` and never applies the
+normalisation at all, so ``minmax_normalization=False`` is what reproduces that reference exactly.
+The four Kronecker modes never apply it: rescaling each factor to [0, 1] destroys the scale that
+TKFAC's trace-preservation theorem and every Frobenius-norm comparison depend on.
+
+One consequence worth knowing before reading a ``diag`` number off a normalisation layer: for
+``BatchNorm2d`` and ``LayerNorm`` the input-factor diagonal has exactly **two** entries, one for
+the scale parameter and one for the shift. Min-max of a two-entry vector is exactly ``[0, 1]`` or
+``[1, 0]``, so on those layers the input factor carries one bit -- which of the two blocks is the
+larger -- and no magnitude at all.
 """
 
 from __future__ import annotations

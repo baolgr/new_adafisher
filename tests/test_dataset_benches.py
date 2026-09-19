@@ -33,6 +33,7 @@ from benchmarks.common.data import (  # noqa: E402
     build_imagenet_transforms,
     imagenet_root,
 )
+from benchmarks.common.optimizers import ARMS  # noqa: E402
 from benchmarks.common.runner import BENCHMARKS_DIR, discover_benchmarks  # noqa: E402
 
 BENCHES = discover_benchmarks()
@@ -95,18 +96,65 @@ def test_downsampled_regime_squashes_the_whole_image_not_a_crop() -> None:
     assert out[0, :16, :].mean() > out[0, 16:, :].mean(), "the top half must stay the red one"
 
 
-def test_pre_resized_tree_is_numerically_a_no_op() -> None:
-    """Why ``stage_imagenet.sh resize`` is safe: ``Resize((s, s))`` applied to an image that is
-    already ``s x s`` returns it unchanged, so the pre-resized tree and the on-the-fly pipeline
-    produce identical tensors — the staging script only moves the cost off the training loop.
+def _gradient_image(width: int = 80, height: int = 60) -> Image.Image:
+    """A smooth image, which is where JPEG's own error is easiest to see and to bound."""
+    image = Image.new("RGB", (width, height))
+    pixels = image.load()
+    for y in range(height):
+        for x in range(width):
+            pixels[x, y] = (x * 3 % 256, y * 4 % 256, (x + y) % 256)
+    return image
+
+
+def test_pre_resized_tree_has_the_same_geometry_as_the_on_the_fly_pipeline() -> None:
+    """What ``imagenet_root``'s fallback rests on: at ``img_size = 32`` this project's *own* eval
+    transform applied to a full-resolution image equals the same transform applied to an image
+    already squashed to 32x32. ``Resize((32, 32))`` on a 32x32 input is the identity, so a bench
+    reading the pre-resized tree and one reading the full tree see the same geometry.
+
+    This says nothing about pixels; see the test below, which is the half that used to be claimed
+    and not checked.
     """
     from torchvision import transforms
 
-    full = Image.new("RGB", (80, 60))
-    full.paste((200, 30, 60), (10, 10, 50, 40))
+    full = _gradient_image()
+    _train_tf, eval_tf = build_imagenet_transforms(IMAGENET_SPEC, 32, cutout=False,
+                                                   cutout_length=16)
+    pre_resized = transforms.Resize((32, 32))(full)
+    assert pre_resized.size == (32, 32)
+    assert torch.equal(eval_tf(full), eval_tf(pre_resized))
+    # The idempotence this rests on, stated on its own.
     squash = transforms.Resize((32, 32))
-    once, twice = squash(full), squash(squash(full))
-    assert torch.equal(transforms.ToTensor()(once), transforms.ToTensor()(twice))
+    assert torch.equal(transforms.ToTensor()(squash(full)),
+                       transforms.ToTensor()(squash(squash(full))))
+
+
+def test_the_staged_tree_is_not_pixel_identical_because_it_is_re_encoded() -> None:
+    """``stage_imagenet.sh resize`` writes JPEGs, so the staged tree is *not* bit-equivalent to
+    the on-the-fly pipeline — only geometrically equivalent. What it buys is cost: 1.28 M 32x32
+    decodes per epoch instead of 1.28 M full-resolution ones.
+
+    Measured here on a smooth gradient, at the quality 95 the staging script uses: 63.5% of the
+    pixels move, by 0.84/255 on average and 5/255 at worst. Bounded rather than asserted equal,
+    which is what ``benchmarks/common/data.py::imagenet_root`` already documents.
+    """
+    import io
+
+    from torchvision import transforms
+
+    pre_resized = transforms.Resize((32, 32))(_gradient_image())
+    buffer = io.BytesIO()
+    pre_resized.save(buffer, format="JPEG", quality=95)
+    buffer.seek(0)
+    staged = Image.open(buffer).convert("RGB")
+
+    to_tensor = transforms.ToTensor()
+    original, reloaded = to_tensor(pre_resized), to_tensor(staged)
+    delta = (original - reloaded).abs()
+    assert not torch.equal(original, reloaded), "a JPEG round trip is not lossless"
+    assert float((delta > 0).float().mean()) > 0.2, "the fixture no longer shows the re-encoding"
+    assert float(delta.max()) * 255 < 16, "but the error stays within a few levels out of 255"
+    assert float(delta.mean()) * 255 < 2
 
 
 # ----------------------------------------------------------------------------------------------
@@ -162,13 +210,39 @@ def test_missing_tree_names_the_layout(tmp_path: Path) -> None:
 
 
 def test_class_mapping_disagreement_is_an_error(tmp_path: Path) -> None:
-    """A val tree whose directory names differ from the train tree's would silently train against
-    permuted labels. ILSVRC's own val tar is flat, so this is the realistic staging mistake.
+    """A val tree whose directory names differ from the train tree's would silently evaluate
+    against permuted labels. This is the *renamed*-directory case: the tree has class folders, but
+    one of them carries a WordNet id the train tree does not know.
+
+    The flat-tar case the staging README warns about is a different failure and is covered by the
+    test below — it never reaches this check.
     """
     make_tree(tmp_path)
     wnid = tmp_path / "imagenet" / "val" / "n01443537"
     wnid.rename(wnid.with_name("n99999999"))
     with pytest.raises(ValueError, match="class -> index mapping"):
+        build_imagenet_loaders(small_spec(), tmp_path, img_size=32, num_workers=0)
+
+
+def test_a_flat_val_tree_fails_before_the_class_mapping_check(tmp_path: Path) -> None:
+    """ILSVRC's own ``ILSVRC2012_img_val.tar`` expands **flat**: 50 000 JPEGs with no class
+    directories at all. ``stage_imagenet.sh`` runs the standard ``valprep`` step to sort them, and
+    forgetting it is the realistic staging mistake.
+
+    What happens then is not this project's ``ValueError`` — ``ImageFolder`` never gets as far as
+    building a class map. It raises ``FileNotFoundError`` naming the directory, which is a clear
+    enough message to act on; the point of pinning it is that a reader looking for the flat-tar
+    case knows which error to expect and does not assume the ``ValueError`` covers it.
+    """
+    make_tree(tmp_path)
+    val = tmp_path / "imagenet" / "val"
+    for class_dir in list(val.iterdir()):
+        for image in class_dir.iterdir():
+            image.rename(val / image.name)
+        class_dir.rmdir()
+    assert all(p.is_file() for p in val.iterdir()), "the fixture must be a genuinely flat tree"
+
+    with pytest.raises(FileNotFoundError, match="[Cc]ould.?n.t find any class folder"):
         build_imagenet_loaders(small_spec(), tmp_path, img_size=32, num_workers=0)
 
 
@@ -286,13 +360,19 @@ def test_a_bench_trains_end_to_end_on_the_synthetic_tree(name: str, imagenet_tre
 # ----------------------------------------------------------------------------------------------
 
 
+def _generate_jobs():
+    sys.path.insert(0, str(REPO_ROOT / "benchmarks" / "slurm"))
+    import generate_jobs
+
+    return generate_jobs
+
+
 def test_every_bench_has_generated_jobs_in_its_own_subdirectory() -> None:
     """The generator enumerates model folders, so a new bench gets jobs for free — but only if it
     has a ``WALLTIME`` row. Without one ``generate_jobs.py`` raises ``KeyError`` mid-run, after
     having already overwritten half the directory.
     """
-    sys.path.insert(0, str(REPO_ROOT / "benchmarks" / "slurm"))
-    import generate_jobs
+    generate_jobs = _generate_jobs()
 
     slurm = REPO_ROOT / "benchmarks" / "slurm"
     for name, bench in BENCHES.items():
@@ -303,12 +383,56 @@ def test_every_bench_has_generated_jobs_in_its_own_subdirectory() -> None:
         assert (directory / f"calibrate_{name}.sh").is_file()
 
 
+def test_every_generate_jobs_table_names_only_real_benches() -> None:
+    """The reverse direction of the check above, for every table in the generator.
+
+    ``WALLTIME`` was checked one way only — every bench has a row — so a row left behind by a
+    deleted model went unnoticed. The same applies to ``GROUPED``, ``SWEEPS`` and ``V0_SEEDS``,
+    whose stale rows would generate jobs for a folder that no longer exists.
+    """
+    generate_jobs = _generate_jobs()
+
+    assert set(generate_jobs.WALLTIME) == set(BENCHES), (
+        "WALLTIME and the model folders must agree in both directions; the difference is "
+        f"{set(generate_jobs.WALLTIME) ^ set(BENCHES)}"
+    )
+    for table in ("GROUPED", "RESOURCES", "SWEEPS", "V0_SEEDS"):
+        stale = set(getattr(generate_jobs, table)) - set(BENCHES)
+        assert not stale, f"{table} has rows for models that no longer exist: {sorted(stale)}"
+    assert set(generate_jobs.V0_SEED_ARMS) <= set(ARMS)
+    assert generate_jobs.REFERENCE_ARM in ARMS
+
+
+def test_every_imagenet_bench_declares_its_own_resources() -> None:
+    """``RESOURCES`` is unchecked in either direction, and its *default* is the 10 GB MIG slice
+    with 8 CPUs — which is silently wrong for ImageNet: 1.28 M JPEG decodes per epoch need cores,
+    and ResNet-50 or ViT-S at 224 px need a whole H100. A new ``*_imagenet`` folder with no row
+    would fall back to the small slice and simply run out of memory hours into the queue.
+    """
+    generate_jobs = _generate_jobs()
+
+    for name in IMAGENET_MODELS:
+        assert name in generate_jobs.RESOURCES, f"{name} has no RESOURCES row"
+        gpus, cpus, mem = generate_jobs.RESOURCES[name]
+        assert cpus > generate_jobs.DEFAULT_RESOURCES[1], f"{name}: {cpus} cpus is the default"
+        assert gpus == ("h100:1" if name in NATIVE_IMAGENET else "h100_1g.10gb:1"), name
+        assert mem.endswith("G") and int(mem[:-1]) >= 64, f"{name}: {mem}"
+    # No non-ImageNet bench overrides the default profile: they all share the MIG slice.
+    assert set(generate_jobs.RESOURCES) == set(IMAGENET_MODELS)
+    # --num-workers follows --cpus-per-task, which is the whole point of raising it.
+    for name in IMAGENET_MODELS:
+        text = (REPO_ROOT / "benchmarks" / "slurm" / "imagenet"
+                / f"train_{name}_diag.sh").read_text()
+        cpus = generate_jobs.RESOURCES[name][1]
+        assert f"--cpus-per-task={cpus}" in text and f"--num-workers {cpus}" in text, name
+
+
 def test_generated_jobs_write_into_the_dataset_subdirectory() -> None:
     for name in CIFAR100_MODELS + IMAGENET_MODELS:
         group = BENCHES[name].output_group
         text = (REPO_ROOT / "benchmarks" / "slurm" / group / f"train_{name}_diag.sh").read_text()
         assert f"benchmarks/outputs/{group}/{name}/diag" in text
-        assert f"python -m benchmarks.{name}.bench" in text
+        assert f"python -m benchmarks.models.{name}.bench" in text
         if group == "imagenet":
             assert "IMAGENET_ARCHIVE" in text, "an ImageNet job must stage to $SLURM_TMPDIR"
 

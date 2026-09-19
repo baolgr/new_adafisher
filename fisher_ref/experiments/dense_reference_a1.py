@@ -1,58 +1,74 @@
-"""The A1 dense reference: `F`, `E_hat` and the per-layer blocks of `mlp_ln_mnist` at one
-checkpoint, in fp64 (`docs/reports/plan_exp_lot1.md` §5, lot 1 of `plan_exp_draft.md` §9).
+"""The dense reference of one small model at one checkpoint, in float64.
 
-Run it:
+Builds the true Fisher, the empirical Fisher and the per-layer blocks of a regime-A model, and
+reports the three distances the campaign's first questions need::
 
     PYTHONPATH=src:. python -u fisher_ref/experiments/dense_reference_a1.py
 
-or through `fisher_ref/slurm/dense_reference_a1.sh`, which is what produced the numbers below.
-Every knob is an environment variable with a default, so the sbatch script sets them without this
-file growing a CLI it does not want (the `experiments/` convention: constants, one question, the
-answer pasted back into this docstring).
+What it produces, at enough type-2 probes that the reference is not rank-limited by the probe
+count:
 
-What it produces, at `N = 4000` type-2 probes (`N(C-1) = 36 000 >= P = 26 634`, so `F` is not
-rank-limited by the probe count — `plan_exp_draft.md` §2.2):
-
-* `F` (type-2, the true Fisher) and `E_hat` (empirical), dense, fp64, `26 634^2`;
+* the true Fisher and the empirical Fisher, dense, float64;
 * their spectra, and the per-block trace shares and ranks;
-* the **source gap** `||E_hat - F||_F / ||F||_F` — the campaign's Q1, with no structure involved;
-* the **train/val gap** `||F_val - F_train||_F / ||F_train||_F` — HF1;
-* the **noise floor** `||F^(1) - F^(2)||_F / ||F||_F` from a two-way split of the probes
-  (`plan_exp_draft.md` §3.4): any later difference below it is not interpretable.
+* the **source gap** between them, with no structure involved;
+* the **train/validation gap**, i.e. how much the curvature differs on data the run saw and data
+  it did not;
+* the **noise floor** from a two-way split of the probes: any later difference below it is not
+  interpretable.
 
-Only summaries and the two spectra are written to disk. `F` itself is 5.68 GB and recomputable in
-minutes; `plan_exp_draft.md` §12 says not to write it.
+Only summaries and the two spectra are written to disk. The matrices themselves are gigabytes and
+recomputable in minutes.
 
-Memory, which is the whole reason this has its own job. The accumulator is the only `P x P` tensor
-on the device (`addmm_`, and a block-wise in-place symmetrisation — `reference/dense.py`), so the
-build peaks at `~1.05 x P^2 = 6.0 GB` and fits the same `h100_1g.10gb` slice the training jobs use.
-Everything with more than one `P x P` live at once — the two references side by side, and
-`eigvalsh` — happens on the **host**, where `--mem` is cheap. Measured multiplier on CPU at
-`P = 12 030`: `1.27 x P^2` for the whole build, against `+1.16 x P^2` for the single expression
-`0.5 * (M + M.T)` this code no longer uses.
+Memory, which is the whole reason this has its own job. The accumulator is the only ``P x P``
+tensor on the device, so the build peaks at about ``1.05 P^2`` and fits a 10 GB slice. Everything
+with more than one ``P x P`` live at once -- the two references side by side, and the
+eigendecomposition -- happens on the **host**, where memory is cheap. Measured on CPU at
+``P = 12 030``: ``1.27 P^2`` for the whole build, against ``+1.16 P^2`` for the single expression
+``0.5 * (M + M.T)`` this code no longer uses.
 
-Result, 2026-09-15, job 21082966 (`h100_1g.10gb`, N = 55 000, COMPLETED in 01:06:33, MaxRSS 25.3 GB).
-Full analysis in `plan_exp_lot1.md` §6; the numbers:
+Result, ``mlp_ln_mnist`` at half its trajectory, 55 000 probes, one hour on an H100 slice, peak
+device 6.06 GB::
 
     builds       train type2 147.4 s | empirical 15.0 s | val/test 13.5 s | halves 73.6 s
-                 peak device 6.06 GB of the 10 GB slice
-    noise floor  0.2986 at N/2 = 27 500   ->  sigma_N = 0.1493
-    source gap   0.3751   =  2.51 sigma_N   -> Q1 is interpretable (it was not at N = 4 000)
-    train/val    0.7121   ~ 1.4 x its null  -> HF1 still not settled
-    val/test     0.7111   ~ 1.02 x its null -> indistinguishable...
-    train/test   1.0222   =  1.44 x train/val  -> ...but this does not fit; see §6.3
+    noise floor  0.2986 at 27 500 probes per half  ->  sigma_N = 0.1493
+    source gap   0.3751   =  2.51 sigma_N          ->  interpretable
+    train/val    0.7121   ~ 1.4 x its null         ->  not settled
+    val/test     0.7111   ~ 1.02 x its null        ->  indistinguishable...
+    train/test   1.0222   =  1.44 x train/val      ->  ...but this does not fit
     F            lambda_max 9.2124e-01  rank 21 829/26 634  tr 16.68
-    E_hat        lambda_max 7.8299e-01  rank 18 342/26 634  tr 11.95  (no longer N-limited)
+    E_hat        lambda_max 7.8299e-01  rank 18 342/26 634  tr 11.95
     blocks       features.0 P=25 120 trace 0.627 deficiency 4 579 (MNIST's dead pixels)
                  features.3 P= 1 056 trace 0.208 deficiency    34
                  features.1 P=    64 trace 0.083 deficiency     0
                  head       P=   330 trace 0.066 deficiency    33 (= d_in + 1, the logit shift)
                  features.4 P=    64 trace 0.017 deficiency     0
 
-Two things to carry forward: `N` is nearly free (build time is linear in it, 13.2x for 13.75x the
-probes) while a spectrum costs 1 280 s and does not thread — so budget these jobs from the
-eigendecomposition, not the references. And `sigma_N` fell by 2.92x for 13.75x the probes, where
-`N^{-1/2}` predicts 3.71x: the floor decays more slowly than the ideal rate.
+Two things to carry forward. The probe count is nearly free -- build time is linear in it, 13.2x
+for 13.75x the probes -- while one full spectrum costs 1 280 s and does not thread, so budget such
+a job from the eigendecomposition and not from the references. And the noise floor fell by 2.92x
+for 13.75x the probes where the ideal rate predicts 3.71x: it decays more slowly than
+``N^{-1/2}``.
+
+Environment variables::
+
+    A1_MODEL          run directory                (default: mlp_ln_mnist)
+    A1_ARM            arm                          (default: diag)
+    A1_FRACTION       checkpoint fraction          (default: 0.5)
+    A1_PROBES         probe count                  (default: 4000)
+    A1_BATCH          traversal micro-batch        (default: 512)
+    A1_SEED           probe and split seed         (default: 0)
+    A1_DEVICE         cuda or cpu                  (default: cuda when available)
+    A1_DATA_ROOT      dataset root                 (default: benchmarks/data)
+    A1_OUTPUTS_ROOT   where the checkpoints live   (default: benchmarks/outputs)
+    A1_OUT_DIR        where the results go         (default: fisher_ref/outputs)
+    A1_MODULES        comma-separated module names to restrict the reference to; empty = the whole
+                      model. For debugging on a laptop only.
+    A1_BLOCK_SPECTRA  "0" skips the per-block eigendecompositions, keeping the trace shares and
+                      dropping the ranks. The widest block alone is 83 % of a full-model
+                      decomposition.
+
+Output: ``<A1_OUT_DIR>/<model>/<arm>/<fraction>/reference_summary.json`` and ``spectrum.pt``,
+written incrementally, plus a running log on standard output.
 """
 
 from __future__ import annotations

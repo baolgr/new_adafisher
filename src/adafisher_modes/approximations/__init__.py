@@ -1,8 +1,13 @@
 """Registry of Fisher approximation modes, selected by ``AdaFisherMulti(fisher_mode=...)``.
 
-Lot 1 registered only ``"diag"``. Lot 2 added ``"kfac"``, ``"ekfac"`` (``Linear`` only — see
-docs/reports/plan_lot2.md); lot 3 adds ``"tkfac"``, ``"tekfac"`` (``Linear`` only — see
-docs/reports/plan_lot3.md) — none of this requires any change to ``optimizer.py``.
+``MODES`` maps a mode name to the class that builds AdaFisher's second moment that way. The five
+entries are ``"diag"``, ``"kfac"``, ``"ekfac"``, ``"tkfac"`` and ``"tekfac"``; all five support
+``Linear``, ``Conv2d`` (with ``groups=1`` and ``dilation=(1, 1)``), ``BatchNorm2d`` and
+``LayerNorm`` with a one-dimensional ``normalized_shape``.
+
+``AdaFisherMulti`` looks a name up here, calls the factory with the keyword arguments it was given,
+and never touches the result again except through the :class:`FisherApproximation` interface. That
+is the whole extension point: adding a sixth mode means adding a class and one line here.
 """
 
 from __future__ import annotations

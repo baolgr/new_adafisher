@@ -1,13 +1,26 @@
-"""Shared statistics for the two trace-restricted modes (TKFAC, TEKFAC): the per-batch,
-un-normalized numerators entering TKFAC's Theorem 4.1 / Eq. (4.9) (``tkfac_2011.10741.pdf``) and
-TEKFAC's identical Eq. (2.9)-(2.10) (``tekfac_2011.13609.pdf``), and their bootstrap.
+"""The three per-batch statistics the ``tkfac`` and ``tekfac`` modes share.
 
-Kept un-normalized (not divided by ``delta``) on purpose, and shared between ``tkfac.py`` and
-``tekfac.py`` rather than duplicated: dividing before accumulating would silently break the exact
-``tr(Phi)=tr(Psi)=1`` invariant these un-normalized numerators guarantee under this project's own
-EMA (``ema.py``, coefficients that do not sum to 1). See ``docs/reports/plan_lot3.md`` §0.2 for the
-full derivation. This is the lot-3 analogue of ``_kron_utils.py`` (``plan_lot2.md`` §0.2): a small
-private module justified by two consumers sharing non-trivial, easy-to-drift statistics.
+Both modes build their curvature from the same trace-restricted triple of TKFAC's Theorem 4.1 /
+eq. (4.9) (``tkfac_2011.10741.pdf``), which TEKFAC restates as its own eq. (2.9)-(2.10)
+(``tekfac_2011.13609.pdf``)::
+
+    delta   = E_n[ ||h_bar_n||^2 * ||delta_n||^2 ]
+    Phi_raw = E_n[ ||delta_n||^2 * h_bar_n h_bar_n^T ]     ( = delta * Phi )
+    Psi_raw = E_n[ ||h_bar_n||^2 * delta_n delta_n^T ]     ( = delta * Psi )
+
+``h_bar_n`` is one example's bias-augmented input and ``delta_n`` the gradient at the layer's output
+for the same example; the two are row-paired.
+
+**The numerators are returned undivided on purpose.** ``tr(Phi_raw) = tr(Psi_raw) = delta`` holds
+term by term, so it survives any running average that scales both sides by the same coefficients --
+including this package's, whose coefficients do not sum to 1. Dividing by ``delta`` before
+accumulating would break that identity and with it TKFAC's trace-preservation theorem. Do not
+"simplify" this by storing ``Phi`` and ``Psi`` directly.
+
+:func:`bootstrap_raw_factors` supplies the step-0 starting values, ``delta_0 = d_in * d_out``,
+``Phi_raw_0 = d_out * I`` and ``Psi_raw_0 = d_in * I``. They are the unique choice that both
+satisfies the same trace identity and makes the resulting preconditioner the identity, so the
+bootstrap is inert in the same way ``kfac``'s identity seed and ``diag``'s all-ones seed are.
 """
 
 from __future__ import annotations
@@ -26,8 +39,8 @@ def instantaneous_raw_factors(h_bar: Tensor, s: Tensor) -> Tuple[Tensor, Tensor,
         Psi_raw_i = mean_n[ tr(Lambda_n)*Gamma_n ]      = s^T diag(||h_bar_n||^2) s / N
 
     with ``Lambda_n = h_bar_n h_bar_n^T``, ``Gamma_n = s_n s_n^T`` (per-example, paired). ``Phi_l =
-    Phi_raw/delta`` and ``Psi_l = Psi_raw/delta`` are Theorem 4.1's actual factors; kept divided
-    apart here so the caller's EMA accumulates the numerators, not the ratio (plan_lot3.md §0.2).
+    Phi_raw/delta`` and ``Psi_l = Psi_raw/delta`` are Theorem 4.1's actual factors; the division is
+    left to the caller so that the running average accumulates the numerators, not the ratio.
     """
     norm_a = (h_bar**2).sum(dim=1)  # tr(Lambda_n) = ||h_bar_n||^2
     norm_g = (s**2).sum(dim=1)  # tr(Gamma_n)  = ||s_n||^2

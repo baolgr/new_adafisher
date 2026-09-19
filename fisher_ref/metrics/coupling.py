@@ -1,11 +1,31 @@
-"""M8 — inter-block coupling (``plan_exp_draft.md`` §5).
+"""How much curvature lives between two layers rather than inside one.
 
-``c_{ll'} = <K_l, K_{l'}>_F / (||K_l||_F ||K_{l'}||_F)``, an uncentred CKA between the layers'
-tangent kernels. In regime A the blocks are submatrices of the dense reference, so the off-diagonal
-block ``R[l, l']`` *is* the coupling and no Gram is needed.
+For a dense reference ``R`` and a list of per-layer column ranges, :func:`coupling_matrix` returns
 
-This is HF5's measurement: if ``c`` is negligible everywhere, the exact block-diagonal loses
-nothing and the inter-layer directions can be dropped.
+    C[l, l'] = ||R[l, l']||_F / sqrt(||R[l, l]||_F * ||R[l', l']||_F)
+
+with ones on the diagonal by construction, and an entry near zero meaning the two layers'
+curvatures are orthogonal in the Frobenius sense. That is what "the exact block diagonal loses
+nothing" would mean.
+
+**What this is, precisely.** Writing ``R = U^T U / N``, layer ``l``'s tangent kernel is
+``K_l = U_l U_l^T / N``, and the uncentred kernel alignment between two layers is
+``<K_l, K_l'>_F / (||K_l||_F ||K_l'||_F) = ||R[l,l']||_F^2 / (||R[l,l]||_F ||R[l',l']||_F)``. The
+entry returned here is the **square root** of that alignment. The two agree at 0 and at 1 and
+differ everywhere in between, so a reported value of 0.5 is an alignment of 0.25. Read the numbers
+this function returns as the square root, or square them first.
+
+Public API
+----------
+
+:func:`coupling_matrix`  ``(names, C)``.
+
+:func:`offdiagonal_mass`  what fraction of ``||R||_F^2`` the exact block diagonal keeps, and what
+fraction it throws away -- the same question as one number.
+
+:func:`as_rows`  the off-diagonal entries in the long result-file format.
+
+This module imports nothing from the rest of ``fisher_ref``.
 """
 
 from __future__ import annotations

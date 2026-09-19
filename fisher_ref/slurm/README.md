@@ -36,6 +36,15 @@ everything that needs two on the host**, where `--mem` is cheap.
 |---|---|---|---|
 | `dense_reference_a1.sh` | A1's dense `F`, `Ê` and per-layer blocks at `mlp_ln_mnist/diag/ckpt_0.5`; the source gap, the train/val gap, the noise floor, both spectra | `h100_1g.10gb:1`, 64G, 4 cpus | `01:30:00` (measured from job 21077038) |
 | `p1_structural_a1.sh` | lot 2's P1 grid on A1: twelve structures × two sources × five dampings at each of the five checkpoints, `metrics.csv` + `meta.json` per fraction | `h100_1g.10gb:1`, 96G, 8 cpus | `03:00:00` **(estimate — replace after the first run)** |
+| `p1_lot3_smoke.sh` | lot 3's GPU smoke: the extended P1 runner on A2-GN, A2-BN and A3, one checkpoint each, `N = 2 000`, two folds — every device path lot 3 added, and the per-stage timings the full jobs are sized from | `h100_1g.10gb:1`, 48G, 16 cpus | `01:00:00` |
+| `p1_structural_a2_gn.sh`, `p1_structural_a2_bn.sh`, `p1_structural_a3.sh` | lot 3's P1 on the shared-weight models at `N = 45 000`: the zoo with reduce variants, the `B^exp` decomposition, `pos_embed`, `diag_py`, ten folds → 20 partitions of per-layer intervals, five checkpoints | see each header | sized from the smoke |
+
+### Lot 3: why the host memory is set by `P`, not by `N`
+
+The fold engine (`fisher_ref/folds.py`, `plan_exp_lot3.md` §0.8) keeps one `P × P` sum **per fold**
+on the host, whatever the probe count: ten folds of A2 are 47.9 GB, of A3 35.6 GB. That is the
+price of per-layer intervals without a single extra traversal. A smoke run at small `N` therefore
+needs the same host memory per fold as the real job — size `--mem` from `P` and `--folds`.
 
 ### Sizing a P1 job, and the two guards that make it finite
 

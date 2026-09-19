@@ -1,22 +1,41 @@
-"""Layer-type registry: which kind of parameter block is each part of a benchmark network
-(``docs/reports/plan_exp_draft.md`` §7, lot 0).
+"""Layer-type registry: what kind of parameter block each part of a benchmark network is.
 
-Every per-layer-type conclusion of the campaign (Q4) is an aggregation over this classification, so
-it has to be explicit, exhaustive and checked. Two properties matter more than the taxonomy itself:
+Every per-layer-type conclusion the campaign draws is an aggregation over this classification, so
+it has to be explicit, exhaustive and checked. Two properties matter more than the taxonomy itself.
 
 * **It partitions the parameters.** Every ``named_parameter`` of a model belongs to exactly one
-  record — including the ones no hook sees (``pos_embed``, ``cls_token``, ``GroupNorm``). Those
-  are marked ``hooked=False`` and still classified, because the campaign measures *curvature*, not
-  what the optimizer happens to precondition. ``assert_partitions`` is the check.
-* **Weight sharing is a runtime property.** ``nn.Linear`` is the same class in ``mlp_ln_mnist``
-  (input ``(N, 784)``: unshared) and in ``vit_micro_cifar``'s ``qkv`` (input ``(N, T, 32)``: shared
-  over ``T`` tokens), and the distinction decides which K-FAC (expand / reduce) even applies
-  (Eschenhagen et al., arXiv:2311.00636). It is therefore read from **one forward pass**, not
-  guessed from the module class — pass ``example_input`` to get it.
+  record, including the ones no optimizer hook sees (``pos_embed``, ``cls_token``, a ``GroupNorm``
+  affine). Those are marked ``hooked=False`` and still classified, because the campaign measures
+  *curvature*, not what the optimizer happens to precondition. :func:`assert_partitions` is the
+  check.
+* **Weight sharing is a runtime property, not a class property.** ``nn.Linear`` is the same class
+  whether its input is ``(N, 784)`` (one position per example) or ``(N, T, 32)`` (shared over ``T``
+  tokens), and the distinction decides which K-FAC variant even applies (Eschenhagen et al.,
+  arXiv:2311.00636 §3.2-§3.3). It is therefore read from **one forward pass**, not guessed from the
+  module class: pass ``example_input`` to :func:`classify` to get it.
 
-``head`` is assigned to the module whose output *is* the model's output (tensor identity, not
-shape). For ``mnist_autoencoder`` that is the last decoder ``Linear``; "the layer the loss sees
-first" is what the per-layer-type tables of ``plan_exp_draft.md`` §4 mean by head there too.
+``head`` is assigned to the module whose output *is* the model's output, by tensor identity rather
+than by shape. For an auto-encoder that is the last decoder ``Linear``.
+
+Public API
+----------
+
+:data:`LAYER_TYPES`  the nine labels a block can carry.
+
+:class:`LayerInfo`  one parameter block: its name, module type, layer type, the fully-qualified
+names of its parameters, their count, whether an ``AdaFisherMulti`` hook sees it, the rank of its
+input tensor, the number of shared positions ``T``, and whether it produced the model's output.
+
+:func:`classify`  the classification of a whole model.
+
+:func:`by_type`, :func:`type_counts`, :func:`unhooked_parameters`, :func:`assert_partitions`
+aggregations and the partition check.
+
+:func:`hooked_module_types`  the module types ``AdaFisherMulti`` hooks, read from the optimizer
+itself when it can be imported and from a local fallback tuple otherwise.
+
+Dependencies: :mod:`fisher_ref.conventions` (for ``reference_mode`` during the shape-probing
+forward) and, optionally, ``adafisher_modes.optimizer``.
 """
 
 from __future__ import annotations
