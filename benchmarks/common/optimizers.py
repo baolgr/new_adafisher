@@ -8,6 +8,12 @@
   (``reference_repos/FisherAdapTune/scripts/adafisher.py``), loaded by file path so that the
   read-only reference repository's package ``__init__`` is never imported. It is the original
   implementation this project's ``diag`` mode is a port of, and it stays available to every bench.
+* ``official``, the *other* original — ``reference_repos/AdaFisher/optimizers/AdaFisher.py``, the
+  optimizer of the authors' own published repository, loaded the same way and equally unmodified.
+  It is the class that produced the paper's Table 2, and unlike ``reference`` it applies Eq. (4)'s
+  min-max normalisation, so it is the like-for-like partner of ``diag`` at its default
+  ``minmax=True`` (``reference`` is the partner of ``diag --no-minmax``, which it matches
+  bit-exactly). Its ``gamma`` is one scalar rather than a pair; see :func:`official_gamma`.
 
 :class:`HParams` is the arm-independent operating point. One instance lives with each model, as a
 literal in its ``bench.py``; this module owns only the field meanings and their defaults. Field
@@ -35,10 +41,11 @@ from adafisher_modes import AdaFisherMulti
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FISHERADAPTUNE_ADAFISHER = REPO_ROOT / "reference_repos/FisherAdapTune/scripts/adafisher.py"
+OFFICIAL_ADAFISHER = REPO_ROOT / "reference_repos/AdaFisher/optimizers/AdaFisher.py"
 
 FISHER_ARMS = ("diag", "kfac", "ekfac", "tkfac", "tekfac")
 BASELINE_ARMS = ("adam", "adamw")
-ARMS = FISHER_ARMS + BASELINE_ARMS + ("reference",)
+ARMS = FISHER_ARMS + BASELINE_ARMS + ("reference", "official")
 
 
 @dataclass(frozen=True)
@@ -67,14 +74,49 @@ class HParams:
     decoupled_wd: bool = False  # True = AdaFisherW / AdamW convention
 
 
-def load_reference_adafisher() -> ModuleType:
-    spec = importlib.util.spec_from_file_location(
-        "_ref_fisheradaptune_adafisher", FISHERADAPTUNE_ADAFISHER
-    )
+def _load_by_path(name: str, path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_reference_adafisher() -> ModuleType:
+    return _load_by_path("_ref_fisheradaptune_adafisher", FISHERADAPTUNE_ADAFISHER)
+
+
+def load_official_adafisher() -> ModuleType:
+    return _load_by_path("_ref_official_adafisher", OFFICIAL_ADAFISHER)
+
+
+def official_gamma(hp: HParams) -> float:
+    """The single ``gamma`` the official ``AdaFisher`` takes, from ``hp.gammas``.
+
+    The official running average is ``current = (gamma * 1e-1) * current + (gamma * 1e-2) * new``
+    (``AdaFisher.py::update_running_avg``), so one scalar sets both coefficients. This project
+    stores the same two coefficients as a pair, ``(1 - gammas[0], gammas[1])``. The published
+    ``gamma = 0.8`` is therefore exactly this project's default ``gammas = (0.92, 0.008)``.
+
+    A pair that no single ``gamma`` can express is refused rather than silently rounded: the arm
+    exists to run the authors' code at *their* operating point, so a hyperparameter that cannot
+    reach it must be an error.
+    """
+    if hp.gamma is not None:
+        raise ValueError(
+            "the 'official' arm cannot take --gamma: that flag is AdaFisherMulti's Eq. (3) "
+            "single-gamma EMA, which the published code does not implement (its own 'gamma' is "
+            "the scalar behind the (0.08, 0.008) pair — see official_gamma)."
+        )
+    old, new = 1.0 - hp.gammas[0], hp.gammas[1]
+    gamma = new * 1e2
+    if abs(old - gamma * 1e-1) > 1e-12 or not 0.0 <= gamma < 1.0:
+        raise ValueError(
+            f"gammas={hp.gammas} is not reachable by the official AdaFisher, whose two EMA "
+            f"coefficients are (gamma*1e-1, gamma*1e-2) for one scalar gamma; this pair asks for "
+            f"({old}, {new}), i.e. gamma={gamma} and {gamma * 1e-1}."
+        )
+    return gamma
 
 
 def build_optimizer(arm: str, model: nn.Module, hp: HParams, **overrides: Any) -> Any:
@@ -91,7 +133,7 @@ def build_optimizer(arm: str, model: nn.Module, hp: HParams, **overrides: Any) -
     is the convention — ``Adam`` and ``AdaFisher`` couple it into the gradient, ``AdamW`` and
     ``AdaFisherW`` decouple it.
     """
-    if overrides and arm in ("adam", "adamw", "reference"):
+    if overrides and arm in ("adam", "adamw", "reference", "official"):
         raise ValueError(f"arm {arm!r} takes no AdaFisherMulti overrides; got {sorted(overrides)}")
     if arm == "adam":
         return torch.optim.Adam(model.parameters(), lr=hp.baseline_lr,
@@ -103,6 +145,13 @@ def build_optimizer(arm: str, model: nn.Module, hp: HParams, **overrides: Any) -
         return load_reference_adafisher().AdaFisher(
             model, lr=hp.lr, beta=hp.beta, Lambda=hp.lam, TCov=hp.tcov, gammas=list(hp.gammas),
             weight_decay=hp.weight_decay,
+        )
+    if arm == "official":
+        official = load_official_adafisher()
+        cls = official.AdaFisherW if hp.decoupled_wd else official.AdaFisher
+        return cls(
+            model, lr=hp.lr, beta=hp.beta, Lambda=hp.lam, gamma=official_gamma(hp),
+            TCov=hp.tcov, weight_decay=hp.weight_decay,
         )
     if arm not in FISHER_ARMS:
         raise ValueError(f"Unknown arm {arm!r}; available: {list(ARMS)}")
