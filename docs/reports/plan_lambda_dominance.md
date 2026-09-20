@@ -1106,3 +1106,231 @@ and are bounds, not values, which makes Results 2 and 3 lower bounds. And the me
 from E1, measured at a mid-training checkpoint, while these sweeps train from scratch — the leading
 candidate explanation for the 10.8x residual in Result 4 is that a mid-training statistic is the
 wrong thing to set a whole-run constant from.
+
+### E9 — done. The candidate is refuted, and the check it forced is the real finding.
+
+Script: [e9_early_curvature_tau.py](../../fisher_ref/experiments/e9_early_curvature_tau.py), job
+script [e9_early_curvature_tau.sh](../../fisher_ref/slurm/e9_early_curvature_tau.sh). Job 21432483,
+9 minutes 46. Output: `fisher_ref/outputs/e9_early_curvature_tau.json`.
+
+**What it tested.** E7 left one candidate for the 10.8x residual in `tau`: every mean curvature it
+used came from a half-trajectory checkpoint, while the sweeps train from scratch, so a mid-training
+statistic might simply be the wrong number to set a whole-run constant from. This job trains each
+network from scratch at batch 32 and re-reads the curvature at 1000, 2000, 4000 and 8000 steps,
+then recomputes `tau` from each.
+
+**Result 1 — the candidate is refuted, cleanly.**
+
+| where the curvature is read | spread of `tau` over the 8 pairs |
+|---|---|
+| mid-training (E1, what E7 used) | 10.8x |
+| step 1000 | 10.0x |
+| step 2000 | 10.0x |
+| step 4000 | 10.0x |
+| step 8000 | 10.0x |
+
+Reading the curvature early changes the spread by 7%. It is not where the residual comes from. The
+value itself is stable — the geometric mean of `tau` moves only from 1.48e-5 to 2.05e-5 across the
+whole trajectory, against 1.51e-5 mid-training — so the *level* of the constant is not in question.
+Its *spread* is.
+
+**Result 2 — the spread is not spread across the networks. It sits inside one of them.**
+
+| group | step 1000 | 2000 | 4000 | 8000 |
+|---|---|---|---|---|
+| `cnn_gn_cifar`, 4 modes | 1.1x | 1.3x | 1.3x | 1.4x |
+| `vit_micro_cifar`, 3 modes | **10.0x** | **10.0x** | **10.0x** | **10.0x** |
+| all 8 pairs | 10.0x | 10.0x | 10.0x | 10.0x |
+
+And on `vit_micro_cifar` the three modes have **the same curvature** — 1.60e-4, 1.69e-4, 1.69e-4 —
+while their best safety constants differ by a factor of ten: 1e-8, 3e-9, 1e-9. So the residual
+cannot be a curvature-statistic problem. Three modes with one curvature cannot want three different
+constants because of how the curvature was summarised.
+
+**Result 3 — and this is the finding. None of the eight peaks is actually resolved.** Checking each
+peak against its own runner-up in the same sweep:
+
+| network | mode | best | runner-up | margin |
+|---|---|---|---|---|
+| `cnn_gn_cifar` | `kfac` | 65.58 | 65.11 | 0.47 |
+| | `ekfac` | 63.15 | 63.07 | **0.08** |
+| | `tkfac` | 63.50 | 63.16 | 0.34 |
+| | `tekfac` | 63.27 | 63.00 | 0.27 |
+| `vit_micro_cifar` | `ekfac` | 48.82 | 48.19 | 0.63 |
+| | `tkfac` | 50.90 | 50.74 | **0.16** |
+| | `tekfac` | 48.30 | 47.63 | 0.67 |
+| `cct_2_3x2_cifar` | `tkfac` | 79.62 | 79.01 | 0.61 |
+
+The seed-to-seed floor this project has measured on this protocol is **0.04 to 0.18 accuracy
+points**. Four of the eight margins are at or below it. The other four are three to four times it,
+which is not comfortable either at one seed. And one curve is visibly not a curve with a peak:
+`vit_micro_cifar`/`tkfac` reads 48.66, 49.48, **50.90**, 47.47, 50.74 — a dip of three points
+between two values that agree to 0.16.
+
+**So `tau` has not been measured.** Every value of it in this document is computed from a peak
+position that is not distinguishable from its neighbour at one seed. That includes the tight-looking
+1.1x to 1.4x inside `cnn_gn_cifar`, which is close to circular: all four of its modes peaked at the
+same grid point and have mean curvatures within 12% of each other, so their `tau` values must agree
+whether or not any rule holds. Four modes there are close to one determination, not four.
+
+**What this changes.** The blocking measurement for fix S1 is not a better curvature statistic and
+not a finer grid. It is **seeds**. Until each peak is separated from its neighbour by more than the
+seed-to-seed floor, the constant cannot be pinned, and neither the "10.8x is too loose" reading of
+E7 Result 4 nor any tighter reading is supported by the data. E7's own limits section flagged the
+half-grid-step uncertainty; this run is what forced it to be followed through.
+
+The cheap version: keep only the two or three values of the safety constant bracketing each peak,
+and run those at five seeds. On `cnn_gn_cifar` that is 3 x 4 x 5 = 60 runs, about the cost of two of
+the sweeps already run.
+
+### E8 — done. Three peaks finally located, and a defect that was understating two modes by up to 4.5 points.
+
+Jobs 21432181 (the sweep, 1 h 15) and 21432595 (the ordering control, 32 min). `cct_2_3x2_cifar`,
+window extended down to 1e-12, batch 32, 15 epochs, same protocol as E7. Outputs:
+`fisher_ref/outputs/e8_deep_cct.json` and `e8_deep_cct_eigfix.json`. The four values E7 had already
+run reproduce to **0.00 accuracy points**, so the two windows are one continuous curve.
+
+**Result 1 — extending the window located three peaks properly.** E9 had just established that not
+one peak in the study was separated from its neighbour by more than the seed floor. Three now are:
+
+| mode | reference | 1e-10 | 1e-11 | 3e-12 | 1e-12 | best | gain | margin over runner-up |
+|---|---|---|---|---|---|---|---|---|
+| `tkfac` | 72.68 | **79.01** | 73.42 | 66.31 | 59.64 | 1e-10 | +6.33 | **5.59** |
+| `tekfac` | 72.98 | **80.10** | 78.00 | 72.87 | 67.62 | 1e-10 | +7.12 | **2.10** |
+| `ekfac` | 72.49 | **80.04** | 78.09 | 72.79 | 67.28 | 1e-10 | +7.55 | **1.95** |
+| `kfac` | 73.05 | 78.83 | 80.90 | **81.17** | 80.27 | 3e-12 | +8.12 | 0.27 |
+| `diag` | 73.05 | 46.15 | 37.58 | 33.72 | 30.29 | — | −26.90 | — |
+
+Against a seed floor of 0.04 to 0.18 points, margins of 1.95, 2.10 and 5.59 are real. So the answer
+to E9's blocking problem is not only seeds: **widen the window until the curve falls off on both
+sides**, and the peak locates itself. E7's grids stopped while three of these were still climbing,
+which is exactly why they could not be pinned.
+
+`kfac` is the exception twice over. Its peak sits at 3e-12, thirty times below the other three
+modes' on the same network, and its margin is 0.27 — still inside the noise band. It is also the
+only one of the four with no eigenbasis, so Result 2 does not touch it.
+
+**Result 2 — and this corrects earlier results in this document.** The eigenbasis-ordering defect
+that `CLAUDE.md` section 3 documents costs real accuracy once the safety constant is lowered:
+
+| mode | at the default constant | 1e-10 | 1e-11 | 3e-12 | 1e-12 |
+|---|---|---|---|---|---|
+| `ekfac` | +0.79 | **+1.79** | **+3.30** | **+3.89** | **+3.05** |
+| `tekfac` | +0.03 | **+1.65** | **+3.23** | **+4.49** | **+3.19** |
+
+At the shipped constant it is worth +0.79 and +0.03, which is why no trained model in this
+repository was affected and why the audit could call it inert. Four to nine orders of magnitude
+lower it is worth **1.6 to 4.5 accuracy points**. `CLAUDE.md` says in so many words to fix the
+ordering before acting on fix S1, which lowers the constant; this is that warning, measured on a
+real network.
+
+**Every `ekfac` and `tekfac` number at a small safety constant in E7 and in Result 1 above is
+therefore understated**, by 1.6 to 4.5 points. They are kept as measured, and this table is what
+converts them.
+
+**Result 3 — the best result in the study.**
+
+| accuracy | mode | constant | ordering | its own reference | gain |
+|---|---|---|---|---|---|
+| **81.83%** | `ekfac` | 1e-10 | corrected | 73.28 | **+8.55** |
+| 81.75% | `tekfac` | 1e-10 | corrected | 73.01 | +8.74 |
+| 81.17% | `kfac` | 3e-12 | shipped | 73.05 | +8.12 |
+
+Three different modes, two different orderings, two constants thirty times apart, all landing within
+0.7 points of each other around 81.5%, from references around 73. Whatever the right rule for the
+constant is, the *ceiling* it reaches on this network looks mode-independent.
+
+One caveat on Result 3, since it invites a comparison it does not support: these are test
+accuracies at a fixed 15 epochs and batch 32. The campaign's own numbers on this model are
+validation accuracies under the wall-clock-budget protocol. The two are not the same measurement
+and should not be put in one table.
+
+**A note on the corrected ordering's own peaks.** With the ordering fixed, `ekfac` reads 81.83 at
+1e-10 against 81.39 at 1e-11, and `tekfac` 81.75 against 81.23 — margins of 0.44 and 0.52, back
+inside the band where a peak is not located. Fixing the defect raised the whole curve and flattened
+its top. So Result 1's three located peaks are located for the *shipped* ordering, and locating them
+for the corrected one needs either seeds or a finer grid between 1e-10 and 1e-11.
+
+### E10-E12 — done. The first located peak, a floor eight times larger than assumed, and a defect that was hiding EKFAC's own theorem.
+
+Eleven jobs (21446986-97), 15 to 48 minutes each, all COMPLETED. Five seeds on
+`cct_2_3x2_cifar` with the corrected eigenbasis ordering (E10), five seeds on its `kfac` alone
+(E11), and one seeded run extending `vit_micro_cifar`'s window downward (E12). Outputs:
+`fisher_ref/outputs/e1{0,1,2}_*.json`. Seed 0 of E10 reproduces E8's single-seed numbers to
+**0.0000 accuracy points**, so the two are one experiment.
+
+**Result 1 — the seed floor on this network is eight to thirty-five times larger than the one this
+document had been borrowing.** Each of the ten per-seed jobs re-ran its own reference arm:
+
+| mode | s0 | s1 | s2 | s3 | s4 | spread | sd |
+|---|---|---|---|---|---|---|---|
+| `ekfac` | 73.28 | 73.03 | 72.42 | 73.21 | 72.72 | 0.86 | 0.36 |
+| `tekfac` | 73.01 | 72.85 | 72.49 | 73.23 | 72.92 | 0.74 | 0.27 |
+| `kfac` | 73.05 | 73.43 | 72.35 | 73.76 | 73.00 | **1.41** | 0.53 |
+
+The floor is **0.74 to 1.41 points**, not the 0.04 to 0.18 measured on `cnn_gn_cifar` and
+`resnet20_cifar` and used everywhere above for want of anything better. Every "resolved" verdict in
+E8 has to be re-read against it: `tkfac`'s margin of 5.59 survives, `ekfac`'s 1.95 and `tekfac`'s
+2.10 become marginal, and `kfac`'s 0.27 was never resolved. **A noise floor does not transfer
+between networks**, and this is the second time in this document that borrowing one has misled.
+
+**Result 2 — the first properly located peak in the study, and it is not where one seed said.**
+With five seeds and the ordering corrected, on `cct_2_3x2_cifar`:
+
+| mode | ref | 3e-10 | 1e-10 | **3e-11** | 1e-11 | 3e-12 | 1e-12 |
+|---|---|---|---|---|---|---|---|
+| `ekfac` | 72.93 | 78.85 ±0.19 | 81.57 ±0.10 | **82.85 ±0.14** | [81.39] | [76.68] | [70.33] |
+| `tekfac` | 72.90 | 79.06 ±0.18 | 81.59 ±0.09 | **82.88 ±0.18** | [81.23] | [77.36] | [70.81] |
+
+(± is the standard error over five seeds; bracketed values are E8's single seed.)
+
+The peak is at **3e-11**, falling away on both sides, separated from its runner-up by **7.4 and 6.4
+standard errors**. E8 put it at 1e-10 because its grid went 1e-10, 1e-11 and skipped the point
+between. **+9.91 and +9.98 accuracy points over their own references — the largest gains in the
+study**, and the first ones resting on a peak that is statistically located rather than assumed.
+
+**Result 3 — `kfac` has no peak. It has a plateau, and the anomaly dissolves.**
+
+| `λ` | 1e-11 | 3e-12 | 1e-12 | 3e-13 |
+|---|---|---|---|---|
+| accuracy, 5 seeds | 80.16 ±0.22 | **80.40 ±0.24** | 79.96 ±0.28 | 77.89 ±0.22 |
+
+The top three sit within 0.44 points and the best beats its runner-up by **0.7 standard errors**:
+not separable. So `kfac` does not want 3e-12 specifically, it is flat across a decade. The question
+"why does this one mode want a constant thirty times smaller than the others" was built on a peak
+that is not there.
+
+**Result 4 — and this is the one that matters. The ordering defect was hiding EKFAC's own theorem.**
+`kfac`'s ceiling on this network is **80.40**. `ekfac`'s and `tekfac`'s are **82.85 and 82.88** —
+two and a half points higher. Before the ordering was corrected, at one seed, `kfac` read 81.17 and
+`ekfac` 80.04: KFAC looked **better**. EKFAC exists because its rescaling is provably at least as
+good as K-FAC's in the same basis (`ekfac_1806.03884.pdf` Theorems 2 and 3), and measuring that
+rescaling in a basis that is about to be replaced was costing exactly that advantage. The property
+only becomes visible once the safety constant is low enough for the rescaling to matter at all,
+which is why nothing in this repository had ever seen it.
+
+**Result 5 — E12 extended `vit_micro_cifar`'s window in the wrong direction.** With the ordering
+corrected, three of its four modes peak at the **top** of the new window:
+
+| mode | ref | 1e-10 | 1e-11 | 3e-12 | 1e-12 | best | gain |
+|---|---|---|---|---|---|---|---|
+| `kfac` | 45.35 | 51.84 | **54.23** | 53.08 | 50.92 | 1e-11, interior | +8.88 |
+| `tekfac` | 46.33 | **54.92** | 49.35 | 43.52 | 39.15 | 1e-10, top edge | +8.59 |
+| `ekfac` | 46.32 | **54.36** | 47.91 | 43.10 | 39.38 | 1e-10, top edge | +8.04 |
+| `tkfac` | 46.06 | **49.20** | 40.74 | 36.53 | 31.32 | 1e-10, top edge | +3.14 |
+
+Correcting the ordering moves this network's optimum *up*, so the window needed extending above
+1e-10, not below. What it does establish: the gains on `vit_micro_cifar` went from E7's +2.19 and
++2.98 for `ekfac`/`tekfac` to **+8.04 and +8.59**. `kfac`'s interior peak at 1e-11 has a margin of
+1.15 points at one seed, which is inside this study's measured floor, so it is not located either.
+
+**Result 6 — `tau`, at the one peak that is located.** Reading the curvature at steps 1000 to 8000
+gives `tau` between **1.0e-6 and 1.6e-6** for the located peak. The earlier figure of 1.7e-5, built
+from peaks that E9 showed were not located and from `ekfac`/`tekfac` runs carrying the ordering
+defect, is **twenty times larger**. One located determination is not a rule, but it does mean the
+constant this document has been quoting was wrong.
+
+**What is left, stated plainly.** One peak in the study is located. Locating a second needs the same
+treatment somewhere else: the corrected ordering, five seeds, and a window wide enough that the
+curve falls on both sides. `vit_micro_cifar` is the obvious candidate and needs its window moved up,
+to roughly {1e-8, 3e-9, 1e-9, 3e-10, 1e-10}.

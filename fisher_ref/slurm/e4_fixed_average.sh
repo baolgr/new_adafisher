@@ -68,9 +68,17 @@ export E4_LAMBDAS="${E4_LAMBDAS:-1e-4,1e-6,1e-8,1e-10}"
 export E4_ESTIMATORS="${E4_ESTIMATORS:-shipped,corrected}"
 export E4_BATCH="${E4_BATCH:-32}"
 export E4_GAMMA="${E4_GAMMA:-0.8}"
+# Scalar on purpose. A seed axis is five submissions with a different value and a different
+# output file, which needs no code and gives each seed its own reference arm -- and those
+# references are what measure the seed-to-seed floor on the network being swept, instead of
+# borrowing a floor measured on a different one.
+export E4_SEED="${E4_SEED:-0}"
 # 1 = hold the parameters the optimizer does not precondition at their initial values in
 # EVERY arm, so the sweep does not silently freeze them as lambda falls. See the E5 control.
 export E4_FREEZE_UNHOOKED="${E4_FREEZE_UNHOOKED:-0}"
-export E4_OUT="${E4_OUT:-$SLURM_SUBMIT_DIR/fisher_ref/outputs/e4_fixed_average_${E4_MODELS}_frozen${E4_FREEZE_UNHOOKED}.json}"
+# 1 = ekfac/tekfac measure their rescaling in the basis precondition uses. Matters only
+# once Lambda is far below 1e-3; see CLAUDE.md section 3.
+export E4_EIG_BEFORE_RESCALE="${E4_EIG_BEFORE_RESCALE:-0}"
+export E4_OUT="${E4_OUT:-$SLURM_SUBMIT_DIR/fisher_ref/outputs/e4_fixed_average_${E4_MODELS}_frozen${E4_FREEZE_UNHOOKED}_eig${E4_EIG_BEFORE_RESCALE}.json}"
 
 python fisher_ref/experiments/e4_fixed_average.py

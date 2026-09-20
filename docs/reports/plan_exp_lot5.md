@@ -1163,3 +1163,59 @@ already scales its `λ` by the state is the one whose preconditioner still does 
   mechanism: `λ` cannot matter to the *loss* through a preconditioner that is `λ·I` whatever `λ` is.
 * **The `mnist_autoencoder` stall is not addressed here.** It is B0, a regime-B model (lot 4). But
   §6.4 supplies the hypothesis its §3.6 measurement should test first.
+
+### 6.8 Relation to the two investigations run in parallel
+
+`plan_lambda_dominance.md` and `validation_noise_investigation.md` reached §6.4's conclusion first,
+by a different route, and lot 5 must be read against them rather than as a discovery.
+
+**The same fact, measured on three different objects, and the numbers cross-check.**
+
+| where | object measured | result |
+|---|---|---|
+| `plan_lambda_dominance.md` E1 | the **stored curvature** against `λ`, direction by direction | `λ` larger in **105 of 105** cases, every direction |
+| `validation_noise_investigation.md` Step 7 | the same, 7 networks × 5 modes | curvature `< 3 %` of `λ` in 99 % of directions; the largest anywhere is **7 % (`diag`)**, **~0.1 %** (Kronecker modes) |
+| **lot 5 §6.4** | the **assembled operator `F̃`**, and the **step it produces** | `cond(F̃) ∈ [1.0000, 1.1035]`; per mode `diag` **5.7 %**, `ekfac`/`tekfac` **0.13 %**; `ρ(P2) = ρ(identity)` to `10⁻⁴`-`10⁻⁶` |
+
+Step 7's "7 % for `diag`, ~0.1 % for the Kronecker modes" and §6.4's per-mode condition numbers are
+the same two numbers, obtained from the state and from the operator independently. That agreement is
+worth more than either measurement alone.
+
+**What lot 5 adds.** Those two studies measure the optimizer against *itself* — curvature against
+its own `λ`. Lot 5 measures it against the **exact Fisher on the same probes**, which is what turns
+"the division does not adapt" into a price: the operational preconditioner delivers `0.18`-`0.42` of
+the ideal quadratic decrease where the same structure computed properly delivers `0.58`-`0.88`. It
+also separates §11's three suspects (§6.5: the averaging leaves `0.01`-`0.43` of structure, `λ`
+removes it), and supplies the positive control for fix **S1** that both reports ask for (§6.6b:
+`tkfac`, the one mode whose `λ` is already relative, is the one still measurably anisotropic —
+confirmed twice, by `ρ` and by `cond(F̃)`).
+
+**Where lot 5 is the weaker of the three, and this bounds how §6.4 may be quoted.**
+`validation_noise_investigation.md` Steps 9-16 tested the "it is just momentum" reading against
+**real training**, and it does not generalise: on `mlp_ln_mnist` a curvature-free stand-in is
+indistinguishable from `kfac` (the gap equals the seed noise), but on `cnn_gn_cifar` and
+`resnet20_cifar` it moves final accuracy by **8-33 ×** that noise; across 30 (network, mode) pairs,
+11 clean passes, 12 a few percent off, 2 clear failures. Its Step 9 explains why, and the
+explanation applies word for word to lot 5: **Step 7 measured a size, not a shape** — and so does
+§6.4. An operator that is `(1 + ε)·I` with `ε ≈ 10⁻⁴` is indistinguishable from the identity *in one
+step at fixed θ*, which is exactly what `cos_F` and `ρ` see, and can still move a 10 000-step
+trajectory, because the departure is systematic rather than random and it compounds.
+
+**So §6.4 says "the per-step preconditioner is numerically the identity". It does not say "the five
+modes are interchangeable in training", and the parallel work has already shown that to be false on
+convolutional networks.**
+
+**One thing lot 5's data was checked against and does *not* explain.**
+`validation_noise_investigation.md` Step 16 leaves open why `cnn_gn_cifar`/`kfac` is the exception,
+with a correlational lead: it is the only mode whose applied step is anisotropic in the first ~200
+steps. Lot 5 has per-mode, per-checkpoint departures from the identity, including at `θ = 0`, so the
+lead is directly testable here. It fails: `kfac`'s departure on `cnn_gn_cifar` is `1.1e-4` at
+`θ = 0` and `1.6e-5` at `θ = 0.01`, **smaller** than on `mlp_ln_mnist` (`1.9e-3`, `9.4e-4`) — the
+network where the stand-in reproduces `kfac` exactly. The ordering is backwards.
+
+The reason is a genuine blind spot rather than a contradiction: their early-training regime is a
+*fresh* optimizer whose estimator has not converged, dominated by the start-up transient their Step 8
+identified — and §0.6 **deliberately excludes exactly that regime**, refusing any re-warm shorter
+than `10·TCov` in order to remove the transient. Lot 5 measures "initial weights, converged
+estimator"; their exception lives at "initial weights, un-converged estimator". The two are
+different objects, and nothing here speaks to theirs.

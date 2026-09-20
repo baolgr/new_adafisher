@@ -95,18 +95,30 @@ BATCH = int(os.environ.get("E4_BATCH", "32"))
 # vit_micro_cifar, so on that network it has to be an axis of the experiment rather than something
 # the sweep does silently. Freezing in EVERY arm makes it a constant instead of a variable.
 FREEZE_UNHOOKED = os.environ.get("E4_FREEZE_UNHOOKED", "0") == "1"
+# 1 = rebuild ekfac/tekfac's eigenbasis inside the backward hook, before the gradient is projected
+# into it, so the rescaling is measured in the basis precondition then uses. CLAUDE.md section 3
+# measured that the two orderings move the applied step by 3.0e-3 at Lambda=1e-3 and by 8.3 at
+# Lambda=1e-8, and says in so many words to fix the ordering before acting on fix S1, which lowers
+# Lambda. This sweep goes to 1e-12, four orders below where the effect was measured, so for those
+# two modes the ordering is not a detail here -- it is an axis. Ignored for the other three modes,
+# where AdaFisherMulti raises on it.
+EIG_BEFORE_RESCALE = os.environ.get("E4_EIG_BEFORE_RESCALE", "0") == "1"
 GAMMA = float(os.environ.get("E4_GAMMA", "0.8"))       # the paper's own Eq. (3) value
 SEED = int(os.environ.get("E4_SEED", "0"))
 OUT = Path(os.environ.get("E4_OUT", str(ROOT / "fisher_ref/outputs/e4_fixed_average.json")))
 
 
-def estimator_kwargs(estimator: str) -> Dict[str, Any]:
-    """The two extra arguments to AdaFisherMulti that define an estimator arm."""
+def estimator_kwargs(estimator: str, mode: str = "") -> Dict[str, Any]:
+    """The extra arguments to AdaFisherMulti that define an estimator arm."""
     if estimator == "shipped":
-        return {}
-    if estimator == "corrected":
-        return {"gamma": GAMMA, "ema_seed_first": True}
-    raise ValueError(f"unknown estimator {estimator!r}")
+        kw: Dict[str, Any] = {}
+    elif estimator == "corrected":
+        kw = {"gamma": GAMMA, "ema_seed_first": True}
+    else:
+        raise ValueError(f"unknown estimator {estimator!r}")
+    if EIG_BEFORE_RESCALE and mode in ("ekfac", "tekfac"):
+        kw["eig_before_rescale"] = True
+    return kw
 
 
 def collapsed(run: Dict[str, Any]) -> bool:
@@ -146,7 +158,7 @@ def run_one(bench, mode: str, estimator: str, lam: float, lr: float,
         if found != len(wanted):
             raise ValueError(f"freeze_names named {len(wanted)} parameters, matched {found}")
     theta0 = flatten_params(model)
-    optimizer = build_optimizer(mode, model, hp, **estimator_kwargs(estimator))
+    optimizer = build_optimizer(mode, model, hp, **estimator_kwargs(estimator, mode))
 
     train_loader, val_loader, test_loader = bench.build_data(
         DATA_ROOT, batch_size=BATCH, seed=SEED, num_workers=NUM_WORKERS,
@@ -203,7 +215,8 @@ def main() -> None:
     print(f"E4: a fixed running average, at batch {BATCH} | device={DEVICE} | epochs={EPOCHS} | "
           f"seed={SEED}\nmodels={MODELS}\nmodes={MODES}\nlambdas={LAMBDAS}\n"
           f"estimators={ESTIMATORS} (corrected = gamma {GAMMA} + ema_seed_first)\n"
-          f"freeze_unhooked={FREEZE_UNHOOKED}\n", flush=True)
+          f"freeze_unhooked={FREEZE_UNHOOKED}  "
+          f"eig_before_rescale={EIG_BEFORE_RESCALE} (ekfac/tekfac only)\n", flush=True)
 
     results: Dict[str, Any] = {}
     for model_name in MODELS:
@@ -220,6 +233,7 @@ def main() -> None:
               f") ##########", flush=True)
         results[model_name] = {"base_lambda": base_lam, "base_lr": base_lr, "cap": cap,
                                "batch_size": BATCH, "freeze_unhooked": FREEZE_UNHOOKED,
+                               "eig_before_rescale": EIG_BEFORE_RESCALE,
                                "frozen_names": freeze_names, "cells": {}}
 
         for mode in MODES:
