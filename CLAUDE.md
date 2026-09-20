@@ -579,6 +579,121 @@ root on `v^(t)` — is **identical across the five modes**.
 > rather than answered: under SUA the operator is not one `kron(B~, A~)` over the full patch
 > direction but the same small operator applied at each kernel offset (`plan_lot6.md` §0.4).
 
+> **The authors' own code, on the bench that stalls and on two published CIFAR-10 numbers: both
+> steps done** (`docs/reports/plan_authors_repro.md`). Every number behind this
+> file's "the primary bench is the only failure" paragraph came from this repository's port, so a
+> porting mistake was not excluded. It is now. The optimizer of the authors' **published**
+> repository (`reference_repos/AdaFisher/optimizers/AdaFisher.py`, unmodified, the new **`official`
+> arm** of `benchmarks/common/optimizers.py`) freezes on the MNIST auto-encoder exactly where
+> `diag` does: over a full 20-epoch run of 2 200 steps the two trajectories differ by at most
+> **2.58e-7 relative** — the few bits the fused `addcdiv_` costs (§2.1), and nothing else — both
+> ending at train loss **0.70828** against `adam`'s **0.47194**. FisherAdapTune's `AdaFisher` (the
+> `reference` arm, min-max off) stalls at the same 0.70828, 1.3e-3 away. **The stall is AdaFisher's,
+> not the port's.** Two measurements sharpen it. (1) **A learning-rate bracket is ruled out, as the
+> `lam` bracket already was**: the authors' code ends within **7e-6 of 0.70828 at `lr` in
+> {1e-4, 1e-3, 1e-2, 1e-1}** — four different journeys (the `1e-4` and `1e-3` trajectories are up to
+> 0.28 apart mid-run) to one destination. Do not re-run it. (2) **0.70828 is the network's plateau,
+> not a number AdaFisher invents**: `adam` lands on it too, at `lr = 1e-2` (0.70828) and `1e-1`
+> (0.70850), and escapes only at `1e-3` (0.4719) and `1e-4` (0.6090). So the honest statement is that
+> Adam has a window of learning rates that leaves this all-sigmoid plateau and AdaFisher, at this
+> damping, has none among those tried — which is what `plan_lambda_dominance.md` predicts, and
+> consistent with the already-measured parameter travel (~1.0 against Adam's 25.8), i.e. steps far
+> too small. **Step 2, the positive control, is in, and both published rows come back**: the authors'
+> own `train.py` on their own `AdaFisherCNN.yaml`/`adamCNN.yaml` **verbatim** (jobs 21449869/21449870,
+> COMPLETED in `01:04:52`/`01:04:33`, seed 42, their pinned `torch 2.3.0`/`torchvision
+> 0.18.0`/`numpy 1.26.4`, all three in the wheelhouse) gives Table 2's CIFAR-10 ResNet18 best test
+> top-1 at **96.32 %** against the published **96.25 ± 0.2** (+0.07, i.e. 0.35 of its std) and, for
+> Adam, **94.78 %** against **94.85 ± 0.1** (−0.07, 0.70 of its std) — the published gap of 1.40
+> points reproducing as **1.54**. So the negative result above is not a broken setup talking: the same
+> code on the same machine reproduces a published number on CIFAR-10 and stalls on the auto-encoder.
+> Three measurements worth keeping from it: **Table 8's 200-vs-210 epoch split really is the
+> equal-wall-clock protocol** (the two runs took 3 834.5 s and 3 818.3 s, **0.4 % apart**);
+> AdaFisher's per-epoch overhead over Adam on ResNet18 is **5.3 %** (19.15 s against 18.17 s), which
+> is `diag` being the cheap mode, next to the four Kronecker modes' 1-2x of fwd+bwd
+> (`plan_lot7.md` §6); and **AdaFisher reaches Adam's best accuracy at epoch 158**, 50.5 min into the
+> 63.6 min Adam's whole run takes, while Adam never reaches AdaFisher's best — the paper's convergence
+> claim, not only its final number. What is **still not established** is that AdaFisher stalls on
+> anything between those two settings: a convolutional net with BatchNorm, augmentation, batch 256 and
+> a 200-epoch cosine works; eight sigmoid `Linear` layers at batch 500 for 20 epochs do not, and which
+> of those differences is the discriminating one is untested. Three things that cost a job or would
+> have: `reference_repos/` is gitignored and the cluster checkout held **0 of its 73 files** inside a
+> correct directory skeleton, so the job's `diff -r` integrity check passed on two empty trees (it now
+> counts files too); `numpy 2` breaks the authors' code before it trains anything (`np.Inf` in their
+> `early_stop.py`); and their `train.py` imports `asdl` unconditionally for its Shampoo/K-FAC arms
+> only, which `benchmarks/authors_repro/asdl_stub/` satisfies and nothing on an AdaFisher or Adam
+> path can reach — **the single deviation in the whole reproduction**.
+
+> **The seed axis completed to all seven arms: done, and it changes a reading.** The extra-seed
+> table (`train_v0_seeds.sh`) only ever ran **two** arms, `diag` and `adamw`, because
+> `plan_exp_draft_v0.md` §3.5 samples two trajectories for the *drift* question. That left a
+> different hole, measured from the bridge before anything was launched: `kfac`, `ekfac`, `tkfac`,
+> `tekfac` and `adam` existed at **seed 0 and nowhere else, on every model**, so every statement
+> comparing the five modes *to each other* rested on one draw. Seven new jobs
+> (`benchmarks/slurm/train_seeds_<model>.sh`, from `SEED_COMPLETION` in `generate_jobs.py`) fill it
+> at the seeds the plan asks for — regime A 1-4, regime B 1-2 — and add the two models
+> `V0_SEEDS` never covered at all: `cnn_gn_cifar_bn` (one of lot 5's four regime-A models) and
+> `mnist_autoencoder` (the primary bench, the one carrying the stall finding). All seven
+> `COMPLETED`, exit 0, 9 min to 1 h 31 each. The tree is now **24 (model, seed) runs x 7 arms x 5
+> fractions = 840 checkpoints**, every cell filled; `available_seeds()` returns `[0,1,2,3,4]` on the
+> five regime-A models and `[0,1,2]` on the two regime-B ones **for all seven arms**, and
+> `discover_runs()` finds **217** runs against 81 before.
+>
+> **The re-run of `diag`/`adamw` was checked, not assumed: 158 of 160 pre-existing checkpoints are
+> bit-identical.** The two exceptions are both `cnn_gn_cifar/adamw/ckpt_1.pt`, at seeds 1 and 3, and
+> the cause is the WCT protocol rather than any non-determinism. `diag` is the *reference* arm, so it
+> is unbudgeted and ran **exactly 10 530 steps in all 8 cases**, bit-identical both times. `adamw` is
+> budgeted by measured time: 11 317 / 11 013 / 11 683 / 11 314 steps in the old campaign against
+> 10 490 / 10 576 / 10 272 / 10 618 in the new one — **7-12 % fewer steps for a budget only 1-4 %
+> smaller** (46.4 s -> 45.3 s and so on), i.e. the node was busier and each step cost more.
+> `ckpt_1.pt` is written at the nominal step 10 530 when the arm reaches it and pinned to the arm's
+> own end otherwise: the old runs passed 10 530 at all four seeds, the new ones only at seeds 2 and 4
+> (10 576, 10 618) and fell short at seeds 1 and 3 (10 490, 10 272). Exactly the two that differ.
+> **The rule to carry: under WCT only the reference arm is reproducible across campaigns; a budgeted
+> arm's step count follows node contention, so two campaigns are not comparable step-for-step there.**
+>
+> **The finding one seed could not reach: the five modes split into two groups, and the split is
+> significant.** Pairing is exact — within a `(model, seed)` cell every arm shares the initialisation
+> and the data order — so the comparison is an exact paired sign test over the **24** cells. Mean
+> rank of 5: `kfac` **2.08**, `diag` **2.42**, `tkfac` **2.42**, `tekfac` **3.92**, `ekfac` **4.17**.
+> Inside `{diag, kfac, tkfac}` no pair separates (p >= 0.31); inside `{ekfac, tekfac}` neither
+> (p = 0.84); **all six cross-group pairs do** — `kfac > ekfac` 22/24 (p = 4e-5), `kfac > tekfac`
+> 21/24 (p = 2.8e-4), `tkfac > ekfac` 22/24 (p = 4e-5), `diag > ekfac`, `diag > tekfac` and
+> `tkfac > tekfac` all 19/24 (p = 0.0066). Bottom-2 occupancy: `ekfac` **19/24**, `tekfac` **17/24**,
+> against `kfac` 2/24, `tkfac` 4/24, `diag` 6/24.
+>
+> **And the mechanism is measured, not inferred: the two losing modes are the two that buy fewest
+> steps.** Steps completed inside the *same* wall-clock budget, relative to `diag = 1.00`, averaged
+> over the seven models: `diag` 1.00, `kfac` 0.93, `tkfac` 0.91, **`ekfac` 0.82, `tekfac` 0.82**
+> (`adam`/`adamw` 1.14). The group boundary is the same one the sign test finds. This is lot 7's
+> per-step cost measurement (`ekfac`/`tekfac` ~1.8x their own fwd+bwd in extra work, `kfac`/`tkfac`
+> ~1.0x) showing up as a *convergence* result for the first time, and it lines up with lot 5 from the
+> other side: `ekfac`/`tekfac` hold the operational preconditioner **closest to the identity**
+> (departure 1.3e-7 and 1.5e-7, against `kfac` 1.8e-5, `diag` 2.9e-5, `tkfac` 6.8e-5). They pay the
+> most per step and deviate from the plain gradient the least. **State it carefully:** this is a
+> result at *equal wall-clock*, at one shared untuned operating point. It does **not** show that
+> EKFAC/TEKFAC approximate the curvature worse — the deficit is confounded with step count, and only
+> an equal-step comparison would separate the two. That is the comparison `plan.md` §6.3 warns is
+> rigged in the other direction.
+>
+> **What is robust across every seed: the Fisher modes beat both baselines on six models of seven,
+> and lose totally on the seventh.** Paired against the better of `adam`/`adamw`, per seed:
+> `vit_micro_cifar` **+12.6 to +14.4** points, `cct_2_3x2_cifar` **+10.1 to +11.1**,
+> `cnn_gn_cifar_bn` **+4.9 to +5.9**, `cnn_gn_cifar` **+1.9 to +3.0**, `resnet20_cifar`
+> **+1.2 to +2.3**, `mlp_ln_mnist` **+0.18 to +0.49** — winning on every seed in 34 of the 35
+> (mode, seed) cells those six models hold. The seventh is `mnist_autoencoder`, where all five modes
+> lose by **0.210** in final validation loss on **0 of 4** seeds, and by the *same* 0.210 for every
+> mode. **So the stall is confirmed on four fresh seeds and is model-specific, not a property of the
+> modes**: the five sit at `0.7072-0.7074 +- 0.0014` while `adam`/`adamw` reach `0.4976 +- 0.0207`,
+> and the spread between the modes (`0.00024`) is **5.6x smaller than the seed-to-seed spread**.
+> Lot 7's "all five converge to an indistinguishable final loss" is now measured over seeds — and it
+> remains the wrong thing to celebrate, because the shared point is a bad one.
+>
+> **Two caveats on the numbers above.** The regime-B models carry **2** seeds, not 4, so their own
+> per-model spreads rest on one degree of freedom (the pooled sign test does not — it pairs within
+> cells). And seeds 1-4 all ran `--lr-schedule nominal` while **seed 0 is not one protocol**
+> (`mlp_ln_mnist` ran `budget`, the other four pre-date `schedules.py`), so every figure in this
+> block is computed on seeds 1-4 only and seed 0 is deliberately excluded.
+
 ## Working language
 
 All code, comments, docstrings, reports and documentation are written in **English**, to the standard
@@ -726,6 +841,12 @@ adafisher/
 │                                  #   identical to torch's inside T_max and clamped outside it,
 │                                  #   BudgetCosine's shape/monotonicity/floor, both through the
 │                                  #   real loop; all offline
+│                                  # authors' repro: test_official_adafisher_arm.py (new) — the
+│                                  #   `official` arm is the authors' PUBLISHED optimizer, loaded
+│                                  #   from their own file: the class, AdaFisherW under
+│                                  #   decoupled_wd, the single-gamma translation and its two
+│                                  #   refusals, and the MEASURED agreement with diag (min-max on)
+│                                  #   on a Linear-only net and on all four hooked layer types
 ├── benchmarks/                   # step 1 (plan_exp_step1.md): a package — one shared harness in
 │   │                             #   common/, one folder per tested model. The five flat modules
 │   │                             #   of lots 1/7/8 are gone; every line of them landed here.
@@ -747,8 +868,11 @@ adafisher/
 │   │   │                         #   + the optional per-batch `lr_schedule` hook
 │   │   ├── schedules.py          # NominalCosine (clamped past T_max) / BudgetCosine (anneals over
 │   │   │                         #   the arm's own WCT budget) — the `--lr-schedule` protocol fix
-│   │   ├── optimizers.py         # HParams, ARMS (5 modes + adam/adamw + reference),
-│   │   │                         #   build_optimizer(arm, model, hp)
+│   │   ├── optimizers.py         # HParams, ARMS (5 modes + adam/adamw + reference + official),
+│   │   │                         #   build_optimizer(arm, model, hp). `reference` is
+│   │   │                         #   FisherAdapTune's AdaFisher and `official` the PUBLISHED
+│   │   │                         #   repository's, both loaded by file path and unmodified; the
+│   │   │                         #   second is diag's like-for-like partner, since it min-maxes
 │   │   ├── records.py            # StepRecord/EpochRecord/ArmResult + csv/summary/plot/manifest
 │   │   │                         #   writers, lot 8's column schema unchanged
 │   │   ├── checkpoints.py        # --checkpoints 0,0.01,0.1,0.5,1 -> ckpt_<frac>.pt (D5); fractions are
@@ -781,13 +905,23 @@ adafisher/
 │   │                             #   own layout (its axis is the seed); outputs/lot8_cifar10/ is
 │   │                             #   legacy and left untouched. fisher_ref/checkpoints.py reads
 │   │                             #   BOTH the grouped and the flat layout
-│   ├── slurm/                    # 180 generated sbatch jobs (20 models x (1 calibration + 7
-│   │   ├── mnist/                #   per-arm) + 18 grouped + 1 lam sweep + 1 seeds job) + READMEs
-│   │   ├── cifar10/              #   + generate_jobs.py, which enumerates model folders. One
-│   │   ├── cifar100/             #   subdirectory per dataset, matching outputs/. At the top
-│   │   └── imagenet/             #   level only: generate_jobs.py, train_v0_seeds.sh (spans two
-│   │                             #   datasets) and the hand-written dispatch_remaining_arms.sh;
+│   ├── slurm/                    # 187 generated sbatch jobs (20 models x (1 calibration + 7
+│   │   ├── mnist/                #   per-arm) + 18 grouped + 1 lam sweep + 1 two-arm seeds job
+│   │   ├── cifar10/              #   + 7 all-arm seed-completion jobs) + READMEs
+│   │   ├── cifar100/             #   + generate_jobs.py, which enumerates model folders. One
+│   │   └── imagenet/             #   subdirectory per dataset, matching outputs/. At the top
+│   │                             #   level only: generate_jobs.py, train_v0_seeds.sh (two arms,
+│   │                             #   spans two datasets), train_seeds_<model>.sh (all seven arms,
+│   │                             #   from SEED_COMPLETION -- one per model, the completion of the
+│   │                             #   seed axis) and the hand-written dispatch_remaining_arms.sh;
 │   │                             #   imagenet/ also holds the hand-written stage_imagenet.sh
+│   ├── authors_repro/            # the authors' OWN code, run as they run it (plan_authors_repro.md):
+│   │                             #   slurm/run_authors_train.sh copies reference_repos/AdaFisher to
+│   │                             #   $SLURM_TMPDIR, checks the copy (diff -r AND a file count),
+│   │                             #   installs their pinned torch 2.3.0/torchvision 0.18.0/numpy
+│   │                             #   1.26.4 and runs THEIR train.py on THEIR config, verbatim.
+│   │                             #   asdl_stub/ is the one deviation: train.py imports asdl
+│   │                             #   unconditionally for its Shampoo/K-FAC arms only
 │   └── archives/                 # gitignored; superseded/duplicated result trees moved aside
 │                                 #   between campaigns, each with its own README saying why
 ├── docs/reports/
@@ -802,6 +936,9 @@ adafisher/
 │   ├── plan_exp_lot1.md          # lot-1 implementation plan: the backward-hook pruning finding,
 │   │                             #   the named_parameters() column layout, the curvlinops
 │   │                             #   decision, and §4's smoke on the real A1 checkpoint
+│   ├── plan_authors_repro.md     # the authors' own code: the `official` arm on the stalling
+│   │                             #   auto-encoder (done — the stall is not the port's) and their
+│   │                             #   train.py on Table 2's CIFAR-10 ResNet18 rows (§6.2 pending)
 │   └── archives/                 # the optimizer-implementation lots, moved aside once done. Still
 │                                 #   the authoritative record of every design decision cited
 │                                 #   throughout this file and in the code — plan.md (overall,
@@ -951,6 +1088,7 @@ These are the anchors. If any of them breaks, the port is broken.
 | What | Against what | Test |
 |---|---|---|
 | `diag` with `minmax_normalization=False`: `F~` at every EMA update, and the parameter trajectory | **R** (FisherAdapTune), bit-exact | `test_diag_bitexact.py` |
+| `diag` at its **default** (min-max ON): the parameter trajectory | **R** (official repo, the `official` arm), to `4.6e-7` relative over 40 steps on a `Linear`-only net and `3.6e-7` over 20 on all four hooked layer types; `2.58e-7` over a real 2 200-step run. Not bit-exact, by §2.1 alone | `test_official_adafisher_arm.py` |
 | `min_max_normalization` and `smart_detect_inf`, including the `epsilon = 1e-6` guard and the `+inf -> 1` / `-inf -> 0` pre-pass | **R** (official repo), bit-exact | `test_minmax_matches_official.py` |
 | Scale convention: mean over `batch x spatial` everywhere | **R** (AdaFisher's, *not* `EKFAC-pytorch`'s, which multiplies `grad_output` by the batch size) | the factor tests |
 
@@ -1096,10 +1234,10 @@ Run these from the repository root on the laptop (the local checkout lives at
 ## Running the tests
 
 ```bash
-.venv/bin/pytest tests/ -v                                    # everything: 853 collected, 812 passed and
+.venv/bin/pytest tests/ -v                                    # everything: 863 collected, 822 passed and
                                                                #   41 skipped by default (40 gated on --runslow,
-                                                               #   1 needing curvlinops). With --runslow: 852
-                                                               #   passed, 1 skipped. Measured 2026-09-19.
+                                                               #   1 needing curvlinops). With --runslow: 862
+                                                               #   passed, 1 skipped. Measured 2026-09-20.
 .venv/bin/pytest tests/test_diag_bitexact.py -v                # exit criteria 1 & 3 (bit-exactness)
 .venv/bin/pytest tests/test_diag_eq4_semantics.py -v            # exit criterion 2 (Eq. 4 semantics)
 .venv/bin/pytest tests/test_minmax_matches_official.py -v      # MinMaxNormalization vs. official repo
@@ -1134,6 +1272,10 @@ Run these from the repository root on the laptop (the local checkout lives at
                                                                  #   far the difference reaches at two lambdas
 .venv/bin/pytest tests/test_lr_schedule.py -v                    # the cosine under WCT: clamped nominal
                                                                  #   vs. budget-annealed, and both in the loop
+.venv/bin/pytest tests/test_official_adafisher_arm.py -v          # the `official` arm: the authors' published
+                                                                 #   optimizer, their class from their file, the
+                                                                 #   single-gamma translation, and how closely
+                                                                 #   diag reproduces it; all offline
 .venv/bin/pytest tests/test_dataset_benches.py -v                 # CIFAR-100 + ImageNet-1K: the
                                                                  #   ImageFolder pipeline on a synthetic
                                                                  #   tree, both transform regimes, the
@@ -1387,7 +1529,11 @@ What each existing test guarantees:
   Don't "simplify" `NominalCosine` back to `CosineAnnealingLR`: the only difference is the clamp,
   and `tests/test_lr_schedule.py` asserts both the equality inside `T_max` and the divergence
   outside it.
-- **The `mnist_autoencoder` stall is a real finding, not a broken run.** All five Fisher modes
+- **The `mnist_autoencoder` stall is a real finding, not a broken run — and it is now confirmed on
+  four fresh seeds.** All five modes land at `0.7072-0.7074 +- 0.0014` final validation loss while
+  `adam`/`adamw` reach `0.4976 +- 0.0207`, losing on **0 of 4** seeds by the *same* `0.210`; the
+  spread between the five modes is **5.6x smaller** than the spread between seeds. It is also the
+  **only** model of the seven where the Fisher modes lose at all. All five Fisher modes
   freeze at MSE `~= 0.7085` within 2 epochs and stay there (parameters move 0.2-0.5% between 10%
   and 100% of training, having travelled `~1.0` from init) while `adam` descends to `0.4836`
   (travelling `25.8`). The architecture is 8 `Linear` layers with sigmoids throughout and a 30-dim
@@ -1397,7 +1543,13 @@ What each existing test guarantees:
   run and **`lam` is not the lever** — it moves the four Kronecker modes by under 1%, so don't
   re-run that sweep. And do not restate lot 7's "all five converge to an indistinguishable final
   loss" as evidence of convergence — lot 7 had no `adam` arm, so it could not see that the shared
-  point is a bad one.
+  point is a bad one. **Two things are settled since, both measured** (`plan_authors_repro.md`):
+  the authors' **published** optimizer, unmodified (the `official` arm), stalls at the same
+  `0.70828` as `diag` — the two trajectories agree to `2.58e-7` relative over 2 200 steps, so this
+  is **not** a porting defect; and **`lr` is not the lever either** — the authors' code ends within
+  `7e-6` of `0.70828` at `lr` in `{1e-4, 1e-3, 1e-2, 1e-1}`, so don't run that bracket again.
+  One nuance to keep: `0.70828` is the **network's** plateau, not AdaFisher's signature — `adam`
+  lands on it too at `lr = 1e-2` and `1e-1`, and escapes only at `1e-3` and `1e-4`.
 - SUA's input-factor construction (`augment_conv2d_input_sua`, center-slicing every patch
   `extract_patches` already produces) is deliberately **not** `EKFAC-pytorch`'s own SUA
   construction (pooling the raw, un-unfolded input independently over `(N, H_in, W_in)`) — the two
@@ -1546,8 +1698,10 @@ scale, and independently at each of the `k_h·k_w` kernel offsets (`plan_lot6.md
   *.png`, so a campaign's reports arrive and its `ckpt_*.pt` do not — and `discover_runs` then
   reports a 5-seed campaign as 1 seed, with no error anywhere. Measured: the extra-seed campaign
   had completed and `available_seeds()` still returned `[0]` until the checkpoints were pulled
-  explicitly (the second rsync line under "Cluster sync" above). 80 runs / 399 checkpoints is the
-  current, correct state.
+  explicitly (the second rsync line under "Cluster sync" above). **217 runs / 840 checkpoints
+  under `outputs/seeds/` is the current, correct state**, after the seed axis was completed to all
+  seven arms; `available_seeds()` is `[0,1,2,3,4]` on the five regime-A models and `[0,1,2]` on the
+  two regime-B ones, for every arm.
 - **A new `benchmarks/models/<model>/` folder must be added to four registries, not one.** The folder list
   is the registry for *discovery*, but four tests exist precisely to fail when a folder appears
   without its contract: `tests/test_benchmark_models.py::EXPECTED`,
