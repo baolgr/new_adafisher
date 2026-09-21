@@ -1080,11 +1080,19 @@ AdaFisherMulti(model, lr=1e-3, beta=0.9, Lambda=1e-3, gammas=[0.92, 0.008], TCov
                ema_seed_first=False,        # S3: start each running average from its first
                                             #   observation instead of the identity, so no residue
                                             #   of the identity survives (plan_lambda_dominance.md)
-               eig_before_rescale=False)    # ekfac/tekfac only: rebuild the eigenbasis in the
+               eig_before_rescale=False,    # ekfac/tekfac only: rebuild the eigenbasis in the
                                             #   backward hook, BEFORE projecting the gradient into
                                             #   it, so s*/Theta is measured in the basis
                                             #   precondition then uses (EKFAC Lemma 1, both papers'
                                             #   Alg. 1). ValueError on the other three modes.
+               damping="global",            # kfac/ekfac/tkfac/tekfac: "layer_relative" gives each
+               damping_tau=None,            #   module lambda_l = tau * (mean eigenvalue of its own
+                                            #   undamped stored curvature); "network_relative" one
+                                            #   tau * (mean over all the network's directions).
+                                            #   Fix S1 / E15 of plan_lambda_dominance.md
+               hold_cap=False)              # multiply each preconditioned direction by the lambda
+                                            #   inside it, so lr is the step-size cap whatever lambda
+                                            #   is: hold_cap=True, lr=c  ==  lr=c*Lambda
 ```
 
 YAML (style of `reference_repos/FisherAdapTune/crack_segmentation/config_segformer.yaml`):
@@ -1178,6 +1186,8 @@ experiment can turn one thing on at a time.
 | `ema_seed_first` | Starts each running average from its first observation instead of from the identity, so no residue of the identity is ever left in the state. Fix S3. | `plan_lambda_dominance.md` Part 4, `tests/test_ema_seed_first.py` |
 | `eig_before_rescale` | `ekfac`/`tekfac` only. Rebuilds the eigenbasis **inside the backward hook**, before the gradient is projected into it, so the rescaling is measured in the basis `precondition` then uses; `refresh()` does not redo it that step. By default the basis is replaced *afterwards*, in `step()`, so `s*`/`Theta` describe a basis that no longer exists — EKFAC's Lemma 1 makes the optimal diagonal optimal for the `Q` it was measured in and no other, and Algorithm 1 of both papers, plus `EKFAC-pytorch/ekfac.py::step`, order it eigenbasis-then-rescaling. Passing it to the other three modes is a `ValueError`, not a silent no-op. **Measured** (24-16-6 net with a `LayerNorm`): the two orderings store an `s*`/`Theta` differing by **91%–141%** relative, but the *applied step* differs by only **3.0e-3** (60 steps, `TCov=10`) and **3.7e-5** (200 steps, `TCov=20`) at the shipped `Lambda=1e-3`, against **8.3** and **0.28** at `Lambda=1e-8`. So no trained model in this repository is affected — and **fix the ordering before acting on `plan_lambda_dominance.md`'s fix S1**, which lowers `Lambda`. | EKFAC Lemma 1 / Alg. 1, TEKFAC Alg. 1, `audit_full_repo.md` finding 3, `tests/test_eig_before_rescale.py` |
 | `T_inv`, `T_eig`, `T_re` | Amortisation cadences for the inverse, the eigenbasis and the rescaling. | K-FAC §6.3, TEKFAC Alg. 1 |
+| `damping`, `damping_tau` | The four Kronecker modes only. `"layer_relative"` replaces the one shared `Lambda` by `lambda_l = tau * c_l`, where `c_l` is the mean eigenvalue of module `l`'s own undamped stored curvature (`mean(s*)`, `mean(Theta)`, `(tr A/d_in)(tr B/d_out)`, `tr Phi_raw tr Psi_raw / (delta d_in d_out)`), recomputed at the start of every `step()`. `"network_relative"` gives every module one `tau * c_net`, the mean over all the network's directions. With `tekfac` and `tau = 1` this is TEKFAC's eq. (3.5) without its floor. `kfac`/`tkfac` bake the damping into inverses rebuilt every `T_inv` steps. `ValueError` on `diag`, whose min-max removes the scale a relative damping needs. | S1 and E15 of `plan_lambda_dominance.md`, `tests/test_relative_damping.py` |
+| `hold_cap` | Multiplies each preconditioned direction by the damping inside it, so that `lr` is the step-size cap, the largest multiple of the momentum any direction can move by. `hold_cap=True, lr=c` is the update `lr=c*Lambda` gives under a global damping, which is how E7-E14 held the cap; under a relative damping it holds it in every layer at once. The plain-momentum fallback is scaled by the shared `Lambda`. Decoupled decay stays `1 - lr*wd`, so it no longer vanishes as `lambda` falls (rule 3 of `plan_lambda_dominance.md` Part 5). | E15, `tests/test_relative_damping.py` |
 
 ### 4. Where the code and the paper disagree, and both reference repos take the code's side
 
@@ -1290,10 +1300,12 @@ Run these from the repository root on the laptop (the local checkout lives at
 ## Running the tests
 
 ```bash
-.venv/bin/pytest tests/ -v                                    # everything: 863 collected, 822 passed and
+.venv/bin/pytest tests/ -v                                    # everything: 916 collected, 875 passed and
                                                                #   41 skipped by default (40 gated on --runslow,
-                                                               #   1 needing curvlinops). With --runslow: 862
-                                                               #   passed, 1 skipped. Measured 2026-09-20.
+                                                               #   1 needing curvlinops). Measured 2026-09-21.
+                                                               #   With --runslow, last measured 2026-09-20
+                                                               #   before test_relative_damping.py: 862
+                                                               #   passed, 1 skipped.
 .venv/bin/pytest tests/test_diag_bitexact.py -v                # exit criteria 1 & 3 (bit-exactness)
 .venv/bin/pytest tests/test_diag_eq4_semantics.py -v            # exit criterion 2 (Eq. 4 semantics)
 .venv/bin/pytest tests/test_minmax_matches_official.py -v      # MinMaxNormalization vs. official repo
@@ -1322,6 +1334,12 @@ Run these from the repository root on the laptop (the local checkout lives at
                                                                  #   first reached after step 0, two backwards
                                                                  #   over one forward, a tied weight, and that
                                                                  #   precondition never aliases exp_avg
+.venv/bin/pytest tests/test_relative_damping.py -v              # damping/damping_tau/hold_cap (E15): off
+                                                                 #   and bit-identical by default; hold_cap ==
+                                                                 #   lr*Lambda; a constant lambda_l != Lambda
+                                                                 #   reproduces the single-lambda run at lambda_l;
+                                                                 #   mean_curvature == dense mean eigenvalue;
+                                                                 #   decoupled decay independent of lambda
 .venv/bin/pytest tests/test_eig_before_rescale.py -v              # the eig_before_rescale knob: default
                                                                  #   inertness, the basis s*/Theta is measured
                                                                  #   in vs the one precondition uses, and how

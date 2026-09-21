@@ -87,6 +87,7 @@ class TKFACApproximation(FisherApproximation):
         self._Phi_inv: Dict[Module, Tensor] = {}
         self._Psi_inv: Dict[Module, Tensor] = {}
         self._delta_at_refresh: Dict[Module, Tensor] = {}
+        self._lambda_at_refresh: Dict[Module, Union[float, Tensor]] = {}
         self._cached_h_bar: Dict[Module, Tensor] = {}
 
     def update_input_factor(self, module: Module, h: Tensor, step: int) -> None:
@@ -124,7 +125,7 @@ class TKFACApproximation(FisherApproximation):
         delta = self._delta[module].clone()
         Phi = self._Phi_raw[module] / delta
         Psi = self._Psi_raw[module] / delta
-        damp = (self.Lambda / delta).sqrt()
+        damp = (self.lambda_for(module) / delta).sqrt()
         Phi_tilde = Phi + damp * eye(Phi.size(0), dtype=Phi.dtype, device=Phi.device)
         Psi_tilde = Psi + damp * eye(Psi.size(0), dtype=Psi.dtype, device=Psi.device)
         return delta, Phi_tilde, Psi_tilde
@@ -140,6 +141,27 @@ class TKFACApproximation(FisherApproximation):
         self._delta_at_refresh[module] = delta
         self._Phi_inv[module] = Phi_tilde.inverse()
         self._Psi_inv[module] = Psi_tilde.inverse()
+        self._lambda_at_refresh[module] = self.lambda_for(module)
+
+    def applied_lambda(self, module: Module) -> Union[float, Tensor]:
+        """The damping baked into the cached inverses, as in ``kfac``."""
+        return self._lambda_at_refresh[module]
+
+    def mean_curvature(self, module: Module) -> Optional[Tensor]:
+        """Mean eigenvalue of ``delta * Psi (x) Phi`` with ``Phi = Phi_raw / delta`` and
+        ``Psi = Psi_raw / delta``: its trace ``tr(Phi_raw) tr(Psi_raw) / delta`` over its dimension.
+        """
+        if module not in self._delta:
+            return None
+        Phi_raw, Psi_raw = self._Phi_raw[module], self._Psi_raw[module]
+        return (Phi_raw.trace() * Psi_raw.trace()) / (
+            self._delta[module] * Phi_raw.size(0) * Psi_raw.size(0)
+        )
+
+    def num_directions(self, module: Module) -> Optional[int]:
+        if module not in self._delta:
+            return None
+        return self._Phi_raw[module].size(0) * self._Psi_raw[module].size(0)
 
     def f_tilde(self, module: Module) -> Tensor:
         """Dense ``(d_out * d_in_aug)^2`` reconstruction of ``F~ = delta * kron(Psi~, Phi~)``:

@@ -22,7 +22,9 @@ straight on the stored numerators.
 
 **Damping** (eq. 3.4) is a plain additive ``lambda`` on ``Theta``, as in ``ekfac``. The paper's
 convolution-only trace-adaptive ``lambda`` and its network-wide rescaling of dense layers (eq. 3.5)
-are deliberately not implemented.
+are not the default. ``AdaFisherMulti(damping="layer_relative", damping_tau=1)`` gives every layer
+``lambda = mean(Theta) = tr(Theta)/dim(Theta)``, which is eq. (3.5) without its floor ``vartheta``
+and without the dense-layer rescaling.
 
 **Cadence.** Algorithm 1 of the paper gives the eigendecomposition and the rescaling separate
 intervals, and so does this class: ``T_eig`` gates the eigenbasis refresh and ``T_re`` gates
@@ -178,6 +180,21 @@ class TEKFACApproximation(FisherApproximation):
             return
         self._rebuild_eigenbasis(module)
 
+    def mean_curvature(self, module: Module) -> Optional[Tensor]:
+        """``mean(Theta)``, which is ``tr(Theta) / dim(Theta)`` -- the quantity TEKFAC's eq. (3.5)
+        sets its convolution-layer damping to. Before the first ``refresh``, ``Theta`` is about to
+        be seeded with ones, so its mean is 1."""
+        if module in self._Theta:
+            return self._Theta[module].mean()
+        if module in self._delta:
+            return self._delta[module].new_ones(())
+        return None
+
+    def num_directions(self, module: Module) -> Optional[int]:
+        if module not in self._delta:
+            return None
+        return self._Phi_raw[module].size(0) * self._Psi_raw[module].size(0)
+
     def f_tilde(self, module: Module) -> Tensor:
         """Dense ``(d_out * d_in_aug)^2`` reconstruction of
         ``F~ = kron(Q_Psi, Q_Phi) diag(Theta + lambda) kron(Q_Psi, Q_Phi)^T``: output factor outer,
@@ -186,7 +203,7 @@ class TEKFACApproximation(FisherApproximation):
         matrix.
         """
         Q_Phi, Q_Psi = self._Q_Phi[module], self._Q_Psi[module]
-        scale = (self._Theta[module] + self.Lambda).flatten()
+        scale = (self._Theta[module] + self.lambda_for(module)).flatten()
         Q = kron(Q_Psi, Q_Phi)
         return Q @ diag(scale) @ Q.t()
 
@@ -200,10 +217,10 @@ class TEKFACApproximation(FisherApproximation):
         bias_shape = None if bias_direction is None else bias_direction.shape
         if self.conv_sua and isinstance(module, Conv2d):
             M = augment_conv2d_direction_sua(weight_direction, bias_direction)
-            M_kfe = (Q_Psi.t() @ M @ Q_Phi) / (self._Theta[module] + self.Lambda)
+            M_kfe = (Q_Psi.t() @ M @ Q_Phi) / (self._Theta[module] + self.lambda_for(module))
             direction = Q_Psi @ M_kfe @ Q_Phi.t()
             return split_conv2d_direction_sua(direction, weight_direction.shape, bias_shape)
         M = augment_direction(weight_direction, bias_direction)
-        M_kfe = (Q_Psi.t() @ M @ Q_Phi) / (self._Theta[module] + self.Lambda)
+        M_kfe = (Q_Psi.t() @ M @ Q_Phi) / (self._Theta[module] + self.lambda_for(module))
         direction = Q_Psi @ M_kfe @ Q_Phi.t()
         return split_direction(direction, weight_direction.shape, bias_shape)

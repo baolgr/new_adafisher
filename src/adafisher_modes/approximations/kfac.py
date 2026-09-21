@@ -81,6 +81,7 @@ class KFACApproximation(FisherApproximation):
         self._B: Dict[Module, Tensor] = {}
         self._A_inv: Dict[Module, Tensor] = {}
         self._B_inv: Dict[Module, Tensor] = {}
+        self._lambda_at_refresh: Dict[Module, Union[float, Tensor]] = {}
 
     def update_input_factor(self, module: Module, h: Tensor, step: int) -> None:
         A_i = compute_h_full(h, module, sua=self.conv_sua)
@@ -106,7 +107,7 @@ class KFACApproximation(FisherApproximation):
     def _damped_factors(self, module: Module) -> Tuple[Tensor, Tensor]:
         A, B = self._A[module], self._B[module]
         pi = self._pi(A, B)
-        lambda_sqrt = self.Lambda**0.5
+        lambda_sqrt = self.lambda_for(module)**0.5
         A_tilde = A + (pi * lambda_sqrt) * eye(A.size(0), dtype=A.dtype, device=A.device)
         B_tilde = B + (lambda_sqrt / pi) * eye(B.size(0), dtype=B.dtype, device=B.device)
         return A_tilde, B_tilde
@@ -121,6 +122,25 @@ class KFACApproximation(FisherApproximation):
         A_tilde, B_tilde = self._damped_factors(module)
         self._A_inv[module] = A_tilde.inverse()
         self._B_inv[module] = B_tilde.inverse()
+        self._lambda_at_refresh[module] = self.lambda_for(module)
+
+    def applied_lambda(self, module: Module) -> Union[float, Tensor]:
+        """The damping baked into the cached inverses, which is the one ``precondition`` applies
+        until the next refresh -- not whatever :meth:`lambda_for` says now."""
+        return self._lambda_at_refresh[module]
+
+    def mean_curvature(self, module: Module) -> Optional[Tensor]:
+        """``(tr A / d_in) * (tr B / d_out)``: the eigenvalues of ``A (x) B`` are the products
+        ``a_i b_j``, so their mean is the product of the two means."""
+        if module not in self._A or module not in self._B:
+            return None
+        A, B = self._A[module], self._B[module]
+        return (A.trace() / A.size(0)) * (B.trace() / B.size(0))
+
+    def num_directions(self, module: Module) -> Optional[int]:
+        if module not in self._A or module not in self._B:
+            return None
+        return self._A[module].size(0) * self._B[module].size(0)
 
     def f_tilde(self, module: Module) -> Tensor:
         """Dense ``(d_out * d_in_aug)^2`` reconstruction of ``F~ = kron(B~, A~)``: output factor

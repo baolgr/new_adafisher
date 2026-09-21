@@ -70,6 +70,23 @@ layer with ``affine=False`` has no weight to precondition and is skipped.
     then uses. By default the eigenbasis is replaced afterwards, in ``step()``, which leaves the
     two out of step -- the order both source papers' own algorithms and
     ``reference_repos/EKFAC-pytorch/ekfac.py`` put the other way round.
+``damping``, ``damping_tau``
+    The four Kronecker modes only. ``"global"`` (the default) adds the one shared ``Lambda`` to
+    every module. ``"layer_relative"`` gives each module ``lambda_l = damping_tau * c_l``, where
+    ``c_l`` is the mean eigenvalue of that module's own undamped stored curvature, recomputed at
+    the start of every ``step()`` from the state as the hooks left it (fix S1 of
+    ``docs/reports/plan_lambda_dominance.md``). ``"network_relative"`` gives every module the same
+    ``damping_tau * c_net``, where ``c_net`` is the mean over all the network's curvature
+    directions. ``kfac`` and ``tkfac`` bake the damping into inverses they rebuild every ``T_inv``
+    steps, so for them a new ``lambda_l`` takes effect at the next rebuild.
+``hold_cap``
+    Multiply each preconditioned direction by the damping that went into it, so that ``lr`` is the
+    step-size cap -- the largest multiple of the momentum any direction can move by -- whatever the
+    damping is. ``hold_cap=True, lr=c`` is the same update as ``hold_cap=False, lr=c*Lambda``
+    under a global damping; under a relative damping it holds that cap in every layer at once. A
+    parameter with no curvature (the plain-momentum fallback) is scaled by the shared ``Lambda``.
+    With decoupled weight decay the decay factor is ``1 - lr * weight_decay``, so under this knob
+    it does not move with the damping.
 
 Distributed training is not supported: the reference's all-reduce over the two factors has no
 equivalent here, and silently accepting the flag would be worse than omitting it.
@@ -115,15 +132,35 @@ class AdaFisherMulti(Optimizer):
         decoupled_weight_decay: bool = False,
         ema_seed_first: bool = False,
         eig_before_rescale: bool = False,
+        damping: str = "global",
+        damping_tau: Optional[float] = None,
+        hold_cap: bool = False,
         **mode_kwargs,
     ) -> None:
         if fisher_mode not in MODES:
             raise ValueError(f"Unknown fisher_mode {fisher_mode!r}; available: {sorted(MODES)}")
         if fisher_batch_samples is not None and fisher_batch_samples < 1:
             raise ValueError(f"fisher_batch_samples must be >= 1 or None; got {fisher_batch_samples}")
+        if damping not in ("global", "layer_relative", "network_relative"):
+            raise ValueError(
+                f"damping must be 'global', 'layer_relative' or 'network_relative'; got {damping!r}"
+            )
+        if damping == "global" and damping_tau is not None:
+            raise ValueError("damping_tau only applies to a relative damping; damping is 'global'")
+        if damping != "global":
+            if damping_tau is None or not damping_tau > 0:
+                raise ValueError(f"damping={damping!r} needs damping_tau > 0; got {damping_tau!r}")
+            if fisher_mode == "diag":
+                raise ValueError(
+                    "a relative damping needs the curvature's own scale, which diag's min-max "
+                    "normalisation removes; use one of the four Kronecker modes"
+                )
         if gamma is not None:
             gammas = (1 - gamma, 1 - gamma)
         defaults = dict(lr=lr, beta=beta, weight_decay=weight_decay)
+        self.damping = damping
+        self.damping_tau = damping_tau
+        self.hold_cap = hold_cap
         self.model = model
         self.TCov = TCov
         self.steps = 0
@@ -233,6 +270,11 @@ class AdaFisherMulti(Optimizer):
         )
 
         direction = self.approx.precondition(module, weight_exp_avg, bias_exp_avg)
+        if self.hold_cap:
+            lam = self.approx.applied_lambda(module)
+            direction = (
+                tuple(d * lam for d in direction) if isinstance(direction, tuple) else direction * lam
+            )
 
         if bias_param is not None:
             assert bias_bc is not None  # paired with bias_param by _update_moment above
@@ -262,7 +304,34 @@ class AdaFisherMulti(Optimizer):
         (adafisher.py:299), independent of ``fisher_mode``.
         """
         exp_avg, bias_correction = self._update_moment(hparams, param, hparams["beta"])
+        if self.hold_cap:
+            exp_avg = exp_avg * self.approx.Lambda   # a new tensor: never scale the momentum itself
         self._apply_update(hparams, param, exp_avg, bias_correction)
+
+    def _set_relative_damping(self) -> None:
+        """Give every module with stored curvature its damping for this step, from the state as the
+        hooks left it: ``tau * c_l`` for ``layer_relative``, and ``tau * c_net`` for
+        ``network_relative``, where ``c_net`` weighs each module by its number of directions.
+        """
+        tau = self.damping_tau
+        assert tau is not None  # checked in __init__ for every damping other than "global"
+        present = []
+        for module in self.modules:
+            if module.weight.grad is None:
+                continue
+            c = self.approx.mean_curvature(module)
+            n = self.approx.num_directions(module)
+            if c is not None and n is not None:
+                present.append((module, c, n))
+        if not present:
+            return
+        if self.damping == "layer_relative":
+            for module, c, _ in present:
+                self.approx.set_lambda(module, tau * c)
+            return
+        c_net = sum(c * n for _, c, n in present) / sum(n for _, _, n in present)
+        for module, _, _ in present:
+            self.approx.set_lambda(module, tau * c_net)
 
     @no_grad()
     def step(self, closure: Optional[Callable] = None) -> None:
@@ -284,6 +353,8 @@ class AdaFisherMulti(Optimizer):
         # a two-layer net with that split: the parameters moved exactly 2.0000 times as far as
         # under a single group.
         stepped: set[int] = set()
+        if self.damping != "global":
+            self._set_relative_damping()
         for group in self.param_groups:
             hparams = {k: group[k] for k in ("lr", "beta", "weight_decay")}
             for param in group["params"]:

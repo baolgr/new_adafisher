@@ -74,6 +74,44 @@ def pop_cached_input(cache: Dict[Module, Tensor], module: Module) -> Tensor:
 class FisherApproximation(ABC):
     """Builds AdaFisher's second moment v^(t) for one module, from raw per-hook factors."""
 
+    #: The damping shared by every module unless :meth:`set_lambda` gave one its own.
+    Lambda: float
+
+    # ------------------------------------------------------------------
+    # Per-module damping. Unused unless AdaFisherMulti(damping=...) is set; every mode then reads
+    # its damping through lambda_for(), which returns the shared ``Lambda`` itself -- the same
+    # Python float, so the same arithmetic -- for any module that was never given its own.
+    # ------------------------------------------------------------------
+
+    def lambda_for(self, module: Module) -> Union[float, Tensor]:
+        """The damping in effect for ``module``: its own value if :meth:`set_lambda` gave it one,
+        otherwise the shared ``Lambda``."""
+        overrides = self.__dict__.get("_lambda_override")
+        if overrides is not None and module in overrides:
+            return overrides[module]
+        return self.Lambda
+
+    def set_lambda(self, module: Module, value: Tensor) -> None:
+        """Give ``module`` its own damping, used from the next time the mode reads it."""
+        self.__dict__.setdefault("_lambda_override", {})[module] = value
+
+    def applied_lambda(self, module: Module) -> Union[float, Tensor]:
+        """The damping inside the operator ``precondition`` applies *now*. It is
+        :meth:`lambda_for` for a mode that adds the damping at division time; ``kfac`` and
+        ``tkfac`` bake it into inverses at ``refresh`` and override this to return that value."""
+        return self.lambda_for(module)
+
+    def mean_curvature(self, module: Module) -> Optional[Tensor]:
+        """Mean eigenvalue of ``module``'s *undamped* stored curvature, i.e. its trace divided by
+        its dimension, or ``None`` if nothing is stored for it yet. What a relative damping is
+        proportional to."""
+        raise NotImplementedError(f"{type(self).__name__} has no relative damping")
+
+    def num_directions(self, module: Module) -> Optional[int]:
+        """Dimension of ``module``'s curvature operator (``d_out * d_in_aug``), or ``None`` if
+        nothing is stored for it yet. The weight of that module in a network-wide mean."""
+        raise NotImplementedError(f"{type(self).__name__} has no relative damping")
+
     @abstractmethod
     def update_input_factor(self, module: Module, h: Tensor, step: int) -> None:
         """Called from the forward hook with the raw layer input ``h`` (``input[0].data``)."""

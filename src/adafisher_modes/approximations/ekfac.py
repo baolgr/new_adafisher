@@ -171,6 +171,20 @@ class EKFACApproximation(FisherApproximation):
             return
         self._rebuild_eigenbasis(module)
 
+    def mean_curvature(self, module: Module) -> Optional[Tensor]:
+        """``mean(s*)``: ``s*`` *is* the spectrum. Before the first ``refresh`` there is no ``s*``
+        yet, but ``refresh`` is about to seed it with ones, so its mean is 1."""
+        if module in self._s_star:
+            return self._s_star[module].mean()
+        if module in self._A and module in self._B:
+            return self._A[module].new_ones(())
+        return None
+
+    def num_directions(self, module: Module) -> Optional[int]:
+        if module not in self._A or module not in self._B:
+            return None
+        return self._A[module].size(0) * self._B[module].size(0)
+
     def f_tilde(self, module: Module) -> Tensor:
         """Dense ``(d_out * d_in_aug)^2`` reconstruction of
         ``F~ = kron(Q_B, Q_A) diag(s* + lambda) kron(Q_B, Q_A)^T``: output factor outer, input
@@ -178,7 +192,7 @@ class EKFACApproximation(FisherApproximation):
         and ``s*``. For tests and debugging only -- ``precondition`` never forms this matrix.
         """
         Q_A, Q_B = self._Q_A[module], self._Q_B[module]
-        scale = (self._s_star[module] + self.Lambda).flatten()
+        scale = (self._s_star[module] + self.lambda_for(module)).flatten()
         Q = kron(Q_B, Q_A)
         return Q @ diag(scale) @ Q.t()
 
@@ -192,10 +206,10 @@ class EKFACApproximation(FisherApproximation):
         bias_shape = None if bias_direction is None else bias_direction.shape
         if self.conv_sua and isinstance(module, Conv2d):
             M = augment_conv2d_direction_sua(weight_direction, bias_direction)
-            M_kfe = (Q_B.t() @ M @ Q_A) / (self._s_star[module] + self.Lambda)
+            M_kfe = (Q_B.t() @ M @ Q_A) / (self._s_star[module] + self.lambda_for(module))
             direction = Q_B @ M_kfe @ Q_A.t()
             return split_conv2d_direction_sua(direction, weight_direction.shape, bias_shape)
         M = augment_direction(weight_direction, bias_direction)
-        M_kfe = (Q_B.t() @ M @ Q_A) / (self._s_star[module] + self.Lambda)
+        M_kfe = (Q_B.t() @ M @ Q_A) / (self._s_star[module] + self.lambda_for(module))
         direction = Q_B @ M_kfe @ Q_A.t()
         return split_direction(direction, weight_direction.shape, bias_shape)
