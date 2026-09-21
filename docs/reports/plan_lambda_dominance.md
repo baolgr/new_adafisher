@@ -1833,3 +1833,21 @@ limit. That is ten jobs and about 21 GPU-hours on `h100_1g.10gb` slices.
 `"network_relative"`, `damping_tau`), off by default and bit-identical when off; tests showing that
 a constant `λ_l` reproduces the single-`λ` path and that `c̄_l` equals the mean eigenvalue computed
 densely; and the driver `fisher_ref/experiments/e15_layer_damping.py`.
+
+**Note added before submission, 21 September 2026. No rule changes.** All three now exist
+(`ee8c86c`, `tests/test_relative_damping.py`, the driver). Locally, over one full epoch of
+1 407 steps, the driver's repro cell is **bit-identical** to `e4_fixed_average.run_one` on both
+networks: same test accuracy, same distance travelled by the parameters, same validation curve.
+
+The local smoke run exposed one difference between the arms that the rules above do not name, so it
+is written down here before any result exists. Every mode starts its stored curvature from the
+identity, and that start fades as 0.08^k after `k` factor updates. A single `λ` of 1e-10 sits far
+below that leftover until it has faded under the real curvature. Worked out on paper for
+`cnn_gn_cifar`/`ekfac`, from a real stored curvature of about 3e-9: that takes about 8 updates, i.e.
+about 800 steps, 4% of a run. Until then every direction moves by about `cap × λ / leftover`, which
+is almost nothing. A *relative* `λ` scales with that leftover, so the S1-b and network-adaptive arms
+move from the first step. In the smoke run (16 steps) they reached 17% to 19% on `vit_micro_cifar`
+while every single-`λ` arm stayed at 11%. So a win of S1-b under rule 2 could come from being
+relative at all, and not from being per-layer. **Rule 5 is the one that separates the two:** both of
+the arms it compares are relative. A rule-2 win is read as "per-layer" only if rule 5 also favours
+S1-b.
