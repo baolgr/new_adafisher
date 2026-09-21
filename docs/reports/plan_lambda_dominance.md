@@ -1493,3 +1493,9 @@ seed-mean accuracy lies within one standard error of the best seed-mean.
 What these rules do not settle: a network whose curve is flat across the whole window (as
 `resnet20_cifar` was down to 1e-10) produces a plateau that intersects everything. That case is
 reported as **uninformative**, not as a confirmation.
+
+**Submitted** on 21 September 2026, after the commit above. Jobs 21498168-72 run `cnn_gn_cifar`,
+seeds 0-4, with a 1:45 limit. Jobs 21498173-75 run `resnet20_cifar`, seeds 0-2, with a 6:00 limit.
+Each log confirms its window and `eig_before_rescale=True`. Outputs:
+`fisher_ref/outputs/e14_seeds_{cnn,resnet20}_eigfix_s<seed>.json`. The first `cnn_gn_cifar` runs
+take 68 to 70 s each, as E4 measured.
