@@ -782,12 +782,14 @@ root on `v^(t)` — is **identical across the five modes**.
 > run twice, in two processes, must agree exactly; and on `cnn_gn_cifar`, which has no hooked
 > normalisation layer, the knob must change nothing. The comparison with E14's stored cell is a
 > diagnostic that does not vote. One limit stays recorded, not fixed: TF32 convolutions on the H100
-> are noisier than the `1e-3 x rms` guard. **30 jobs** (`fisher_ref/slurm/e16_floor_clip.sh`, one per
-> network x seed x mode), each running its 34 cells (36 at seed 0) as 3 processes sharing one
-> `h100_3g.40gb` slice. Projected at 22/48/57 min per job for cnn/vit/cct if each process keeps its
-> 1g speed, which is not measured yet, so submit one job first. About 62 h of run time summed over
-> cells. The feasibility study's Sophia range was inverted: `win_rate` is the fraction *not* clipped,
-> so the published target is a clipped fraction of 0.5-0.9.
+> are noisier than the `1e-3 x rms` guard. **90 shard jobs + 30 merges**
+> (`fisher_ref/slurm/e16_submit.sh MODEL SEED MODE`): each (network, seed, mode)'s 34 cells (36 at
+> seed 0) split into 3 shards, each one process on one `h100_1g.10gb` slice (E14's own hardware),
+> then a CPU merge that runs the seed-0 checks. Largest shard projected at 22/49/58 min for
+> cnn/vit/cct, limits 0:35/1:15/1:30. About 62 h of 1g-slice time. All thirty must come from ONE
+> clean commit: they run from the clone `/home/blgr/new_adafisher_e16`, not the main checkout, and
+> that clone is not pulled until E16 is done. The feasibility study's Sophia range was inverted:
+> `win_rate` is the fraction *not* clipped, so the published target is a clipped fraction of 0.5-0.9.
 
 > **E15 — one safety constant per layer: done, and adopted** (`plan_lambda_dominance.md`, "E15 —
 > done"; jobs 21523753-62, all COMPLETED). Five seeds on `cnn_gn_cifar` and `vit_micro_cifar`, under

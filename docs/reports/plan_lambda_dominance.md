@@ -1917,16 +1917,16 @@ and E16's own baseline** (`plan_floor_clip.md` §11).
   - on `cct_2_3x2_cifar` at `λ = 3e-11`, 2.21 (2.87) on the first LayerNorm, 1.94 (2.56) on the
     final one and 1.11-1.17 on the other three.
 
-  The jobs also run on a different GPU slice, three runs at a time, which may change the
-  floating-point order. So add runs in the same jobs as the families, on the same five-value grids,
-  and `addfill` is gone.
+  So add runs alongside the families, from the same commit, on the same five-value grids, and
+  `addfill` is gone.
 - **The repro gate becomes a diagnostic, and two gates replace it, at seed 0.** *Determinism:* one
-  add cell runs twice, in two processes of the same job, and the two must agree on every recorded
+  add cell runs twice, in two different shard jobs, and the two must agree on every recorded
   field. *Inertness:* on `cnn_gn_cifar`, which has no hooked normalisation layer, the add cell must
   be bit-identical with and without the option. The comparison with E14's stored cell is reported
   and does not vote.
-- **The jobs.** One per (network, seed, mode): 30 in all, each running three processes on one
-  `h100_3g.40gb` slice. Projected under an hour each, against 2 to 5 hours before.
+- **The jobs.** One per (network, seed, mode, shard): 90 in all, each a single process on one
+  `h100_1g.10gb` slice, E14's own hardware, plus 30 CPU merges. Projected at 22, 49 and 58 min per
+  shard on the three networks, against 2 to 5 hours per job before.
 
 The rest of this section is the thrice-amended pre-registration.
 
@@ -2029,15 +2029,15 @@ choices are argued in `plan_floor_clip.md` §4.
 (`cnn_gn_cifar`: `ekfac` 3e-11, `tekfac` 1e-10; `vit_micro_cifar`: 1e-10; `cct_2_3x2_cifar`: 3e-11).
 Each compares test accuracy and loss, the validation curve, the distance travelled and the step
 count.
-- *Determinism.* That cell runs a second time, in another process of the same job. The two must be
-  equal. If they are not, runs on this hardware are not reproducible under concurrency, and E16 is
+- *Determinism.* That cell runs a second time, in another shard job. The two must be
+  equal. If they are not, runs are not reproducible from one GPU slice to another, and E16 is
   not read (rule 0).
 - *Inertness*, on `cnn_gn_cifar` only. The same cell without `norm_exact_rescaling` must equal the
   add cell, since that network has no hooked normalisation layer. If it does not, the option
   changes something it should not (rule 0).
 - *Repro, a diagnostic that does not vote.* The cell without the option is compared with the stored
   E14/E13/E10 cell of seed 0. It says whether this code on this hardware reproduces E14. A mismatch
-  is reported, not fatal, because every comparison E16 makes is between cells of one job.
+  is reported, not fatal, because every comparison E16 makes is between cells of E16 itself.
 
 **Predictions, written now so they can fail.** The floor ties everywhere, within 0.5 points, at the
 same `λ` as add or one grid step away. For the clip there are two competing readings, and nothing
@@ -2060,13 +2060,14 @@ amendment), but their 2×2 input factor, from which their eigenbasis comes, is s
 raw channel mean (`CLAUDE.md` §4.6). The rescaling is optimal in that basis; the basis may not be
 the best one (`plan_floor_clip.md` §7).
 
-**Cost.** 34 runs per (network, seed, mode), 36 at seed 0. Projected from the add cells' measured
-times on 1g slices and the clip's measured per-operation cost: about 65, 145 and 170 minutes of runs
-per job on `cnn_gn_cifar`, `vit_micro_cifar` and `cct_2_3x2_cifar`. On one `h100_3g.40gb` slice
-running three at a time, that is about 22, 48 and 57 minutes per job, if each run keeps its 1g
-speed. That speed is not measured, so the limits are about twice that and one job is submitted
-first. Thirty jobs, about 62 hours of run time summed over cells. Job script
-`fisher_ref/slurm/e16_floor_clip.sh`, decisions `fisher_ref/experiments/e16_decisions.py`.
+**Cost.** 34 runs per (network, seed, mode), 36 at seed 0, split into three shards of at most 12
+runs, each shard one job on one `h100_1g.10gb` slice (E14's hardware). The largest shard is
+projected at 22, 49 and 58 minutes on `cnn_gn_cifar`, `vit_micro_cifar` and `cct_2_3x2_cifar`: the
+add runs' times are measured on 1g slices, the clips' projected from their measured per-operation
+cost. Limits 0:35, 1:15 and 1:30. 90 shard jobs and 30 CPU merges, about 62 hours of 1g-slice time
+in total. The first (network, seed, mode) is a timing check before the rest. Jobs
+`fisher_ref/slurm/e16_submit.sh` (shards `e16_floor_clip.sh`, merge `e16_floor_clip_merge.sh`),
+decisions `fisher_ref/experiments/e16_decisions.py`.
 
 ### E17 — pre-registered: ViT-S is the held-out network for E15's and E16's verdicts
 

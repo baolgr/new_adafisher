@@ -25,15 +25,16 @@ add baseline is rerun here, under the same estimator, code and hardware as the o
 Seed 0 adds two checks, both on E14/E13/E10's best lambda for the network:
 
   dupcheck   the add cell at that lambda run a second time, in another process: it must be
-             bit-identical to the first (determinism of the whole job, concurrency included).
+             bit-identical to the first (determinism across processes and GPU slices).
   repro      the same cell with the shipped estimator (``norm_exact_rescaling`` off), compared
              with the stored E14/E13/E10 cell: a diagnostic of how far this hardware and code
              reproduce E14, recorded, not a gate. On ``cnn_gn_cifar``, which has no hooked
              normalisation layer, it must also be bit-identical to the add cell -- the knob must be
              inert there -- and that is a gate.
 
-**Sharding.** A job runs ``E16_NSHARDS`` copies of this script in parallel on one GPU slice, copy
-``E16_SHARD`` taking every ``NSHARDS``-th cell of the job's ordered list (the dupcheck cell always
+**Sharding.** A (network, seed, mode) runs ``E16_NSHARDS`` copies of this script, each its own job on
+its own GPU slice (``fisher_ref/slurm/e16_submit.sh``), copy ``E16_SHARD`` taking every
+``NSHARDS``-th cell of the job's ordered list (the dupcheck cell always
 goes to another shard than its twin), each writing its own shard file after every run. Then
 ``E16_MERGE=1`` merges the shard files into the job's file, checks that every planned cell is there
 exactly once, and evaluates the two seed-0 checks. The cells are independent runs, so the sharding

@@ -1,7 +1,7 @@
 # A floor or a clip instead of an added safety constant (E16)
 
-*Implementation plan and experiment specification. The code is done, tested and audited; the thirty
-cluster jobs are written and **not yet submitted**. The decision rules are pre-registered in
+*Implementation plan and experiment specification. The code is done, tested and audited; the cluster
+jobs are written and only the first (network, seed, mode) is submitted. The decision rules are pre-registered in
 [`plan_lambda_dominance.md`](plan_lambda_dominance.md), section "E16 — pre-registered", and are
 repeated in §5 below so this document can be read alone.*
 
@@ -13,7 +13,7 @@ repeated in §5 below so this document can be read alone.*
   that could read incomplete data as a verdict. All fixed.*
 - *Third (§11): the normalisation layers' curvature statistic, which the audit had recorded as a
   limit, is now corrected in every arm. E16 therefore reruns its own add baseline instead of reusing
-  E14's cells. The jobs are split by mode and run three cells at a time on a larger GPU slice.*
+  E14's cells. The jobs are split by mode and by shard, one process per 1g slice.*
 
 ---
 
@@ -48,8 +48,8 @@ the division:
 - the floor;
 - the three clips.
 
-Every arm uses the corrected statistic, so every comparison pairs by seed within one job, on the
-same code and the same hardware.
+Every arm uses the corrected statistic, so every comparison pairs by seed, between cells of the same
+commit run on the same kind of GPU slice.
 
 **What it can decide.**
 - Whether any of the four beats the tuned `λ`.
@@ -354,17 +354,16 @@ control first.
 
 **Why E14's cells are not reused.** The corrected statistic changes the `add` trajectories on the
 two networks with LayerNorms. On `cnn_gn_cifar`, which has none hooked, it does not: the `repro`
-check verifies that bit for bit. But the jobs also run on another GPU slice, three cells at a time,
-and that may change the floating-point order of operations. So the baseline is rerun everywhere.
-Every comparison is then between cells from one job: same code, same estimator, same hardware, same
-seed. The stored E14 cells survive as a diagnostic: `repro` says how far this hardware and code
+check verifies that bit for bit. The baseline is rerun there too, so that every comparison is
+between cells of one commit, run with one estimator, on one kind of GPU slice, at one seed. The stored E14 cells survive as a diagnostic: `repro` says how far this hardware and code
 reproduce them.
 
 **The two checks at seed 0.**
-- *Determinism.* `dupcheck` runs one `add` cell a second time, in another process of the same job.
+- *Determinism.* `dupcheck` runs one `add` cell a second time, in another shard, i.e. another job
+  on another GPU slice.
   The two must agree on every recorded field (test accuracy and loss, validation curve, distance
-  travelled, step count). A failure means the runs are not reproducible on this hardware under
-  concurrency, and E16 is not read.
+  travelled, step count). A failure means the runs are not reproducible from one GPU slice to
+  another, and E16 is not read.
 - *Inertness* (`cnn_gn_cifar` only). The same cell under the shipped estimator must be bit-identical
   to the `add` cell, since the network has no hooked normalisation layer. A failure means the new
   option changes something it should not.
@@ -417,34 +416,45 @@ layer:
 Once per process: the torch, CUDA and cuDNN versions, the GPU, the TF32 flags, the worker count, the
 git commit and whether the tree was dirty.
 
-**The jobs.** One job per (network, seed, mode): 30 jobs. Each runs its cells as three processes
-sharing one `h100_3g.40gb` slice (3/7 of an H100), then merges their files. These networks are
-small and latency-bound at batch 32, so one run leaves most of a slice idle. Rorqual offers 1g.10gb,
-2g.20gb and 3g.40gb slices and whole H100s (`sinfo`, 2026-09-21).
+**The jobs.** Each (network, seed, mode) runs as three jobs, one per shard, each a single process on
+one `h100_1g.10gb` slice (1/7 of an H100), plus a small CPU job that merges their files: 90 GPU jobs
+and 30 merges. The shard jobs use exactly the E-series line that ran E13/E14 (1g slice, 8 CPUs,
+24 GB, `OMP_NUM_THREADS=8`). So every E16 cell runs on the hardware E14's stored cells ran on, and
+the `add` times below are measured on it. A shard takes every third cell of the (network, seed, mode)
+list, in the order above. The dupcheck cell always goes to a different shard than its twin.
 
-| network | `add`, measured on 1g | clip / clipema / clipfixed, projected upper bound | cells per job | cell-time per job | at 3 per slice | `--time` |
-|---|---|---|---|---|---|---|
-| `cnn_gn_cifar` | 72–75 s | ~120 / 140 / 110 s | 34 (+2 at seed 0) | ~65 min | ~22 min | 0:50 |
-| `vit_micro_cifar` | 149–152 s | ~270 / 325 / 245 s | 34 (+2) | ~145 min | ~48 min | 1:40 |
-| `cct_2_3x2_cifar` | 197–212 s | ~315 / 360 / 285 s | 34 (+2) | ~170 min | ~57 min | 2:00 |
+| network | `add`, measured on 1g | clip / clipema / clipfixed, projected upper bound | cells per (network, seed, mode) | largest shard (12 cells), projected | `--time` per shard |
+|---|---|---|---|---|---|
+| `cnn_gn_cifar` | 72–75 s | ~120 / 140 / 110 s | 34 (+2 at seed 0) | 22 min | 0:35 |
+| `vit_micro_cifar` | 149–152 s | ~270 / 325 / 245 s | 34 (+2) | 49 min | 1:15 |
+| `cct_2_3x2_cifar` | 197–212 s | ~315 / 360 / 285 s | 34 (+2) | 58 min | 1:30 |
 
-The last column but one assumes each process keeps its 1g speed on the larger slice, which has not
-been measured: hence `--time` about 2× that. The three processes share the slice by time-slicing
-(no MPS), so how much they overlap is exactly what is unknown.
-- If they do not overlap at all, a job takes its full cell time (the fifth column), which is above
-  its limit.
-- So submit one job first, and read its timing (every cell prints its own seconds) and its seed-0
-  checks. If needed, raise `--time` to about 1.3× the measured job time, then submit the rest.
-- A job killed at its limit keeps its finished cells, since each is written as soon as it ends. But
-  a resubmitted job reruns them all. Summed over every cell, the whole experiment is about 62 hours of run time,
-6 of them for the rerun `add` baseline (computed from the table). It runs as 30 jobs of under an
-hour each (projected), instead of 15 jobs of 2 to 5 hours.
+The shard loads come from the driver's own cell plan and shard assignment. The three shards of a
+seed-0 job hold 21.5–22.0 / 48.1–49.4 / 56.8–58.1 min, and those of seeds 1–4 slightly less.
+- The limits are about 1.5× the largest shard, because the clip times are projections (the audit's
+  per-operation costs), not measurements.
+- Every cell prints its own seconds. So the first (network, seed, mode) submitted tells whether the
+  projections hold, and the limits of the rest can be adjusted before submitting them.
+- A shard killed at its limit keeps its finished cells, since each is written as soon as it ends.
+  But a resubmitted shard reruns them all.
+
+Summed over every cell, the whole experiment is about 62 hours of 1g-slice time, 6 of them for the
+rerun `add` baseline (computed from the table).
+
+**Why 1g slices and not a larger one.** The first version of this amendment ran the three shards as
+three processes on one `h100_3g.40gb` slice, to shorten each job. On 2026-09-21 at 17:51 EDT, 0 of
+80 3g slices were free, with a start estimated about 1.5 h later, while 143 of 160 1g slices were
+free (`sinfo`, `sbatch --test-only`). The 3g design also rested on an unmeasured assumption: that
+three processes sharing one slice by time-slicing each keep their 1g speed. One process per 1g slice
+has neither problem, for the same GPU share.
 
 **Files.**
 - Driver: `fisher_ref/experiments/e16_floor_clip.py` (a shard process, or the merge with
   `E16_MERGE=1`).
-- Job: `fisher_ref/slurm/e16_floor_clip.sh`; the submission loop is in its header. Commit first: the
-  decision script refuses files from a dirty tree or from different commits.
+- Jobs: `fisher_ref/slurm/e16_floor_clip.sh` (one shard) and `e16_floor_clip_merge.sh` (the merge),
+  both submitted by `fisher_ref/slurm/e16_submit.sh MODEL SEED MODE`, whose header has the loop over
+  all thirty. It refuses a checkout with modified tracked files: the decision script refuses files
+  from a dirty tree or from different commits, so all thirty come from one clean commit.
 - Decisions: `fisher_ref/experiments/e16_decisions.py`, run once all thirty merged files are in
   `fisher_ref/outputs/`.
 
@@ -579,8 +589,8 @@ exactly as its source experiment ran it".
 | audit (six agents: one per arm, layer types, protocol) and every fix | **done** (§10) |
 | the corrected normalisation statistic, and E16's own baseline | **done** (§11) |
 | tests: 120 new; full suite 1014 passed, 41 skipped | **done** |
-| driver, decisions script, job script | **done**. Local smokes: every arm on all three networks; three processes sharing a job, merged, with the determinism check and the inertness check passing |
-| the 30 cluster jobs | **not submitted**. Commit first; submit one job, read its timing and its seed-0 checks, then the rest |
+| driver, decisions script, job scripts | **done**. Local smokes: every arm on all three networks; two shards run concurrently and merged, with the determinism check and the inertness check passing |
+| the cluster jobs (30 x 3 shards + 30 merges) | **first (network, seed, mode) submitted** (`cnn_gn_cifar`, seed 0, `ekfac`); read its timing and its seed-0 checks, then the rest |
 | results | — |
 
 ---
@@ -708,15 +718,14 @@ of it): the median over the layer's channels, with the 90th percentile in bracke
 **What changes in E16.** Every arm runs with the option on, including `add`. The E14 fix is
 therefore rerun inside E16 on all three networks, rather than read from E14's files:
 - on the two LayerNorm networks the corrected statistic changes `add`'s steps (table above);
-- the jobs now also run on a larger slice, three cells at a time (below).
+- all of E16 is run from one commit, so the pairing never crosses a code change.
 
 `addfill` is gone, since `add` now covers the full grid everywhere. The stored E14 cells serve as a
 seed-0 diagnostic (`repro`), and the pipeline is checked by a determinism check and, on
 `cnn_gn_cifar`, an inertness check (§4).
 
 **The jobs.**
-- One job per (network, seed, mode) instead of per (network, seed): 30 jobs.
-- Each job runs three processes on one `h100_3g.40gb` slice instead of one process on a `1g.10gb`
-  slice.
-- Projected, each job takes under an hour instead of 2 to 5, for a similar total. The per-slice
-  speed is unmeasured, so the first job is a timing check.
+- One shard job per (network, seed, mode, shard): 90 jobs on `h100_1g.10gb`, plus 30 CPU merges,
+  instead of 15 jobs of 2 to 5 hours.
+- Projected, each shard takes 22 / 49 / 58 min on cnn / vit / cct, for the same total 1g-slice time
+  (§4 has the table, and why not a larger slice).
