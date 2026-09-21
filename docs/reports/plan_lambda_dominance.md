@@ -47,15 +47,26 @@ optimizers. They are not being held back by the safety constant.
 
 | **E4** | Is it the curvature that does not help, or the way it is being estimated? | **Not the estimating.** A real average, started from a real observation, gives the same result at the same effective damping: −0.37 points on average over the four Kronecker modes. But at batch 32 the study's one real gain shows up: **+4.32 accuracy points** on `cnn_gn_cifar`/`kfac`, at a safety constant of 10⁻⁸. |
 
-**Where that leaves it.** The curvature genuinely does not pay for itself on these networks at the
-default operating point, and no amount of fixing the estimator changes that. But there *is* an
-operating point where it pays, five orders of magnitude below the default, and reaching it by hand
-per network is not a method. Making the safety constant relative to each layer (**S1**) is what
-would reach it without hand-tuning, and it is what two of the five source papers already ask for.
+**Where that left it, after E4.** The curvature does not pay for itself at the default operating
+point, and fixing the estimator does not change that. But there *is* an operating point where it
+pays, far below the default, and reaching it by hand per network is not a method.
 
-The other fixes: make the step size stop depending on `λ` (**S2**), remove the start-up
-transient (**S3**), and make the safety constant relative to each layer instead of one shared
-number (**S1**). Two of the five source papers already ask for S1 and this port does not do it.
+**Where it stands now, after E14.** E7 to E14 swept `λ` further down, with the step size held still,
+with the eigenbasis ordering corrected and with five seeds. That operating point is real and large:
+**+6.6 to +10.0 accuracy points** for `ekfac`/`tekfac` on three of the four networks measured
+(`cct_2_3x2_cifar`, `vit_micro_cifar`, `cnn_gn_cifar`), at `λ` between 1e-11 and 1e-10, i.e. 7 to 8
+orders of magnitude below the default. E2's "buys almost nothing" was wrong: its window stopped too high.
+
+The plan had been to reach that point without hand-tuning through **S1**: `λ` proportional to the
+curvature, with one dimensionless constant `τ` that would transfer between networks. **That part
+has lost its evidence.** Across four networks whose mean curvature spans 15 to 20 times, the best
+`λ` for `ekfac`/`tekfac` moves by only 3 to 10 times, and a fixed number predicts it as well as the
+proportional rule, or better (E14). What survives is narrower. First, a relative `λ` is still the
+only form that is automatically right when the batch size or the running average changes. Second,
+the *per-layer* version of S1, one `λ` per layer inside a network, has never been run: every
+experiment so far used one `λ` for the whole network. The leading candidate is now simpler: **S4
+plus one fixed `λ`**, with the stored curvature put back at its true size so that the number stops
+depending on the batch. Part 4 has the details, Part 5 the order.
 
 ---
 
@@ -117,11 +128,18 @@ damped, gains the most **and** breaks first; `kfac`, the most damped, is the mos
 
 ### What is still open
 
-Lowering `λ` with the step held still is mathematically the same as putting the curvature back at its
-true size — but it does not fix the *average*, which is still 92% a single batch of examples. So "the
-curvature does not help" and "this particular estimate is too noisy to help" have not been told apart
-yet. The collapse at 10⁻¹² looks a lot like an estimation-noise failure. The experiment that settles
-it: fix the average properly, and rerun at batch 32.
+*Updated after E14. The question this section first asked, whether the averaging is to blame, was
+answered by E4: it is not.*
+
+1. **Does one `λ` per layer beat the best single `λ`?** Never measured. The curvature differs a lot
+   between the layers of one network, mostly because of the classification head (Part 4, S1).
+2. **Does a fixed `λ` survive a change of batch size once S4 is applied?** Every run from E8 to E14
+   is at batch 32, so "fixed" has only been shown at one batch size.
+3. **How much of the E10 and E13 gains is weight decay switching off?** On the two transformers the
+   weight decay is applied as `weight × (1 − lr × wd)`. Holding the step size still makes `lr` fall
+   with `λ`, so the decay vanishes in every lowered arm and not in the reference (Part 5, rule 3).
+   Worked out on paper for `vit_micro_cifar`: the reference arm's decay shrinks the weights by about
+   10% over its 21 090 steps. Its effect on accuracy has not been measured.
 
 ### Two measuring traps we walked into
 
@@ -444,6 +462,35 @@ loss itself is scaled. The question "is the running average a bug or a conventio
 because the answer no longer changes what the optimizer does. `τ` becomes the real knob, and E1
 measures what it should be.
 
+**Status after E14: demoted, not refuted.** S1 makes two claims. They have to be kept apart, because
+the experiments tested only one of them.
+
+- **Claim 1, across networks: one `τ` fits every network.** E7 to E14 tested a *consequence* of it:
+  they swept one `λ` for the whole network and compared the best value with the network's pooled
+  mean curvature. The consequence did not hold. For `ekfac`/`tekfac` the best `λ` stays between
+  1e-11 and 1e-10 while the curvature varies 15 to 20 times, and dividing by the curvature does not
+  make the optimum more constant (E14, Result 3). E13's refinement, "one `τ` per damping rule", also
+  fails: on `cnn_gn_cifar`, `kfac` wants the same `λ` as `ekfac`. So the promise that motivated S1,
+  setting `λ` from a measurement instead of a search, has no support left.
+- **Claim 2, inside a network: each layer needs its own `λ`.** Never tested: every run so far used
+  one `λ` for all layers. It remains plausible, because the curvature is very uneven across layers.
+  Measured at the half-way checkpoint (`fisher_ref/outputs/curvature_max_per_layer.json`, the
+  99th-percentile curvature of each layer), the largest layer's value is **230 to 5 000 times** the
+  smallest's for `ekfac`/`tekfac`: 4 800 to 5 000 times on `cnn_gn_cifar`, 520 to 560 on
+  `vit_micro_cifar`, 230 on `cct_2_3x2_cifar`, 560 to 1 100 on `resnet20_cifar`. On all four
+  networks the largest is the **classification head**. Between the 10th and the 90th percentile of
+  layers, the three deeper networks' layers sit within **2 to 7 times** of each other. So in
+  practice S1 per layer mostly means treating the head differently from the rest.
+- **The invariance argument is untouched.** Every run from E8 to E14 is at batch 32, with the same
+  running average and the same loss. A `λ` that is "fixed" in stored units is fixed only at those
+  settings: E3 measured that the stored curvature scales as 1/batch². E14 says that `λ` should not
+  follow the curvature *of the network*. It says nothing about the global scale factors.
+
+What replaces S1 as the leading candidate is **S4 plus one fixed `λ`** (see S4). The per-layer
+version stays on the list as a direct experiment. It has a trap: with one learning rate for the
+network, a per-layer `λ_l` also changes each layer's step-size cap `lr/λ_l`, and that breaks
+Part 5's rule 1 unless the cap is held per layer.
+
 ### S2 — Stop the step size from depending on `λ` at all
 
 Rescale the divided direction back to the length of the momentum it came from: multiply by
@@ -476,6 +523,15 @@ implementation's own convention. Then the stored object really is the empirical 
 floor already absorbs the size. So this is for making the constants comparable with published ones,
 not for fixing behaviour.
 
+**Status after E14: promoted.** With S1's cross-network claim unsupported, S4 plus one fixed `λ` is
+the simplest fix consistent with the data. S4 removes the batch factor. The running average's factor
+(115 for `ekfac`/`tekfac`) is a known constant and can be divided out explicitly (fix S3 or
+`gamma`). What remains is one number. For `ekfac`/`tekfac`, E10 to E14's best stored values
+(1e-11 to 1e-10 at batch 32) correspond to about **1.2e-6 to 1.2e-5** at the true scale. That is
+worked out on paper as 115 × 32² ≈ 1.2e5 times the stored value, not measured. The candidate can be
+refuted cheaply. Without S4, the best stored `λ` must fall 16 times when the batch goes from 32 to
+128. With S4, it must stay put.
+
 ### S5 — Numerical safety when `λ` is small
 
 Needed before E2 and E4. `kfac` and `tkfac` invert their quantities directly with
@@ -501,7 +557,7 @@ momentum SGD) and no floor at all (`p = 0`).
 
 ---
 
-## Part 5 — Order, and two rules for the protocol
+## Part 5 — Order, and three rules for the protocol
 
 | # | Action | Status | Why here |
 |---|---|---|---|
@@ -510,8 +566,11 @@ momentum SGD) and no floor at all (`p = 0`).
 | 3 | **E3** | **done** (same jobs) | confirmed the arithmetic, and says to run E4 at batch 32 |
 | 4 | **E2** | **done** (job 21283681) | ran before the fixes because moving `λ` and the learning rate together does what S2 was for, with no code change. Answered both halves: the barrier is the step size, and lifting it buys nothing |
 | 5 | **E4 with S3**, at batch 32 | **done** (jobs 21295803-5) | answered it: **not** the averaging. And found the one real gain in the study, +4.32 points on `cnn_gn_cifar`/`kfac` at 10⁻⁸ |
-| 6 | **S1** as a full arm | **next** | a safety constant relative to each layer would reach E4's 10⁻⁸ operating point without hand-tuning it per network |
-| 7 | **E5, E6** | open | the thousand-to-one split inside each network, and step 16's causal test |
+| 6 | **E5, E6** | **done** (jobs 21374756, 21379909-12) | E4's gain is not the frozen GroupNorm, and the gain is real on two more architectures |
+| 7 | **E7 to E14** | **done** | the operating point is real (+6.6 to +10.0 points on three networks of four) and sits between 1e-11 and 1e-10 for `ekfac`/`tekfac`. The eigenbasis ordering defect must be fixed there (E8, E10). The seed floor is 0.15 to 2.4 points depending on the network, not 0.04 to 0.18. `τ` does not transfer between networks better than a fixed number (E14) |
+| 8 | **S1**, across networks (one `τ` for every network) | **demoted** after E14 | a fixed `λ` does as well. See S1's status paragraph |
+| 9 | **S4 + one fixed `λ`**, tested by a change of batch | **next** | the simplest fix consistent with E14. A batch-32 vs batch-128 sweep refutes it or not |
+| 10 | **S1 per layer**, as a direct arm against the best single `λ` | **E15, pre-registered**, needs code | never tested. The spread between layers is mostly the head (S1's status paragraph). Must hold the cap per layer and the weight-decay rate still (rules 1 and 3) |
 
 **On the reordering.** S2 was planned as a prerequisite for E2. It turned out not to be needed:
 moving `λ` and the learning rate together holds the cap exactly still, which is what S2 was for, and
@@ -519,12 +578,19 @@ does it without changing any optimizer code. S2 is still the right thing to ship
 the cap something you set rather than something that falls out of two constants. But it is no longer
 blocking anything.
 
-**Two rules, each one the lesson of a mistake already made.**
+**Three rules, each one the lesson of a mistake already made.**
 
 1. **Any sweep of `λ` must hold the step-size cap still.** Otherwise it moves two things at once and
    the result cannot be attributed to either (Part 2.1, and E2's result).
 2. **Draw no conclusion from `mnist_autoencoder`.** Every arm of every configuration lands on the
    same number there. It cannot tell anything apart (audit_step, section 4.8).
+3. **Hold the weight-decay rate still too.** Holding the cap means `lr = cap × λ`, so `lr` falls by
+   the same 7 to 8 orders of magnitude as `λ`. Coupled decay (the CNNs) is added to the gradient and
+   is unaffected. Decoupled decay (the two transformers, `decoupled_wd=True`) multiplies the weights
+   by `1 − lr × wd`, so it vanishes in every lowered arm while the reference arm keeps it. E10 and
+   E13 therefore changed two things at once on `cct_2_3x2_cifar` and `vit_micro_cifar`. E14's two
+   networks use coupled decay and are not affected. Any new sweep on a transformer must apply the
+   decay at the benchmark's own rate, `base_lr × wd`, whatever `λ` is.
 
 ---
 
@@ -1499,3 +1565,271 @@ seeds 0-4, with a 1:45 limit. Jobs 21498173-75 run `resnet20_cifar`, seeds 0-2, 
 Each log confirms its window and `eig_before_rescale=True`. Outputs:
 `fisher_ref/outputs/e14_seeds_{cnn,resnet20}_eigfix_s<seed>.json`. The first `cnn_gn_cifar` runs
 take 68 to 70 s each, as E4 measured.
+
+### E14 — done. The pre-registered rule passes for `ekfac`/`tekfac`, but the test was too weak: the best constant barely follows the curvature.
+
+All eight jobs COMPLETED: `cnn_gn_cifar` in 52 to 53 min per seed, `resnet20_cifar` in 3 h 32 to
+3 h 35. Nothing crashed, including `kfac` and `tkfac` down to 3e-13.
+
+**Result 1 — the curves.** Test accuracy in %, seed mean ± standard error. `ref` is each mode at
+its default constant (1e-3).
+
+`cnn_gn_cifar`, five seeds:
+
+| mode | ref | 1e-7 | 3e-8 | 1e-8 | 3e-9 | 1e-9 | 3e-10 | 1e-10 | 3e-11 | 1e-11 | 3e-12 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `kfac` | 61.10 | 63.74 | 64.00 | 64.47 | 64.46 | 65.04 | 64.93 | **65.52** ±0.18 | 64.64 | 63.40 | 61.40 |
+| `ekfac` | 61.60 | 63.06 | 62.71 | 63.13 | 63.93 | 65.59 | 67.32 | 68.15 | **68.23** ±0.25 | 65.67 | 61.39 |
+| `tkfac` | 62.04 | 62.52 | **63.04** ±0.27 | 62.39 | 62.33 | 61.08 | 59.68 | 58.16 | 57.08 | 55.81 | 52.69 |
+| `tekfac` | 61.30 | 62.23 | 63.10 | 63.51 | 64.71 | 65.82 | 67.21 | **68.20** ±0.23 | 67.99 | 65.87 | 61.77 |
+
+`resnet20_cifar`, three seeds:
+
+| mode | ref | 1e-8 | 3e-9 | 1e-9 | 3e-10 | 1e-10 | 3e-11 | 1e-11 | 3e-12 | 1e-12 | 3e-13 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `kfac` | 86.68 | 86.87 | **86.88** ±0.18 | 86.55 | 86.47 | 86.75 | 86.75 | 86.87 | 86.71 | 86.76 | 86.62 |
+| `ekfac` | 86.27 | 86.37 | 86.29 | 86.17 | 86.28 | 86.68 | 86.54 | **86.84** ±0.23 | 84.87 | 78.03 | 65.13 |
+| `tkfac` | 86.60 | 86.36 | 86.20 | **86.57** ±0.03 | 86.36 | 86.31 | 85.96 | 84.65 | 80.04 | 70.52 | 59.72 |
+| `tekfac` | 86.36 | 86.36 | 86.39 | 86.32 | 86.11 | 86.32 | 86.46 | **86.98** ±0.32 | 85.57 | 79.61 | 66.09 |
+
+On `cnn_gn_cifar` the gains are large: **+6.6 and +6.9 points** for `ekfac` and `tekfac`, +4.4 for
+`kfac` and +1.0 for `tkfac`. On `resnet20_cifar` they are small: **+0.6** at best, and zero for
+`kfac` and `tkfac`. That matches E4, which found this network flat to within a point.
+
+**Result 2 — the pre-registered verdicts.** A plateau is every constant whose seed mean lies within
+one standard error of the best seed mean (rule 1).
+
+| network | mode | plateau | predicted | predicted, widened 3x | verdict |
+|---|---|---|---|---|---|
+| `cnn_gn_cifar` | `ekfac` | 1e-10, 3e-11 | 2.0e-10 .. 4.5e-10 | 6.7e-11 .. 1.4e-9 | **confirmed**, at the lower edge |
+| | `tekfac` | 1e-10, 3e-11 | 2.5e-10 .. 6.0e-10 | 8.3e-11 .. 1.8e-9 | **confirmed**, at the lower edge |
+| | `kfac` | 1e-10 | 2.5e-11 .. 4.7e-11 | 8.3e-12 .. 1.4e-10 | **confirmed**, at the upper edge |
+| | `tkfac` | 3e-8 | 8.6e-10 .. 1.9e-9 | 2.9e-10 .. 5.7e-9 | **refuted** |
+| `resnet20_cifar` | `ekfac` | 1e-10, 1e-11 | 1.2e-11 .. 3.7e-11 | 4.0e-12 .. 1.1e-10 | **confirmed** |
+| | `tekfac` | 1e-11 | 1.2e-11 .. 3.9e-11 | 4.0e-12 .. 1.2e-10 | **confirmed** |
+| | `kfac` | 7 of 10 values, 1e-8 .. 1e-12 | 1.2e-12 .. 3.1e-12 | | **uninformative**: flat |
+| | `tkfac` | 1e-9 | 3.7e-11 .. 1.1e-10 | 1.2e-11 .. 3.3e-10 | **refuted**, but fragile |
+
+`kfac` on `resnet20_cifar` is the case the pre-registration set aside: all ten values lie within
+0.41 points of each other, so its plateau intersects everything and says nothing. `tkfac` on
+`resnet20_cifar` is refuted only because its best cell has an unusually small standard error
+(0.03, from three seeds). With a two-sample criterion, which was *not* pre-registered, its plateau
+becomes {1e-9, 3e-10} and the verdict flips to confirmed. Its substantive result is simpler: no
+value of the constant does better than the default. On `cnn_gn_cifar` the refutation of `tkfac` is
+clear: at the predicted value, 1e-9, it reads 61.08%, 2 points below its best and 1 point below its
+own default.
+
+- **Rule 2, the fixed-number hypothesis at 1e-8: refuted for all four modes.** No plateau on
+  `cnn_gn_cifar` contains 1e-8. E4 and E7's single-seed peaks at 1e-8 came from windows that
+  stopped at 1e-9 or 1e-10, and for `ekfac`/`tekfac` from the ordering defect as well.
+- **Rule 3: the rule is supported** by the pre-registered criterion. `ekfac` and `tekfac` are
+  confirmed on both networks.
+- **Rule 4: the split by damping rule is not supported.** `ekfac` and `tekfac` share their plateau
+  on both networks, as on the two earlier ones. But on `cnn_gn_cifar` `kfac`'s plateau (1e-10) is
+  not below theirs (1e-10, 3e-11). On `vit_micro_cifar` and `cct_2_3x2_cifar` it was 10 to 30 times
+  lower. On `resnet20_cifar` `kfac` is flat.
+
+**Result 3 — and why the pass is weaker than it looks. The competitor was the wrong one.** This
+comparison was *not* pre-registered, so read it as a finding to test, not as a verdict. The
+competing hypothesis written down was a fixed constant of 1e-8. That number came from runs carrying
+the ordering defect and windows that stopped too high, so it was easy to refute. The fair competitor
+is a fixed constant fitted on the same two networks `tau` was fitted on. With the ordering
+corrected, those two networks put `ekfac`/`tekfac` at 3e-11 and 1e-10, whose geometric mean is
+5.5e-11. Here is how both rules predict the two new networks:
+
+| mode | network | fixed 5.5e-11 is off by | proportional to curvature is off by |
+|---|---|---|---|
+| `ekfac` | `cnn_gn_cifar` | 1.0x (inside the plateau) | 3.0x |
+| `tekfac` | `cnn_gn_cifar` | 1.0x (inside the plateau) | 3.8x |
+| `ekfac` | `resnet20_cifar` | 1.0x (inside the plateau) | 1.0x (inside the plateau) |
+| `tekfac` | `resnet20_cifar` | 5.5x | 2.1x |
+
+`cnn_gn_cifar` is the network that tells the two rules apart. Its mean curvature is 15 to 20 times
+`cct_2_3x2_cifar`'s, while `resnet20_cifar`'s is about equal to it. On `cnn_gn_cifar` the fixed
+constant lands inside the plateau, and the proportional rule misses it by a factor of 3 to 4. The
+proportional rule passed rule 1 only because of the factor-3 widening.
+
+Across all four networks now measured, the same picture:
+
+| mode | curvature, smallest to largest | best constant, smallest to largest | slope of log(best constant) against log(curvature) |
+|---|---|---|---|
+| `ekfac` | 15x | 3.3x (3e-11 .. 1e-10) | **+0.32** |
+| `tekfac` | 20x | 10x (1e-11 .. 1e-10) | **+0.50** |
+
+A proportional rule predicts a slope of 1, and a fixed constant predicts 0. The spread of the
+optimum around a single fixed value is 0.21 decades for `ekfac` and 0.37 for `tekfac`. Around the
+best proportional rule it is 0.38 and 0.37. **Dividing by the curvature does not make the optimum
+more constant. For `ekfac` it makes it less constant.** Four points, each uncertain by roughly the
+width of its plateau (one to ten times), cannot pin the slope. They do say that on these networks
+the best constant for `ekfac`/`tekfac` sits between **1e-11 and 1e-10** whatever the curvature.
+
+One qualification is essential. Every run of E8 to E14 used **batch 32**, and E3 showed that the
+stored curvature scales as 1/batch². So a constant that is fixed in stored units is fixed only at
+this batch size. What E14 argues against is scaling with the *network's* curvature, not scaling with
+the batch.
+
+**Result 4 — EKFAC's advantage over K-FAC holds on a third network.** The best seed mean for each
+mode:
+
+| network | `kfac` | `ekfac` | `tekfac` | `ekfac − kfac` |
+|---|---|---|---|---|
+| `cct_2_3x2_cifar` (E10, E11) | 80.40 | 82.85 | 82.88 | **+2.45** |
+| `vit_micro_cifar` (E13) | 52.98 | 55.24 | 54.99 | **+2.26** |
+| `cnn_gn_cifar` (E14) | 65.52 | 68.23 | 68.20 | **+2.71** |
+| `resnet20_cifar` (E14) | 86.88 | 86.84 | 86.98 | −0.04 |
+
+That is the same advantage, 2.3 to 2.7 points, on three networks. It is a tie on the one network
+where nothing responds to the constant. EKFAC's Theorems 2 and 3 (`ekfac_1806.03884.pdf`) are
+about approximation error, not accuracy, so this agrees with them without testing them.
+
+**Result 5 — the seed floor, measured on two more networks.** Over five seeds, the four reference
+arms of `cnn_gn_cifar` spread by **0.44 to 2.19 points**. Over three seeds, `resnet20_cifar`'s spread
+by 0.15 to 0.45. The 0.04 to 0.18 this document borrowed for most of its length came from these
+same two networks: two seeds of `kfac` at its default constant (`validation_noise_investigation.md`,
+Step 9). For `kfac`, five seeds give 0.44 on `cnn_gn_cifar` against the 0.04 borrowed, i.e. ten
+times larger, and 0.15 on `resnet20_cifar` against 0.18. So two seeds understated `cnn_gn_cifar`'s
+floor tenfold, while `resnet20_cifar`'s held.
+
+**What E14 changes.**
+
+1. **Fix S1 has lost its evidence.** A safety constant proportional to each layer's mean curvature
+   is not better supported than a fixed constant, for any mode. The simpler candidate is a fixed
+   `λ` for `ekfac`/`tekfac` around 3e-11 to 1e-10 in stored units at batch 32. Fix S4 (restoring
+   the per-example scale) would make that number independent of the batch size.
+2. **The prediction was right where it mattered least.** `ekfac`/`tekfac` land in the predicted
+   decade on all four networks. But a fixed constant lands there too, so this confirms nothing
+   about curvature.
+3. **`tkfac` is the outlier.** Its optimum ranges from 3e-10 (`vit_micro_cifar`) to 3e-8
+   (`cnn_gn_cifar`). Where it gains at all, it gains least: +1.0 and 0.0 here, +4.8 on
+   `vit_micro_cifar`.
+
+**Limits.** `resnet20_cifar` has three seeds, and its curvature is E1's mid-training value, which
+read 1.3 to 1.8 times higher than E9's step-8000 value on the two networks where both exist. The
+plateau definition is sensitive to a single cell's standard error, as `tkfac` on `resnet20_cifar`
+shows. `cct_2_3x2_cifar`'s five-seed window for `ekfac`/`tekfac` stops at 3e-11, its best point.
+The drop below it rests on E8's single seed.
+
+### E15 — pre-registered: does one safety constant per layer beat the best single one?
+
+Written **before** any code for it exists and before any run. Anything below that changes after the
+runs are submitted is a deviation, and will be recorded as one.
+
+**The question.** E7 to E14 always used one `λ` for the whole network. S1's second claim is that
+each layer needs its own (S1's status paragraph, Part 4). This experiment tests that claim directly.
+Inside one network, at an equal step-size cap, does `λ_l = τ × c̄_l`, where `c̄_l` is layer `l`'s own
+mean stored curvature, beat the best single `λ`?
+
+**Two versions of S1, and which one is tested.** Write `m_i` for the momentum in direction `i`,
+`s_i` for the stored curvature there, and `cap` for the step multiplier (`base_lr / base_λ`: 1 on
+`cnn_gn_cifar`, 1/3 on `vit_micro_cifar`). Shown for `ekfac`/`tekfac`, where `λ` is added direction by
+direction:
+
+```
+single λ, cap held (E7-E14):    step_i = cap · m_i / (1 + s_i / λ)
+S1-b, cap held per layer:       step_i = cap · m_i / (1 + s_i / (τ · c̄_l))
+S1-a, the papers' literal form: step_i = lr  · m_i / (s_i + τ · c̄_l)
+```
+
+- **S1-b is tested here.** Every layer keeps the same cap, so the only thing that changes compared
+  with a single `λ` is where the threshold sits in each layer. It has one knob, `τ`, against the
+  single-`λ` arm's one knob, `λ`. That is a fair comparison, and it respects Part 5's rule 1.
+- **S1-a is not tested here.** With one learning rate for the network, a per-layer `λ_l` also gives
+  each layer its own cap, `lr / λ_l`, so it needs a two-dimensional sweep over `τ` and `lr`. It is a
+  follow-up, and only if S1-b wins.
+
+**How `c̄_l` is read.** It is read from the state the optimizer already stores, at every refresh, so
+it needs no extra decomposition. `ekfac`: `mean(s*)`. `tekfac`: `mean(Θ)`, which is exactly TEKFAC's
+Eq. (3.5) without its floor `ϑ`. `kfac`: `(tr A / d_in) × (tr B / d_out)`, the mean eigenvalue of
+`A ⊗ B`. `tkfac`: `δ / (d_in × d_out)`, since `tr Φ = tr Ψ = 1`. Early in training `c̄_l` still
+contains the identity's residue, and so does the curvature it is compared with. That is equally true
+of the single-`λ` arm, and is left as it ships.
+
+**What `τ` should be, roughly.** The single-`λ` optima already measured translate into a
+network-level `τ`: the optimal `λ` divided by the network's mean stored curvature (E9's step-8000
+values, divided by 115 × 32² for `ekfac`/`tekfac` and by 115² × 32² for `kfac`). This comes out at
+**0.008 to 0.035** on `cnn_gn_cifar` and **0.07 to 0.21** on `vit_micro_cifar` for `ekfac`/`tekfac`,
+and at **0.25 to 3.3** for `kfac`. `kfac` is higher because its constant enters inside the two
+factors, split as `π√λ` and `√λ/π`, not added once. S1-b's best `τ` need not equal these values,
+because it divides by each layer's own mean and not by the network's. The grids are built to reach
+at least a factor of 4 past these values on either side.
+
+**The arms,** for each (network, mode, seed):
+
+| arm | what varies | grid | runs |
+|---|---|---|---|
+| reference | nothing: the default `λ` | — | 1 |
+| single `λ` | one `λ` for the network, cap held | 5 values at half-decade spacing, centred on E13/E14's best (below) | 5 |
+| **S1-b** | `λ_l = τ · c̄_l` for each layer, cap held per layer | `ekfac`/`tekfac`: `τ` in {1, 0.3, 0.1, 0.03, 0.01, 0.003, 0.001, 3e-4}. `kfac`: {30, 10, 3, 1, 0.3, 0.1, 0.03, 0.01} | 8 |
+| network-adaptive | one `λ(t) = τ · c̄_net(t)` for the whole network, where `c̄_net` is the mean over all its layers' directions, cap held | the same grids as S1-b | 8 |
+
+`τ = 1` in the `ekfac`/`tekfac` grid is TEKFAC's own rule. The network-adaptive arm separates two
+things S1-b does at once: following each *layer*, and following the curvature *over time*.
+
+Single-`λ` grids: `cnn_gn_cifar` `kfac` {1e-9 .. 1e-11}, `ekfac`/`tekfac` {3e-10 .. 3e-12};
+`vit_micro_cifar` `ekfac`/`tekfac` {1e-9 .. 1e-11}, `kfac` {1e-10 .. 1e-12}.
+
+**Fixed across every arm.**
+- Everything E13/E14 fixed: batch 32, 15 epochs, the cosine schedule, the shipped estimator,
+  `eig_before_rescale=True` for `ekfac`/`tekfac`, five seeds 0-4 sharing initialisation and data
+  order across arms.
+- **The parameters the optimizer does not precondition are frozen in every arm**
+  (`E4_FREEZE_UNHOOKED=1`). S1-b has no `λ_l` to give them, and with the cap convention they would
+  otherwise step at `cap` times their momentum. E6 measured the freeze inert on `vit_micro_cifar`.
+  On `cnn_gn_cifar` E5 measured it at −0.26 to +1.68 points, a constant here because it applies to
+  every arm.
+- **Weight decay at the benchmark's own rate, whatever `λ` is (rule 3).** `cnn_gn_cifar`'s decay is
+  coupled and needs nothing. On `vit_micro_cifar`, every arm is built with a decay coefficient
+  chosen so that `lr × wd` equals `base_lr × wd = 1e-5` per step at the top of the cosine.
+- Modes: `ekfac` and `tekfac` (primary) and `kfac` (secondary). Not `tkfac`, which gained +1.0 and
+  0.0 in E14. Not `diag`, which E7 showed wants the opposite of the others.
+- Networks: `cnn_gn_cifar` (the largest spread between layers, 5 000×, and E14's five-seed single-`λ`
+  curve to check against) and `vit_micro_cifar` (15 layers, 520 to 560×, dominated by the head).
+  Not `resnet20_cifar`: it does not respond to `λ` at all, so it cannot tell two rules for `λ`
+  apart.
+
+**Controls that check the protocol itself.**
+1. **Reproduction, seed 0.** For each mode, one single-`λ` cell run exactly as E13/E14 ran it
+   (unfrozen, and on `vit_micro_cifar` with the decay that vanishes). It must reproduce E14's
+   seed-0 test accuracy on `cnn_gn_cifar` (`kfac` 1e-10: 65.18, `ekfac` 3e-11: 67.41, `tekfac`
+   1e-10: 68.55) and E13's on `vit_micro_cifar` (`kfac` 1e-11: 54.23, `ekfac` 1e-10: 54.36,
+   `tekfac` 1e-10: 54.92), to 0.00 points. If one fails, the new code path changed something
+   besides `λ`, and no result below is read until that is explained.
+2. **The weight-decay confound, five seeds, `vit_micro_cifar` only.** For each mode, the best
+   single-`λ` cell run unfrozen with the decay at its fixed rate. Paired by seed with E13's existing
+   cell at the same `λ`, this measures how much of E13's gain was the decay switching off.
+
+**The decision rules, fixed now.**
+1. **Selection on validation, verdict on test.** Within each arm family, the chosen `λ` or `τ` is
+   the one with the best five-seed mean of the final-epoch *validation* accuracy. The comparison is
+   then made on *test* accuracy at those chosen values. Otherwise the best of eight values of `τ`
+   would be compared with the best of five values of `λ` on the same numbers used to choose them,
+   which favours S1-b.
+2. **Per (network, mode):** `Δ` = test accuracy of S1-b minus test accuracy of the single `λ`, paired
+   by seed. **S1-b wins** if the mean of `Δ` exceeds 2 standard errors of `Δ`, **loses** if it is
+   below −2 standard errors, and **ties** otherwise.
+3. **Verdict on S1 per layer.** **Adopted as the next fix** if S1-b wins for `ekfac` and for `tekfac`
+   on both networks. **Dropped** if it ties or loses for both modes on both networks. Anything in
+   between is **mixed**, and rule 5 decides what it means.
+4. **Tuning-free?** S1-b is called tuning-free if one value of `τ` lies inside the plateau of every
+   (network, mode) pair. The plateau uses E13's definition on test accuracy: every value whose
+   five-seed mean lies within one standard error of the best. That is the property E14 found
+   missing for a single `λ` across networks.
+5. **Layer or time?** The same comparison as rule 2, between S1-b and the network-adaptive arm. If
+   they tie, any gain of S1-b comes from following the curvature over time, not from treating
+   layers differently.
+
+**Recorded along the way, not voted on:** `c̄_l` and `λ_l` for every layer at every refresh, and the
+fraction of each layer's directions whose curvature exceeds its `λ_l`. The expectation, written down
+so it can fail: if S1-b wins, it is because the head gets a threshold far above the single-`λ`
+optimum while the other layers stay near it. If that is what the logs show, the next arm is "single
+`λ` for the body, relative `λ` for the head only".
+
+**Cost, estimated from measured times per run** (68 to 70 s on `cnn_gn_cifar` in E14, 136 to 155 s
+on `vit_micro_cifar` in E13). Per seed, 3 modes × 22 runs, plus the control cells. `cnn_gn_cifar` is
+about 1 h 20 per seed, so a 2:15 limit. `vit_micro_cifar` is about 2 h 50 per seed, so a 4:00
+limit. That is ten jobs and about 21 GPU-hours on `h100_1g.10gb` slices.
+
+**Not submitted until three things exist:** the optimizer option (`damping="layer_relative"` /
+`"network_relative"`, `damping_tau`), off by default and bit-identical when off; tests showing that
+a constant `λ_l` reproduces the single-`λ` path and that `c̄_l` equals the mean eigenvalue computed
+densely; and the driver `fisher_ref/experiments/e15_layer_damping.py`.
