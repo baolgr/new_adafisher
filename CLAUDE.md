@@ -748,6 +748,88 @@ root on `v^(t)` — is **identical across the five modes**.
 > (`mlp_ln_mnist` ran `budget`, the other four pre-date `schedules.py`), so every figure in this
 > block is computed on seeds 1-4 only and seed 0 is deliberately excluded.
 
+> **E16 — a floor or three clips instead of the added `lambda`: code done and audited, runs not
+> submitted**
+> (`docs/reports/plan_floor_clip.md`; pre-registered in `plan_lambda_dominance.md` §E16). The two
+> alternatives `fr/etude_clipping_vs_damping.md` set aside because both degenerate at the shipped
+> `lambda` -- family A `max(s, lambda)`, family B a Sophia-type clip of the undamped step -- are now
+> `AdaFisherMulti(rescale_form="floor"|"clip")` for `ekfac`/`tekfac`, to be tested at the E14
+> operating point (`lambda` ~ 1e-11-1e-10) where they can differ from `s + lambda`. The clip absorbs
+> the curvature's scale error, so it is the one candidate that could transfer between networks where
+> E14 found no single `lambda` does, and it comes with three thresholds (`clip_threshold`):
+> `"quantile"` (reset every step: a per-module normalisation, kept as the control), `"ema"` (the main
+> arm: the step follows the momentum's size against its bias-corrected average over 1 000 steps) and
+> `"fixed"` (a conditional clip: each module's median quantile over steps 1000-1999, frozen at step
+> 2000). A six-agent audit before submission found and fixed, each measured: a **network-wide**
+> threshold is incoherent here (the stored curvature's scale error differs between layers by up to
+> four orders of magnitude -- a pooled calibration clipped a ViT head on 3 % of its coordinates and
+> its final LayerNorm on 97 %), so every threshold is per module; the EMA seeded with its first step
+> stayed biased for 12-18 % of a run, so it is bias-corrected; the clipped count could be off by one
+> through rounding, so clipped is now defined by the tensor the threshold comes from; the per-module
+> host synchronisation and per-step statistics would have overrun the job limits, so the quantile is
+> a sort-and-gather and the statistics are lazy; and the decision script used to read an incomplete
+> or invalid set of jobs as "equivalent". **Third amendment, the normalisation statistic corrected**
+> (`plan_floor_clip.md` §11). `ekfac`/`tekfac` estimated a normalisation layer's `s*`/`Theta` from
+> the gradient of the §4.6 surrogate `[z*delta, delta]`, not the layer's own `[delta*x_hat, delta]`.
+> Measured at step 300, the scale column was 295-989x too small on `vit_micro_cifar` and 80-106x on
+> `cct_2_3x2_cifar`, and the clip exposed it at `q <= 0.3` by throttling the shift steps 3-117x. The
+> new knob `norm_exact_rescaling` (§3) uses the layer's own per-row gradient, projected into the same
+> eigenbasis, which EKFAC's Lemma 1 makes the optimal diagonal there. **Every E16 arm runs with it,
+> including add**, so E16 reruns E14's fix instead of pairing with E14's stored cells. The rerun is
+> needed: at E14's `lambda` the corrected statistic raises the divisor `s + lambda` of the first
+> LayerNorm's scale column to a median 2.45x `lambda` on the ViT and 2.21x on the CCT (step 2 000,
+> measured), where the shipped one leaves it at 1.00x. Seed 0 carries two gates: the same add cell
+> run twice, in two processes, must agree exactly; and on `cnn_gn_cifar`, which has no hooked
+> normalisation layer, the knob must change nothing. The comparison with E14's stored cell is a
+> diagnostic that does not vote. One limit stays recorded, not fixed: TF32 convolutions on the H100
+> are noisier than the `1e-3 x rms` guard. **30 jobs** (`fisher_ref/slurm/e16_floor_clip.sh`, one per
+> network x seed x mode), each running its 34 cells (36 at seed 0) as 3 processes sharing one
+> `h100_3g.40gb` slice. Projected at 22/48/57 min per job for cnn/vit/cct if each process keeps its
+> 1g speed, which is not measured yet, so submit one job first. About 62 h of run time summed over
+> cells. The feasibility study's Sophia range was inverted: `win_rate` is the fraction *not* clipped,
+> so the published target is a clipped fraction of 0.5-0.9.
+
+> **E15 — one safety constant per layer: done, and adopted** (`plan_lambda_dominance.md`, "E15 —
+> done"; jobs 21523753-62, all COMPLETED). Five seeds on `cnn_gn_cifar` and `vit_micro_cifar`, under
+> the E protocol (batch 32, 15 epochs, step-size cap held per layer). All six reproduction cells hit
+> E13's and E14's seed-0 accuracy to **0.00 points**. `damping="layer_relative"` (S1-b) beats the
+> best single `lambda` in **all six** (network, mode) pairs, by +1.9 to +6.1 points, and in 30 of 30
+> (pair, seed) cells. It also beats the network-wide relative `lambda` in all six, by +1.7 to +4.3,
+> so the gain comes from treating layers separately, not from being relative. Against the default
+> `lambda` it gains +8.2 to +14.8 points. Rule 3: **adopted**. Rule 4 as written: **not**
+> tuning-free, because `kfac` wants `tau` = 0.3 to 3 while `ekfac`/`tekfac` want `tau = 0.1` on both
+> networks. What S1-b does, read from the per-layer logs: it gives the head a constant hundreds of
+> times above the single optimum, and the flattest layers one 2 to 20 times below it. A second
+> session recomputed every number from the raw JSON with its own script, and all of them match.
+> Limits: two networks of about 20 k parameters, at batch 32; nothing yet under the benchmark
+> protocol, and no third network.
+
+> **E17/E18 — ViT-S, the one network where the shipped Fisher arms lose to AdamW**
+> (`plan_lambda_dominance.md` §E17, §E18). **E17 is pre-registered and amended, and not launchable
+> yet.** It makes ViT-S (`vit_small_cifar`, then `vit_small_cifar100`) the held-out network for E15's
+> and E16's verdicts. No experiment of the λ work has ever run it. The candidates are chosen by E15's
+> and E16's own rules. Stage 1 asks whether the chosen value transfers: E protocol, five seeds, and an
+> oracle sweep to locate ViT-S's own plateau. Stage 2 asks whether it closes the campaign-2 gap to
+> AdamW: three seeds, one job per (dataset, seed). From E15, candidate C (S1-b) **does not qualify**,
+> because rule 4 read literally fails; that reading is the user's decision. S1-b at `tau = 0.1` may
+> run there only as an arm labelled exploratory. E16's candidates must run with
+> `norm_exact_rescaling=True`, as E16 does. E17 is blocked on four things: E16's results;
+> `vit_small_cifar` entries in the E15/E16 drivers; the `HParams` fields stage 2 needs; and a
+> batch-32 calibration of ViT-S. **E18 is running** (jobs 21532555-60). It tests campaign 2's
+> untested reading: at the shipped `lambda`, every Fisher arm is momentum SGD at
+> `lr (1 - beta) / lambda`, which is 0.033 on the ViT benches. The new arm `sgdm`
+> (`benchmarks/common/optimizers.py::LambdaLimitSGD`) is that limit exactly: `AdaFisherMulti`'s
+> update with `F~ = lambda I`, where parameters no hooked module owns keep AdaFisher's own fallback.
+> It is **bit-identical** to `AdaFisherMulti(gammas=(1.0, 0.0))` on 12 configurations, and equal to
+> `torch.optim.SGD(momentum=beta)` at `lr (1 - beta) / (lambda (1 - beta^t))` to 1e-10 in fp64. For
+> `diag` the reading is almost arithmetic. Its factors are min-max normalised, then averaged with
+> (0.08, 0.008) from a start at 1, so `F~_D - lambda <= 7.56e-5` after warm-up, and its step is at
+> least 0.973 times `sgdm`'s from step 200 on, at `lambda = 3e-3`. Each E18 job replays campaign 2's
+> grouped job with `sgdm` added, then runs `sgdm` alone at `diag`'s exact 17 550 steps; seeds 0-2 on
+> both datasets. **The reproduction gate passed:** at seed 0, `diag` is bit-identical to campaign 2
+> over 17 550 of 17 550 steps, on both datasets. Outputs go to
+> `benchmarks/outputs/controls/e18_sgdm/`, which `fisher_ref` does not read.
+
 ## Working language
 
 All code, comments, docstrings, reports and documentation are written in **English**, to the standard
@@ -810,7 +892,10 @@ adafisher/
 │   │                              #   and BatchNorm2d/LayerNorm normalized_shape 1-tuple (lot 5:
 │   │                              #   done, see plan_lot2.md §0.1, plan_lot4.md §0.1-§0.4,
 │   │                              #   plan_lot5.md §0.1-§0.4); the SUA channel-only Conv2d input
-│   │                              #   factor (lot 6: done, plan_lot6.md §0.3, §1.1)
+│   │                              #   factor (lot 6: done, plan_lot6.md §0.3, §1.1);
+│   │                              #   normalized_norm_input/norm_exact_kfe_squares, a norm
+│   │                              #   layer's x_hat and exact per-row KFE squares for
+│   │                              #   norm_exact_rescaling (E16, plan_floor_clip.md §11)
 │   ├── minmax.py                 # MinMaxNormalization + smart_detect_inf, ported (lot 1: done)
 │   ├── ema.py                    # shared EMA update, ported (lot 1: done)
 │   ├── approximations/
@@ -824,6 +909,9 @@ adafisher/
 │   │   │                         #   conv_sua flag, precondition's per-offset branch (lot 6: done,
 │   │   │                         #   plan_lot6.md §1.3-§1.4) — the first lot since lot 1 to touch
 │   │   │                         #   every approximations/*.py file, see plan_lot6.md §0.5
+│   │   ├── _rescale_utils.py     # rescale() + ClipRule: the division inside the eigenbasis for
+│   │   │                         #   ekfac/tekfac, "add" | "floor" | "clip" with a "quantile" |
+│   │   │                         #   "ema" | "fixed" threshold (E16, plan_floor_clip.md)
 │   │   ├── _eigh_utils.py        # eigenbasis(): the conditioning ridge + CPU fallback shared by
 │   │   │                         #   ekfac/tekfac (step 1 follow-up: cuSOLVER's eigh crashed on an
 │   │   │                         #   exactly rank-deficient factor, killing two cluster runs)
@@ -901,6 +989,11 @@ adafisher/
 │                                  #   decoupled_wd, the single-gamma translation and its two
 │                                  #   refusals, and the MEASURED agreement with diag (min-max on)
 │                                  #   on a Linear-only net and on all four hooked layer types
+│                                  # E18: test_sgdm_arm.py (new) — the `sgdm` arm is bit-identical
+│                                  #   to AdaFisherMulti with gammas=(1,0), i.e. F~ = lam*I (12
+│                                  #   configurations, unhooked ViT parameters included), equals
+│                                  #   torch SGD-momentum at lr(1-beta)/(lam(1-beta^t)) in fp64, and
+│                                  #   pins the 7.56e-5 bound on diag's F~ - lam that E18 predicts from
 ├── benchmarks/                   # step 1 (plan_exp_step1.md): a package — one shared harness in
 │   │                             #   common/, one folder per tested model. The five flat modules
 │   │                             #   of lots 1/7/8 are gone; every line of them landed here.
@@ -922,11 +1015,13 @@ adafisher/
 │   │   │                         #   + the optional per-batch `lr_schedule` hook
 │   │   ├── schedules.py          # NominalCosine (clamped past T_max) / BudgetCosine (anneals over
 │   │   │                         #   the arm's own WCT budget) — the `--lr-schedule` protocol fix
-│   │   ├── optimizers.py         # HParams, ARMS (5 modes + adam/adamw + reference + official),
-│   │   │                         #   build_optimizer(arm, model, hp). `reference` is
+│   │   ├── optimizers.py         # HParams, ARMS (5 modes + adam/adamw + reference + official
+│   │   │                         #   + sgdm), build_optimizer(arm, model, hp). `reference` is
 │   │   │                         #   FisherAdapTune's AdaFisher and `official` the PUBLISHED
 │   │   │                         #   repository's, both loaded by file path and unmodified; the
-│   │   │                         #   second is diag's like-for-like partner, since it min-maxes
+│   │   │                         #   second is diag's like-for-like partner, since it min-maxes.
+│   │   │                         #   `sgdm` (LambdaLimitSGD, E18) is AdaFisherMulti with F~ = lam*I:
+│   │   │                         #   the curvature-free control, on the Fisher arms' lr/lam/beta
 │   │   ├── records.py            # StepRecord/EpochRecord/ArmResult + csv/summary/plot/manifest
 │   │   │                         #   writers, lot 8's column schema unchanged
 │   │   ├── checkpoints.py        # --checkpoints 0,0.01,0.1,0.5,1 -> ckpt_<frac>.pt (D5); fractions are
@@ -1056,11 +1151,15 @@ class FisherApproximation(ABC):
     def precondition(self, module, direction: Tensor) -> Tensor: ... # applies F̃⁻¹
 ```
 
-**`precondition` receives the bias-corrected first moment `m̂ = m/(1−β₁ᵗ)`, not the raw gradient.**
+**`precondition` is applied to the bias-corrected first moment `m̂ = m/(1−β₁ᵗ)`, not the raw gradient.**
 The original update `param.addcdiv_(exp_avg, F_tilde, -lr/bc)`
 (`reference_repos/FisherAdapTune/scripts/adafisher.py:273`) is an element-wise division, hence
 `θ ← θ − α·F̃_D⁻¹m̂` for a diagonal `F̃_D`. The four new modes are not diagonal in the parameter basis,
-so the operator must be applied to `m̂`. The `diag` mode then reduces to `addcdiv_` exactly.
+so the operator must be applied to `m̂`. The `diag` mode then reduces to `addcdiv_` exactly. In code,
+`precondition` receives the raw momentum `m` and the optimizer folds `1/(1−β₁ᵗ)` into the step size,
+as the reference does; for a linear operator that is the same thing. The one exception is
+`rescale_form="clip"` (E16), which is not linear -- it compares the momentum with a threshold -- and
+therefore receives `m̂` itself, with no further division (`consumes_bias_corrected_momentum`).
 Preconditioning `g` before averaging would be a different algorithm (K-FAC + momentum) and would break
 the `m^(t)` column of AdaFisher's Table 1.
 
@@ -1090,9 +1189,23 @@ AdaFisherMulti(model, lr=1e-3, beta=0.9, Lambda=1e-3, gammas=[0.92, 0.008], TCov
                                             #   undamped stored curvature); "network_relative" one
                                             #   tau * (mean over all the network's directions).
                                             #   Fix S1 / E15 of plan_lambda_dominance.md
-               hold_cap=False)              # multiply each preconditioned direction by the lambda
+               hold_cap=False,              # multiply each preconditioned direction by the lambda
                                             #   inside it, so lr is the step-size cap whatever lambda
                                             #   is: hold_cap=True, lr=c  ==  lr=c*Lambda
+               rescale_form="add",          # ekfac/tekfac only: divide by s+lambda ("add"), by
+                                            #   max(s, lambda) ("floor"), or clip the undamped step
+                                            #   ("clip", lambda unused). E16, plan_floor_clip.md
+               clip_threshold="quantile",   # "clip" only, always per module: "quantile" = a fraction
+               clip_fraction=None,          #   clip_fraction of the active coordinates clipped every
+               clip_ema_horizon=None,       #   step; "ema" = the same, times the momentum's size
+               clip_calibrate_at=None,      #   against its bias-corrected average (1000 steps);
+               clip_calibration_window=None,#   "fixed" = the median of the quantile over the window
+               clip_guard=1e-3,             #   before clip_calibrate_at, frozen (a conditional clip)
+               norm_exact_rescaling=False)  # ekfac/tekfac only: estimate a BatchNorm2d/LayerNorm
+                                            #   layer's s*/Theta from its own per-row gradient
+                                            #   [delta*x_hat, delta], not from the §4.6 surrogate.
+                                            #   Inert without a hooked norm layer. E16's third
+                                            #   amendment, plan_floor_clip.md §11
 ```
 
 YAML (style of `reference_repos/FisherAdapTune/crack_segmentation/config_segformer.yaml`):
@@ -1186,8 +1299,10 @@ experiment can turn one thing on at a time.
 | `ema_seed_first` | Starts each running average from its first observation instead of from the identity, so no residue of the identity is ever left in the state. Fix S3. | `plan_lambda_dominance.md` Part 4, `tests/test_ema_seed_first.py` |
 | `eig_before_rescale` | `ekfac`/`tekfac` only. Rebuilds the eigenbasis **inside the backward hook**, before the gradient is projected into it, so the rescaling is measured in the basis `precondition` then uses; `refresh()` does not redo it that step. By default the basis is replaced *afterwards*, in `step()`, so `s*`/`Theta` describe a basis that no longer exists — EKFAC's Lemma 1 makes the optimal diagonal optimal for the `Q` it was measured in and no other, and Algorithm 1 of both papers, plus `EKFAC-pytorch/ekfac.py::step`, order it eigenbasis-then-rescaling. Passing it to the other three modes is a `ValueError`, not a silent no-op. **Measured** (24-16-6 net with a `LayerNorm`): the two orderings store an `s*`/`Theta` differing by **91%–141%** relative, but the *applied step* differs by only **3.0e-3** (60 steps, `TCov=10`) and **3.7e-5** (200 steps, `TCov=20`) at the shipped `Lambda=1e-3`, against **8.3** and **0.28** at `Lambda=1e-8`. So no trained model in this repository is affected — and **fix the ordering before acting on `plan_lambda_dominance.md`'s fix S1**, which lowers `Lambda`. | EKFAC Lemma 1 / Alg. 1, TEKFAC Alg. 1, `audit_full_repo.md` finding 3, `tests/test_eig_before_rescale.py` |
 | `T_inv`, `T_eig`, `T_re` | Amortisation cadences for the inverse, the eigenbasis and the rescaling. | K-FAC §6.3, TEKFAC Alg. 1 |
-| `damping`, `damping_tau` | The four Kronecker modes only. `"layer_relative"` replaces the one shared `Lambda` by `lambda_l = tau * c_l`, where `c_l` is the mean eigenvalue of module `l`'s own undamped stored curvature (`mean(s*)`, `mean(Theta)`, `(tr A/d_in)(tr B/d_out)`, `tr Phi_raw tr Psi_raw / (delta d_in d_out)`), recomputed at the start of every `step()`. `"network_relative"` gives every module one `tau * c_net`, the mean over all the network's directions. With `tekfac` and `tau = 1` this is TEKFAC's eq. (3.5) without its floor. `kfac`/`tkfac` bake the damping into inverses rebuilt every `T_inv` steps. `ValueError` on `diag`, whose min-max removes the scale a relative damping needs. | S1 and E15 of `plan_lambda_dominance.md`, `tests/test_relative_damping.py` |
+| `damping`, `damping_tau` | The four Kronecker modes only. `"layer_relative"` replaces the one shared `Lambda` by `lambda_l = tau * c_l`, where `c_l` is the mean eigenvalue of module `l`'s own undamped stored curvature (`mean(s*)`, `mean(Theta)`, `(tr A/d_in)(tr B/d_out)`, `tr Phi_raw tr Psi_raw / (delta d_in d_out)`), recomputed at the start of every `step()`. `"network_relative"` gives every module one `tau * c_net`, the mean over all the network's directions. With `tekfac` and `tau = 1` this is TEKFAC's eq. (3.5) without its floor. `kfac`/`tkfac` bake the damping into inverses rebuilt every `T_inv` steps. `ValueError` on `diag`, whose min-max removes the scale a relative damping needs. **Measured in E15** (batch 32, 15 epochs, `cnn_gn_cifar` and `vit_micro_cifar`, five seeds, `hold_cap=True`): `layer_relative` beats the best single `lambda` in all six (network, mode) pairs by +1.9 to +6.1 points, and `network_relative` in all six too, so the gain is per-layer; +8.2 to +14.8 over the default `lambda`; `tau = 0.1` is in the plateau of `ekfac`/`tekfac` on both networks, `kfac` wants 0.3-3. | S1 and E15 of `plan_lambda_dominance.md`, `tests/test_relative_damping.py` |
 | `hold_cap` | Multiplies each preconditioned direction by the damping inside it, so that `lr` is the step-size cap, the largest multiple of the momentum any direction can move by. `hold_cap=True, lr=c` is the update `lr=c*Lambda` gives under a global damping, which is how E7-E14 held the cap; under a relative damping it holds it in every layer at once. The plain-momentum fallback is scaled by the shared `Lambda`. Decoupled decay stays `1 - lr*wd`, so it no longer vanishes as `lambda` falls (rule 3 of `plan_lambda_dominance.md` Part 5). | E15, `tests/test_relative_damping.py` |
+| `rescale_form`, `clip_threshold`, `clip_fraction`, `clip_guard`, `clip_ema_horizon`, `clip_calibrate_at`, `clip_calibration_window` | `ekfac`/`tekfac` only. How the projected direction is divided by `s*`/`Theta` inside the eigenbasis: `"add"` = `s + lambda` (default, bit-identical to before, checked against three earlier commits), `"floor"` = `max(s, lambda)` (family A), `"clip"` (family B, Sophia-type; `lambda` unused): an active coordinate (`\|M\| > guard = clip_guard * rms(M)`) moves by `sign(M) min(r / gamma, 1)`, `r = \|M\| / s`, an inactive one by `M / max(gamma s, guard)`. The threshold is always **per module**, because the stored curvature's scale error differs between layers by up to four orders of magnitude (`1/T` of shared layers, the norm-layer surrogate): `"quantile"` = the `max(floor(q n_a), 1)`-th largest `r` among the `n_a` active coordinates at every step, a per-module normalisation; `"ema"` = that times `mu_bar / mu`, `mu = rms(M)`, with `log mu_bar` Adam's bias-corrected running average of `log mu` over `clip_ema_horizon` steps; `"fixed"` = the lower median of the module's quantile over the `clip_calibration_window` steps before `clip_calibrate_at`, frozen then (continuous at the switch; a true conditional clip after). Clipped is defined by `r >= gamma` on the very tensor `gamma` is selected from, so the count is exact; the selection is a sort and a gather, with no host synchronisation; the statistics are computed only when read. Under `"clip"` the mode receives the bias-corrected momentum and the step is not divided again. `ValueError` on the other three modes, for an argument belonging to another threshold, and with `hold_cap` or a relative damping under `"clip"`. The P2 reader refuses both non-default forms. | E16, `plan_floor_clip.md`, `tests/test_rescale_form.py` |
+| `norm_exact_rescaling` | `ekfac`/`tekfac` only. On a `BatchNorm2d`/`LayerNorm`, estimates `s*`/`Theta` from the layer's **own** per-row gradient `[delta*x_hat, delta]`, projected into the same eigenbasis, instead of the gradient of the §4.6 surrogate `[z*delta, delta]`. `x_hat` is recomputed in the forward hook with the statistics the layer used: per token for `LayerNorm`; for `BatchNorm2d`, the batch's in training and the running ones in evaluation. EKFAC's Lemma 1 makes this the optimal diagonal in whatever basis it is measured in. The factors and the eigenbasis are unchanged, so the §4.6 input factor still sets the basis. **Measured** at step 300: the scale-carrying eigen-column is **295-989x** the surrogate's on `vit_micro_cifar`, **80-106x** on `cct_2_3x2_cifar`; the shift column **0.96-1.03x**. At E14's `lambda` (step 2 000) it raises the first LayerNorm's divisor `s + lambda` from 1.00x to a median **2.45x** / **2.21x** `lambda`. Bit-identical to off on a network without a hooked norm layer. `ValueError` on the other three modes, and with `fisher_batch_samples` on a network with a `BatchNorm2d`, whose batch statistics cannot be recomputed from part of the batch. | E16 third amendment, `plan_floor_clip.md` §11, `tests/test_norm_exact_rescaling.py` |
 
 ### 4. Where the code and the paper disagree, and both reference repos take the code's side
 
@@ -1201,7 +1316,7 @@ reproduced here on purpose. They matter for a paper because a reader will assume
 | 4.3 | The Fisher is an expectation over per-example gradients | The backward hook takes the gradient of the **batch-mean** loss | Each example's share of the curvature is divided by `batch^2`, i.e. **16 384** at batch 128. Confirmed directly: 56 measurements of the `1/batch^2` rule, all between 0.021 and 0.144 where it predicts 0.0625 (`plan_lambda_dominance.md` Part 6, E3). `EKFAC-pytorch` compensates for this; AdaFisher does not. |
 | 4.4 | Prop. 3.1 for a normalisation layer: `S = sum_x s_x s_x^T` ("square-then-sum"), potentially full rank | `diag`'s `_h_batchnorm2d` / `_s_batchnorm2d` / `_h_layernorm` / `_s_layernorm` do "sum-then-square" | A different object, not a reduction-order difference. Left untouched in `diag`; the four new modes use Prop. 3.1 itself. `plan_lot5.md` §0.6 |
 | 4.5 | — | `_h_conv2d` divides by `batch * S * P` **with a bias** and by `batch` alone **without one**, instead of `batch * S` in both cases | Two per-layer constant factors, harmless only because `diag`'s min-max erases per-layer scale. The new `Conv2d` code deliberately reproduces neither, so `compute_h_full`'s `Conv2d` diagonal is `P` times `compute_h_diag`'s with a bias and exactly `1/S` times it without one (measured: `1/25`, `1/16`, `1/9` on three shapes). Both are asserted as locked regressions. **Every convolution in every ResNet and CCT in this repository is `bias=False`**, so the `1/S` branch is the one that actually runs on the CNN benchmarks; until the full-repository audit only the `P` branch had a test. `plan_lot4.md` §0.2, `tests/test_full_factors_match_diag.py` |
-| 4.6 | Prop. A.1's proof writes `H\|_nu = E[h h^T]` for the **normalised** activation `x_hat` — `y = gamma*x_hat + beta`, so `d/d gamma` pairs the output gradient with `x_hat`, not with the layer's input | The forward hook sees the input **before** normalisation, and that is what `augment_norm_input` pools — in `diag` and in all four Kronecker modes | **Not a reduction-order difference: a different activation.** Measured on `BatchNorm2d(8)` with a post-ReLU input and running statistics far from the batch statistics: `a_nu = A[0,0]` is **4.3991** from the raw input against **0.1296** from the train-mode `x_hat` (a factor of **33.9**), and the scale-shift coupling `A[0,1]` is **2.0377** against **4.3e-08**. The factor is **bit-identical in train and eval mode**, which is only possible because it never looks at the normalisation. For `diag` this is inherited from both reference repositories; for the four new modes it is this repository's own choice, and it was missing from this table until the full-repository audit. **Do not "fix" it by swapping in `x_hat`:** for `LayerNorm`, `x_hat` sums to zero across channels by construction, so `a_nu` would be exactly 0 — measured at **6.3e-15** on `LayerNorm(16)` — and the whole scale block would collapse to the damping term. Pinned, with these numbers, by `test_norm_input_factor_ignores_the_normalisation_itself` and `test_norm_input_factor_coupling_entry_is_far_from_the_normalised_value`. `audit_full_repo.md` finding 4 |
+| 4.6 | Prop. A.1's proof writes `H\|_nu = E[h h^T]` for the **normalised** activation `x_hat` — `y = gamma*x_hat + beta`, so `d/d gamma` pairs the output gradient with `x_hat`, not with the layer's input | The forward hook sees the input **before** normalisation, and that is what `augment_norm_input` pools — in `diag` and in all four Kronecker modes | **Not a reduction-order difference: a different activation.** Measured on `BatchNorm2d(8)` with a post-ReLU input and running statistics far from the batch statistics: `a_nu = A[0,0]` is **4.3991** from the raw input against **0.1296** from the train-mode `x_hat` (a factor of **33.9**), and the scale-shift coupling `A[0,1]` is **2.0377** against **4.3e-08**. The factor is **bit-identical in train and eval mode**, which is only possible because it never looks at the normalisation. For `diag` this is inherited from both reference repositories; for the four new modes it is this repository's own choice, and it was missing from this table until the full-repository audit. **Do not "fix" it by swapping in `x_hat`:** for `LayerNorm`, `x_hat` sums to zero across channels by construction, so `a_nu` would be exactly 0 — measured at **6.3e-15** on `LayerNorm(16)` — and the whole scale block would collapse to the damping term. Pinned, with these numbers, by `test_norm_input_factor_ignores_the_normalisation_itself` and `test_norm_input_factor_coupling_entry_is_far_from_the_normalised_value`. For `ekfac`/`tekfac`, what this factor also did to the **rescaling** `s*`/`Theta` is fixed by the opt-in `norm_exact_rescaling` (§3), which uses the true per-row gradient `[delta*x_hat, delta]` and leaves this factor, and so the eigenbasis, as they are. `audit_full_repo.md` finding 4 |
 
 The joint effect of 4.1 and 4.3 is a factor of about **2 x 10^8** between the stored curvature and
 the quantity it estimates. That is the single most important number for anyone comparing this code
@@ -1221,7 +1336,7 @@ place where a reader of the source paper would expect something else.
 | SUA treats the input factor as exactly block-diagonal across kernel offsets | The exact IAD+SH+SUA block, which has a rank-1 cross-offset coupling term | Matches `EKFAC-pytorch`'s own (also uncorrected) convention. A documented gap, not a bug. `plan_lot6.md` §0.1 |
 | The bias direction under SUA is read back from the **centre** offset only | Any of the other `k_h*k_w - 1` offsets, which are expected to disagree | Inherited from `EKFAC-pytorch`; no theorem behind it. `plan_lot6.md` §0.4 |
 | TEKFAC's trace-adaptive `lambda` (Eq. 3.5) and TKFAC's adaptive floor (Eq. 5.16) are **not implemented** | The papers' own conv-layer damping | A dimension-agnostic additive `lambda` is used instead. This is exactly what fix S1 of `plan_lambda_dominance.md` proposes to undo |
-| `precondition()` receives the bias-corrected first moment `m_hat`, not the raw gradient | Preconditioning `g` before averaging | Preconditioning first would be K-FAC + momentum, a different algorithm, and would break AdaFisher's own Table 1 |
+| `precondition()` is applied to the bias-corrected first moment `m_hat` (in code: the raw `m`, with `1/(1-beta^t)` folded into the step, except under `rescale_form="clip"`), not the raw gradient | Preconditioning `g` before averaging | Preconditioning first would be K-FAC + momentum, a different algorithm, and would break AdaFisher's own Table 1 |
 
 ### 6. Differences on the benchmark side
 
@@ -1300,9 +1415,10 @@ Run these from the repository root on the laptop (the local checkout lives at
 ## Running the tests
 
 ```bash
-.venv/bin/pytest tests/ -v                                    # everything: 916 collected, 875 passed and
+.venv/bin/pytest tests/ -v                                    # everything: 1055 collected, 1014 passed and
                                                                #   41 skipped by default (40 gated on --runslow,
-                                                               #   1 needing curvlinops). Measured 2026-09-21.
+                                                               #   1 needing curvlinops). Measured 2026-09-21,
+                                                               #   after E16's third amendment.
                                                                #   With --runslow, last measured 2026-09-20
                                                                #   before test_relative_damping.py: 862
                                                                #   passed, 1 skipped.
@@ -1340,6 +1456,25 @@ Run these from the repository root on the laptop (the local checkout lives at
                                                                  #   reproduces the single-lambda run at lambda_l;
                                                                  #   mean_curvature == dense mean eigenvalue;
                                                                  #   decoupled decay independent of lambda
+.venv/bin/pytest tests/test_rescale_form.py -v                  # rescale_form (E16): "add" bit-identical by
+                                                                 #   default; "floor" = max(s, lambda) and its
+                                                                 #   f_tilde; the three per-module clip
+                                                                 #   thresholds (exact count over the active
+                                                                 #   coordinates, scale invariance, ema's bias
+                                                                 #   correction, fixed's window median and its
+                                                                 #   continuity); every CCT layer type
+.venv/bin/pytest tests/test_e16_decisions.py -v                  # E16's decision script: an invalid or
+                                                                 #   incomplete set of jobs is never read as a
+                                                                 #   verdict; rule 5 qualifies rule 3
+.venv/bin/pytest tests/test_norm_exact_rescaling.py -v           # norm_exact_rescaling (E16): x_hat is the
+                                                                 #   layer's own normalised output, per-row
+                                                                 #   gradients sum to the real grads, stored
+                                                                 #   s*/Theta == autograd brute force (fp64);
+                                                                 #   inert without norm layers; refusals
+.venv/bin/pytest tests/test_sgdm_arm.py -v                        # the sgdm arm (E18): bit-identical to
+                                                                 #   AdaFisherMulti with F~ = lam*I, torch
+                                                                 #   SGD-momentum at the derived lr, the
+                                                                 #   fallback for unhooked params, diag's bound
 .venv/bin/pytest tests/test_eig_before_rescale.py -v              # the eig_before_rescale knob: default
                                                                  #   inertness, the basis s*/Theta is measured
                                                                  #   in vs the one precondition uses, and how
@@ -1494,6 +1629,13 @@ What each existing test guarantees:
 | `test_full_factors_match_diag::test_norm_input_factor_ignores_the_normalisation_itself`, `::test_norm_input_factor_coupling_entry_is_far_from_the_normalised_value` | §4.6 pinned with its numbers: the input factor is bit-identical in train and eval mode through real hooks while the output factor is not, and the `x_hat` alternative is degenerate (`6.3e-15`) | §4.6 |
 
 **Known testing pitfalls.**
+- **Two wall-clock tests fail now and then on a busy laptop, and that is not a regression.**
+  `test_equal_wallclock_bench.py::test_budget_is_respected_and_run_completes` asserts that the timed
+  phases cover at least 99 % of the elapsed clock, and `test_lr_schedule.py::
+  test_loop_drives_budget_cosine_to_the_floor_by_the_budget` asserts a learning rate below 1e-6 at
+  a measured time. Both depend on the machine's load. Measured on 2026-09-21: 1 to 3 failures in 31
+  tests per run of those two files, **at the same rate on a clean export of `HEAD`** (`git archive`),
+  and a full run with nothing else competing is green. Re-run them alone before suspecting a change.
 - `addcdiv_` (the reference's fused update) and the unfused `div` + `add_(alpha=...)` this port uses
   (needed so `precondition` generalises beyond diagonal modes, `plan_lot1.md` §0.3) are **not**
   bit-identical in practice — empirically a few ULPs per step on a `Linear` layer, amplified to

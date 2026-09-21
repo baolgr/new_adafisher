@@ -63,10 +63,16 @@ has lost its evidence.** Across four networks whose mean curvature spans 15 to 2
 `λ` for `ekfac`/`tekfac` moves by only 3 to 10 times, and a fixed number predicts it as well as the
 proportional rule, or better (E14). What survives is narrower. First, a relative `λ` is still the
 only form that is automatically right when the batch size or the running average changes. Second,
-the *per-layer* version of S1, one `λ` per layer inside a network, has never been run: every
-experiment so far used one `λ` for the whole network. The leading candidate is now simpler: **S4
-plus one fixed `λ`**, with the stored curvature put back at its true size so that the number stops
-depending on the batch. Part 4 has the details, Part 5 the order.
+the *per-layer* version of S1, one `λ` per layer inside a network, had never been run: every
+experiment until then used one `λ` for the whole network.
+
+**E15 ran it, and it wins.** With `λ_l = τ × (mean curvature of layer l)` and the step-size cap held
+in every layer, S1 per layer beats the best single `λ` in all six (network, mode) pairs tested, by
++1.9 to +6.1 points. It also beats a relative `λ` shared by the whole network, so the gain comes from
+treating layers differently. Against the default `λ` it gains **+8.2 to +14.8 points**. For
+`ekfac`/`tekfac` one value, `τ = 0.1`, is in the plateau on both networks. It mostly does two
+things: it stops shrinking the classification head's steps, and it lets the curvature act in the
+flattest layers. Two small networks at batch 32 so far. Part 6, E15, has the numbers.
 
 ---
 
@@ -131,15 +137,15 @@ damped, gains the most **and** breaks first; `kfac`, the most damped, is the mos
 *Updated after E14. The question this section first asked, whether the averaging is to blame, was
 answered by E4: it is not.*
 
-1. **Does one `λ` per layer beat the best single `λ`?** Never measured. The curvature differs a lot
-   between the layers of one network, mostly because of the classification head (Part 4, S1).
+1. **Does one `λ` per layer beat the best single `λ`?** Yes, on the two networks E15 measured, in
+   all six (network, mode) pairs, and the gain is per-layer (E15). Open: whether `τ = 0.1` transfers
+   to a third network for `ekfac`/`tekfac`, and whether it holds on `resnet20_cifar` and at another
+   batch size.
 2. **Does a fixed `λ` survive a change of batch size once S4 is applied?** Every run from E8 to E14
    is at batch 32, so "fixed" has only been shown at one batch size.
-3. **How much of the E10 and E13 gains is weight decay switching off?** On the two transformers the
-   weight decay is applied as `weight × (1 − lr × wd)`. Holding the step size still makes `lr` fall
-   with `λ`, so the decay vanishes in every lowered arm and not in the reference (Part 5, rule 3).
-   Worked out on paper for `vit_micro_cifar`: the reference arm's decay shrinks the weights by about
-   10% over its 21 090 steps. Its effect on accuracy has not been measured.
+3. **How much of the E10 and E13 gains is weight decay switching off?** Answered by E15's control:
+   almost none. With the decay held at its fixed rate, E13's cells move by −0.08 to −0.23 points,
+   none more than 1.6 standard errors from zero.
 
 ### Two measuring traps we walked into
 
@@ -491,6 +497,14 @@ version stays on the list as a direct experiment. It has a trap: with one learni
 network, a per-layer `λ_l` also changes each layer's step-size cap `lr/λ_l`, and that breaks
 Part 5's rule 1 unless the cap is held per layer.
 
+**Status after E15: claim 2 supported, and S1 per layer is the leading fix again.** Tested directly,
+with the cap held per layer (`damping="layer_relative"`, `hold_cap=True`), it beats the best single
+`λ` in all six pairs, and a network-wide relative `λ` in all six too (E15). For `ekfac`/`tekfac`,
+`τ = 0.1` is in the plateau on both networks, so claim 1 comes back in a narrower form: one `τ` per
+damping rule, *per layer*. That is two networks; a held-out one (E17) is needed before calling it a constant.
+S4 plus a fixed `λ` stays worth testing as the simpler alternative, but on these two networks it is
+bounded by the single-`λ` arm, which S1 per layer beats.
+
 ### S2 — Stop the step size from depending on `λ` at all
 
 Rescale the divided direction back to the length of the momentum it came from: multiply by
@@ -569,8 +583,11 @@ momentum SGD) and no floor at all (`p = 0`).
 | 6 | **E5, E6** | **done** (jobs 21374756, 21379909-12) | E4's gain is not the frozen GroupNorm, and the gain is real on two more architectures |
 | 7 | **E7 to E14** | **done** | the operating point is real (+6.6 to +10.0 points on three networks of four) and sits between 1e-11 and 1e-10 for `ekfac`/`tekfac`. The eigenbasis ordering defect must be fixed there (E8, E10). The seed floor is 0.15 to 2.4 points depending on the network, not 0.04 to 0.18. `τ` does not transfer between networks better than a fixed number (E14) |
 | 8 | **S1**, across networks (one `τ` for every network) | **demoted** after E14 | a fixed `λ` does as well. See S1's status paragraph |
-| 9 | **S4 + one fixed `λ`**, tested by a change of batch | **next** | the simplest fix consistent with E14. A batch-32 vs batch-128 sweep refutes it or not |
-| 10 | **S1 per layer**, as a direct arm against the best single `λ` | **E15, pre-registered**, needs code | never tested. The spread between layers is mostly the head (S1's status paragraph). Must hold the cap per layer and the weight-decay rate still (rules 1 and 3) |
+| 9 | **S4 + one fixed `λ`**, tested by a change of batch | open, **demoted** by E15 | the simplest fix consistent with E14, but bounded by the best single `λ`, which S1 per layer beats in all six E15 pairs |
+| 10 | **S1 per layer**, as a direct arm against the best single `λ` | **done: E15, adopted** (jobs 21523753-62) | wins 6/6 against the single `λ` and 6/6 against a network-wide relative `λ`; `τ = 0.1` fits `ekfac`/`tekfac` on both networks. Next: the held-out network is E17's (ViT-S), subject to how E17 reads E15 rule 4 (see E15's results); then a batch change and the head-only decomposition. Before E15 it had never been tested. The spread between layers is mostly the head (S1's status paragraph). Must hold the cap per layer and the weight-decay rate still (rules 1 and 3) |
+| 11 | **A floor or a clip instead of the added `λ`** (families A and B of `fr/etude_clipping_vs_damping.md`) | **E16, pre-registered**, code done and audited | the feasibility study found both degenerate at the shipped `λ`; E7-E14 found an operating point where `λ` no longer dominates, which is where they can differ. The clip is scale-free, so it is the one candidate that could transfer between networks where no single `λ` does |
+| 12 | **E15's and E16's verdicts, tested on a network nobody tuned them on** | **E17, pre-registered and amended**, waits for E16. From E15, candidate C does not qualify (rule 4 read literally); S1-b at `τ = 0.1` may run there only as an exploratory arm | their own transfer rules only ask whether one setting works on the networks it was chosen on. ViT-S is the network where the shipped Fisher arms lose to AdamW, and the λ work has never run it |
+| 13 | **Is ViT-S's deficit against AdamW the deficit of momentum SGD?** | **E18, pre-registered, running** (jobs 21532555-60); reproduction gate passed | at the shipped `λ` every Fisher arm should reduce to momentum SGD at `lr(1−β)/λ`. An arm that *is* that limit settles it, and needs nothing from E15 or E16 |
 
 **On the reordering.** S2 was planned as a prerequisite for E2. It turned out not to be needed:
 moving `λ` and the learning rate together holds the cap exactly still, which is what S2 was for, and
@@ -1851,3 +1868,614 @@ while every single-`λ` arm stayed at 11%. So a win of S1-b under rule 2 could c
 relative at all, and not from being per-layer. **Rule 5 is the one that separates the two:** both of
 the arms it compares are relative. A rule-2 win is read as "per-layer" only if rule 5 also favours
 S1-b.
+
+### E16 — pre-registered: a floor or a clip instead of the added constant?
+
+**Amended on 2026-09-21, before any submission.** Family B now has three arms instead of one. The
+first version had a single clip whose threshold was reset at every step (now the arm `clip`,
+threshold `"quantile"`). Reviewing it found that the momentum's size then never reaches the step: it
+is a per-layer normalisation with a clipped shape, and a verdict on it could not have said which of
+the two mattered. Added: `clipema` (the main arm, whose step follows the momentum's size against its
+own last ~1 000 steps) and `clipfixed` (Sophia's rule: one threshold for the whole network,
+calibrated at step 2 000 and frozen). Also added: rule 6, and the `lr` control moved to the main
+arm. Two changes came out of implementing them, both measured: the clipped fraction counts only the
+coordinates whose momentum is above the guard, because rounding-level coordinates had placed the
+threshold inside the noise; and the clip receives the bias-corrected momentum. Details in
+`plan_floor_clip.md` §2 and §9.
+
+**Second amendment, 2026-09-21, still before any submission: an audit.** Six agents audited the code,
+the protocol and the analysis script on the real networks (`plan_floor_clip.md` §10). What changed
+here, each for a measured reason:
+- **Every clip threshold is per layer.** The stored curvature's scale error differs between layers by
+  up to four orders of magnitude (the `1/T` of shared layers, the LayerNorm surrogate). A threshold
+  shared by the whole network clipped a ViT's head on 3 % of its coordinates and its final LayerNorm
+  on 97 %. So `clipfixed` now freezes, per layer, the median of its quantile over steps 1000-1999.
+- **clipema's running average is bias-corrected.** Seeded with its first step, it stayed biased for
+  12-18 % of a run, as large as the quantity rule 6 reads.
+- **A repro gate at every seed.** Each job first reruns E14/E13/E10's best add cell of its own seed
+  and stops unless it reproduces the stored cell bit for bit.
+- **The decision script cannot turn missing data into a verdict** (the gate before rule 1, below).
+  Rule 4's plateau is pinned to the reading E14 used, with E13's two-sample reading reported. Rule
+  5's qualification is printed into rule 3.
+
+**Third amendment, 2026-09-21, still before any submission: the normalisation statistic, corrected,
+and E16's own baseline** (`plan_floor_clip.md` §11).
+- **Every arm runs with `norm_exact_rescaling=True`.** The second amendment had recorded a limit:
+  `ekfac`/`tekfac` estimate a normalisation layer's rescaling from the gradient of a surrogate built
+  on the raw channel mean (`CLAUDE.md` §4.6), not from the layer's own gradient `[δ ⊙ x̂, δ]`. The
+  option uses the layer's own gradient, projected into the same eigenbasis. EKFAC's Lemma 1 makes
+  that the optimal diagonal in that basis. Measured at step 300, the scale-carrying column is
+  295–989× larger than the surrogate's on `vit_micro_cifar` and 80–106× on `cct_2_3x2_cifar`. The
+  shift column is unchanged (0.96–1.03×).
+- **E16 therefore reruns add instead of reading E14's cells.** The correction reaches add's own
+  step at E14's `λ`. Measured with `ekfac` at step 2 000 of the E-series protocol (CPU, seed 0):
+  - under the shipped statistic, the divisor `s + λ` of every normalisation-layer coordinate is
+    1.00 times `λ` (median), i.e. `λ` alone;
+  - under the corrected one, on `vit_micro_cifar` at `λ = 1e-10`, the scale column's divisor is a
+    median 2.45 times `λ` (90th percentile 4.5) on the first LayerNorm and at most 1.07 (1.16) on
+    the other four;
+  - on `cct_2_3x2_cifar` at `λ = 3e-11`, 2.21 (2.87) on the first LayerNorm, 1.94 (2.56) on the
+    final one and 1.11-1.17 on the other three.
+
+  The jobs also run on a different GPU slice, three runs at a time, which may change the
+  floating-point order. So add runs in the same jobs as the families, on the same five-value grids,
+  and `addfill` is gone.
+- **The repro gate becomes a diagnostic, and two gates replace it, at seed 0.** *Determinism:* one
+  add cell runs twice, in two processes of the same job, and the two must agree on every recorded
+  field. *Inertness:* on `cnn_gn_cifar`, which has no hooked normalisation layer, the add cell must
+  be bit-identical with and without the option. The comparison with E14's stored cell is reported
+  and does not vote.
+- **The jobs.** One per (network, seed, mode): 30 in all, each running three processes on one
+  `h100_3g.40gb` slice. Projected under an hour each, against 2 to 5 hours before.
+
+The rest of this section is the thrice-amended pre-registration.
+
+Written **before** any cluster run. The code, its tests and the driver exist (they are what makes
+the rules below checkable); nothing has been submitted. The full specification, the code changes
+and the cost are in [`plan_floor_clip.md`](plan_floor_clip.md). Anything that changes after the runs
+are submitted is a deviation, and will be recorded as one.
+
+**The question.** `ekfac` and `tekfac` divide each coordinate of the step, in their eigenbasis, by
+`s + λ`. Two other ways to protect that division were set aside by the feasibility study
+`fr/etude_clipping_vs_damping.md`, because at the shipped `λ = 1e-3` both degenerate: the floor is
+then identical to `s + λ`, and the clip clips 95 to 100 % of the coordinates. E7 to E14 found an
+operating point, `λ` between 1e-11 and 1e-10, where `λ` sits inside the list of curvature values.
+There, both can differ from E14's fix:
+
+```
+E14's fix (add):   u = M / (s + λ),                lr = cap · λ
+family A (floor):  u = M / max(s, λ),              lr = cap · λ
+family B (clip):   active: u = sign(M)·min(r/γ, 1), r = |M|/s;  inactive (|M| ≤ guard): M/max(γ·s, guard)
+                   lr = the benchmark's own; γ always per layer:
+   clip       γ reset at every step so a fraction q of the active coordinates is clipped
+   clipema    the same γ, times μ̄/μ: μ = rms(M), μ̄ its bias-corrected running average (~1 000 steps)
+   clipfixed  the median of the layer's γ over steps 1000-1999, frozen at step 2 000
+```
+
+Family B does not use `λ` at all. None of its three arms is sensitive to the scale error of the
+stored curvature, which differs from layer to layer: `clip` and `clipema` absorb it at every step,
+and `clipfixed` absorbs it once, per layer, when it calibrates. That is the property that could make one `q` work on every network, which E14
+found no single `λ` does. The three differ in what they do with the momentum's size. `clip` throws
+it away at every step. `clipema` keeps it relative to its recent history. `clipfixed` keeps it
+entirely: its clip is conditional, and below the threshold the step is proportional to the
+momentum.
+
+**The arms.** `cnn_gn_cifar`, `vit_micro_cifar`, `cct_2_3x2_cifar`; `ekfac` and `tekfac`; seeds
+0-4; batch 32, 15 epochs, the cosine schedule, the shipped estimator, `eig_before_rescale=True`:
+E10/E13/E14's protocol, with one change. Every arm but the repro diagnostic runs with
+`norm_exact_rescaling=True` (third amendment).
+
+| arm | grid | runs per (network, mode, seed) |
+|---|---|---|
+| determinism check (seed 0) | the add cell at E14/E13/E10's best `λ`, run a second time in another process | 1 |
+| repro diagnostic (seed 0) | the same cell without `norm_exact_rescaling`, compared with the stored cell | 1 |
+| add (E14's fix) | 5 values of `λ` around each network's optimum | 5, rerun here |
+| floor | the same 5 values | 5 |
+| clip | `q` in {0.99, 0.95, 0.9, 0.7, 0.5, 0.3, 0.1} | 7 |
+| clipema (main arm) | the same `q` | 7 |
+| clipfixed | the same `q`, at the calibration step | 7 |
+| clip-lr control | clipema at `q = 0.7`, at `lr/10`, `lr/3`, `3·lr` | 3 |
+
+The `λ` grids: `cnn_gn_cifar` and `cct_2_3x2_cifar` {3e-10, 1e-10, 3e-11, 1e-11, 3e-12},
+`vit_micro_cifar` {1e-9, 3e-10, 1e-10, 3e-11, 1e-11}. Every add cell is run here, so the add grid
+is complete on all three networks.
+
+**Fixed across the clip arms, so they are comparable with the add cells.** The parameters no hooked
+module owns are frozen: in the add cells they move by `cap·λ ≈ 1e-10` times their momentum, i.e.
+they are frozen in effect. On the two transformers the clip arms run with no weight decay: their
+decay is decoupled, and in the add cells it vanishes with `lr = cap·λ` (this Part's rule 3). Both
+choices are argued in `plan_floor_clip.md` §4.
+
+**The decision rules, fixed now.**
+0. **Nothing incomplete is read as a verdict.** Every file must be a production run: not a smoke;
+   15 epochs, batch 32, full grids and split, calibration at 2000.
+   - Every shard is merged, and every planned cell is present and not crashed.
+   - Every cell but the repro diagnostic ran with `norm_exact_rescaling`, and every clipfixed cell
+     froze its threshold in every layer.
+   - At seed 0, the determinism check passed in every file, and the inertness check on
+     `cnn_gn_cifar`.
+   - All thirty files come from one commit of a clean tree.
+
+   A value is usable only with finite final validation and test accuracy at all five seeds. A family
+   whose grid or comparison has an unusable value is **incomplete**, never "equivalent".
+1. **Select on validation, judge on test.** Within each family, the chosen `λ` or `q` is the one with
+   the best five-seed mean of the final-epoch validation accuracy. The add baseline is selected from
+   the same five values of `λ` as the floor. The comparison is made on test accuracy at the chosen
+   values.
+2. **Per (network, mode):** `Δ` = test accuracy of the family minus that of add, paired by seed,
+   for each of floor, clip, clipema and clipfixed.
+   **Win** if the mean of `Δ` exceeds 2 standard errors, **lose** if below −2 standard errors,
+   **tie** otherwise. A zero standard error with a nonzero mean is flagged as degenerate, not voted.
+3. **Per family.** **Better than the E14 fix** if it loses nowhere and wins for both modes on at
+   least two of the three networks. **Worse** if it loses on at least two networks. **Equivalent** if
+   it loses nowhere and is not better. **Mixed** otherwise.
+4. **Transfer.** A value is transferable if it lies inside the plateau of all six (network, mode)
+   pairs, with E13's plateau (every value whose five-seed mean test accuracy is within one standard
+   error of the best). That standard error is the best value's own, as E14 read the rule; E13's own
+   numbers were computed with the two-sample criterion `m_best − m_v ≤ √(SE_best² + SE_v²)`, which is
+   reported alongside and not voted on. Applied to `q` for each clip, to `λ` for add, and for E17 to
+   `λ` for the floor, over the same grids. The clip
+   is worth adopting even at "equivalent" if some `q` transfers and no `λ` does, because it then
+   removes a per-network search.
+5. **`lr` control.** If a clip-lr cell beats the clipema cell at `q = 0.7` under rule 2, clipema's
+   rule-3 verdict is reported as "limited by `lr`", not as a verdict on clipping. Three cells at 2 SE
+   on five seeds give a false "limited" up to 16 % of the time per (network, mode).
+6. **Inside family B**, with rule 2's criterion, each arm at its own chosen `q`. **clipema − clip**
+   measures the per-step normalisation: a tie means it neither helps nor hurts; a clip win means a
+   clip win against add is not a win for clipping as such. **clipfixed − clipema** measures a frozen
+   threshold against one that follows the momentum.
+
+**Checks on the pipeline, at seed 0.** They use the add cell at E14/E13/E10's best `λ`
+(`cnn_gn_cifar`: `ekfac` 3e-11, `tekfac` 1e-10; `vit_micro_cifar`: 1e-10; `cct_2_3x2_cifar`: 3e-11).
+Each compares test accuracy and loss, the validation curve, the distance travelled and the step
+count.
+- *Determinism.* That cell runs a second time, in another process of the same job. The two must be
+  equal. If they are not, runs on this hardware are not reproducible under concurrency, and E16 is
+  not read (rule 0).
+- *Inertness*, on `cnn_gn_cifar` only. The same cell without `norm_exact_rescaling` must equal the
+  add cell, since that network has no hooked normalisation layer. If it does not, the option
+  changes something it should not (rule 0).
+- *Repro, a diagnostic that does not vote.* The cell without the option is compared with the stored
+  E14/E13/E10 cell of seed 0. It says whether this code on this hardware reproduces E14. A mismatch
+  is reported, not fatal, because every comparison E16 makes is between cells of one job.
+
+**Predictions, written now so they can fail.** The floor ties everywhere, within 0.5 points, at the
+same `λ` as add or one grid step away. For the clip there are two competing readings, and nothing
+measured so far favours either: it wins or transfers, because what `λ` really set was a step-size
+cap; or it loses, because near `q = 1` it is sign descent and near `q = 0` it is the undamped step,
+whose noise every curve below 1e-11 already shows. If Sophia's published range carries over, the
+chosen `q` lies in 0.5 to 0.9. clipema and clip are close, within one seed floor: momentum at `β = 0.9` already
+smooths over ~10 steps, and the gradient's size changes only moderately within 1 000 steps. clipfixed's
+clipped fraction drifts after calibration, in a direction not predicted. The corrected statistic
+does not move add's optimum: on every (network, mode), rule 1 selects E14/E13/E10's `λ` for add, or
+a value one grid step away. It changes the step only on the normalisation layers, by at most 2.45×
+in median at step 2 000, on 320 of 21 098 parameters on `vit_micro_cifar` and 1 280 of 283 723 on
+`cct_2_3x2_cifar`.
+
+**What this cannot separate, recorded before the result.** Every run is at batch 32, so the
+batch-size question (open question 2 above) stays open for the floor and for add. Every clip verdict
+is a verdict at `clip_guard = 1e-3`, on this hardware (TF32 convolutions on the H100 are noisier
+than the guard on `cnn_gn_cifar`). The normalisation layers' rescaling is now exact (third
+amendment), but their 2×2 input factor, from which their eigenbasis comes, is still built from the
+raw channel mean (`CLAUDE.md` §4.6). The rescaling is optimal in that basis; the basis may not be
+the best one (`plan_floor_clip.md` §7).
+
+**Cost.** 34 runs per (network, seed, mode), 36 at seed 0. Projected from the add cells' measured
+times on 1g slices and the clip's measured per-operation cost: about 65, 145 and 170 minutes of runs
+per job on `cnn_gn_cifar`, `vit_micro_cifar` and `cct_2_3x2_cifar`. On one `h100_3g.40gb` slice
+running three at a time, that is about 22, 48 and 57 minutes per job, if each run keeps its 1g
+speed. That speed is not measured, so the limits are about twice that and one job is submitted
+first. Thirty jobs, about 62 hours of run time summed over cells. Job script
+`fisher_ref/slurm/e16_floor_clip.sh`, decisions `fisher_ref/experiments/e16_decisions.py`.
+
+### E17 — pre-registered: ViT-S is the held-out network for E15's and E16's verdicts
+
+**Amended on 21 September 2026, before any E17 run and before any E16 result existed.** Two changes,
+and one fact about timing. The rest of this section is the text as first written.
+
+1. **Candidate C does not qualify.** Its entry condition is "E15 rule 4 says tuning-free". Rule 4,
+   as written, covers all six of E15's (network, mode) pairs, and there it fails. `kfac`'s plateaus
+   are {1, 0.3} on `cnn_gn_cifar` and {3} on `vit_micro_cifar`. Neither contains the `τ = 0.1` that
+   lies in all four `ekfac`/`tekfac` plateaus. C's tie-break clause mentions "the four pairs", which
+   can be read as limiting rule 4 to `ekfac`/`tekfac`. That ambiguity was noticed only after E15's
+   results had been read. So every reading chosen then was chosen after the fact, except the literal
+   one. **The literal reading governs**, by the user's decision on 21 September 2026. S1-b at
+   `τ = 0.1`, for `ekfac` and `tekfac`, may still run on ViT-S. It runs inside the stage-1 jobs, not
+   before them, as an arm labelled **exploratory**. It is reported apart and casts no vote in E17. A
+   good result can only motivate a new test, pre-registered on its own, on a fourth network.
+2. **E16's candidates run with E16's final estimator.** E16's third amendment runs every cell with
+   `norm_exact_rescaling=True`: the rescaling statistic uses the exact per-row gradient of a
+   normalisation layer. E16 also re-runs its own add baseline under that option. "Configured exactly
+   as its source experiment ran it" therefore includes `norm_exact_rescaling=True` for candidates A,
+   B and D, in both stages, and D's `λ` comes from that re-run baseline. The candidates are what
+   `fisher_ref/experiments/e16_decisions.py` prints from E16's thirty output files. The reference
+   arm stays the optimizer as it ships: the bench's `λ = 3e-3`, with the shipped estimator.
+3. **Timing, as it happened.** This section was first written while E15's `vit_micro_cifar` jobs
+   were still running. Another session then read E15's results and wrote them up; it states that it
+   did so after this section existed. The first commit containing this section came after that
+   write-up, so the commit alone cannot prove the order. Apart from this amendment, the text below is
+   unchanged since it was first written.
+
+Written on 21 September 2026, **before any result of E15 or E16 was read**, and before any run
+described here. What existed at that moment: E15's ten jobs had been submitted (21523753-62). The
+five `cnn_gn_cifar` jobs had finished and their outputs were on the cluster. They were not opened
+while this section was prepared. The five `vit_micro_cifar` jobs were still running. E16 had not been
+submitted. Anything below that changes after this point is a deviation and will be recorded as one.
+
+**The question.** E15 and E16 each pick a way to set the safety constant, or to replace it. They pick
+it on the networks they tune on: `cnn_gn_cifar` and `vit_micro_cifar`, plus `cct_2_3x2_cifar` for
+E16. Their transfer rules (E15 rule 4, E16 rule 4) ask whether one setting works on *all of those*
+networks. They cannot ask whether it works on a network nobody tuned it on. E17 asks that. The network
+is ViT-S: `vit_small_cifar` (2 693 578 parameters) first, and `vit_small_cifar100` second.
+
+**Why ViT-S.** Three reasons.
+
+1. It is where the shipped Fisher arms lose. In campaign 2 the best of them, `diag`, sits **4.10**
+   points below AdamW in best validation accuracy on CIFAR-10 (67.68 % against 71.78 %) and **4.68**
+   points below on CIFAR-100 (40.80 % against 45.48 %). In final test accuracy the gaps are 4.23
+   (67.24 % against 71.47 %) and 4.80 (40.67 % against 45.47 %). One seed each.
+2. It is a transformer 128 times larger than `vit_micro_cifar`, the only transformer the λ work has
+   used, built from the same code with the same hyperparameters.
+3. It is clean. No experiment in this document has run it at any `λ`, `τ` or `q` other than the
+   shipped ones. The only trace of it in the E series is job 21190546: E0's curvature-free baseline,
+   run on the shipped `diag`, cancelled at epoch 4, with no output saved. E1's seven networks do not
+   include it.
+
+**What gets transferred is decided by E15's and E16's own rules, not by a choice made later.** Each
+candidate below is defined by the verdicts those two experiments' pre-registered rules produce.
+Nothing is picked by looking at their curves. The modes are `ekfac` and `tekfac`, the two that E15
+and E16 share. Each candidate is one arm per mode.
+
+- **A. Each of E16's three clip arms** (`clip`, `clipema`, `clipfixed`), if E16 rule 3 rates it
+  "better" or "equivalent" *and* E16 rule 4 finds at least one transferable `q` for it. The value
+  sent to ViT-S is its transferable `q` with the highest validation accuracy, averaged over the six
+  (network, mode) pairs of five-seed means. That is E16 rule 1's selection, applied across networks.
+- **B. E16's floor**, under the same two conditions. E16 rule 4 is written for `q` and for add's `λ`.
+  For this candidate its definition is applied to the floor's `λ`: a value inside the plateau of all
+  six pairs. Only the four values common to every network's grid can qualify
+  (3e-10, 1e-10, 3e-11, 1e-11).
+- **C. E15's S1-b** (one `λ` per layer), if E15 rule 3 says "adopted" *and* E15 rule 4 says
+  "tuning-free". The value sent is the `τ` that lies inside every plateau. If several do, it is the
+  one with the highest validation accuracy averaged over the four pairs. **E15's network-adaptive
+  arm** is a candidate under the same two conditions, with rules 2 to 4 applied to it in place of
+  S1-b.
+- **D. The added `λ`, always run.** If E16 rule 4 finds a transferable `λ` for add, that value is
+  used. If not, the value is the geometric mean of the six `λ` values that E16 rule 1 selects for
+  add, one per (network, mode). This arm is run whatever else qualifies. It measures what the best
+  single network-independent `λ` gives. That is the baseline any other candidate has to beat to be
+  worth its complexity.
+
+The candidates and their values are written into this section as a dated addendum. The addendum
+contains only the output of E15's and E16's decision rules (E16's are computed by
+`fisher_ref/experiments/e16_decisions.py`), applied as above. It is written
+before any E17 job is submitted.
+
+**The one thing that would spoil the test.** A run on `vit_small_cifar` or `vit_small_cifar100` at
+any `λ`, `τ`, `q` or damping form other than the shipped ones, before stage 1 is done. That is
+forbidden until then. E18 does not break this rule: it runs only the shipped arms, plus a control
+with no setting of its own (see E18).
+
+**Stage 1: does the rule transfer?** The E-series protocol, so that the value means on ViT-S what it
+meant where it was chosen. Batch 32, 15 epochs, the cosine schedule, the shipped estimator,
+`eig_before_rescale=True`, seeds 0-4. Each candidate arm is configured exactly as its source
+experiment ran it on `vit_micro_cifar`, the other transformer: the step-size cap, which parameters
+are frozen, and how weight decay is applied. Each seed's job re-runs its own reference arm: the same
+mode at the bench's own `λ = 3e-3`.
+
+After the candidate arm, an **oracle sweep** is run on ViT-S. It covers the candidate's own family,
+on its source experiment's grid: the seven values of `q`, or E15's eight values of `τ`, or five values
+of `λ` at half-decade spacing centred on the transferred one. The oracle exists only to measure how
+far the transferred value sits from ViT-S's own best. It cannot change the transferred value, which is
+fixed before any ViT-S run.
+
+**Stage 1 rules, per candidate and per mode.**
+
+1. **Does it help?** `Δ` = test accuracy of the candidate minus that of the reference arm, paired by
+   seed. It **helps** if the mean of `Δ` exceeds 2 standard errors. It **hurts** if the mean is below
+   −2 standard errors. Otherwise it **ties**. This is E15 rule 2's criterion.
+2. **Does it transfer?** The plateau is E13's: every value on the oracle grid whose five-seed mean
+   test accuracy lies within one standard error of the best. The candidate **transfers** if its value
+   lies inside ViT-S's plateau. This extends E16 rule 4 to a seventh (network, mode) pair. If the
+   oracle's best value sits at an edge of its grid, the grid is extended by two values on that side,
+   once. If the best is still at the edge, the verdict is **unresolved**.
+3. **Transfer loss, reported and not voted on.** The oracle's value is chosen on validation, as in
+   E16 rule 1. The loss is its test accuracy minus the candidate's, paired by seed.
+4. **Per candidate.** It **transfers to ViT-S** if rule 2 says "transfers" for both modes. It
+   **fails to transfer** if it lies outside the plateau for both. Anything else is **mixed**.
+
+**Stage 2: does it close the campaign gap?** Stage 2 is run for every candidate that is not "fails
+to transfer" in stage 1. It uses campaign 2's protocol exactly, the flags of
+`benchmarks/slurm/cifar10/train_vit_small_cifar_all.sh`: batch 128, 50 nominal epochs, the
+wall-clock-time protocol with `diag` as the reference arm, the budget cosine, `--max-epoch-factor 3`.
+It runs on both datasets with seeds 0, 1 and 2. Each (dataset, seed) is one job that runs its own
+`diag` reference, its own `adamw`, its own shipped `ekfac` and `tekfac`, and the candidates. Every
+comparison is therefore made inside one job. Under this protocol only the reference arm is
+reproducible across jobs; this repository measured that on the seed campaign, 158 of 160 checkpoints.
+
+**Stage 2 conversions, fixed now.**
+
+- **`λ`-based candidates (B and D)** are in stored units at batch 32. Stage 2 runs at batch 128, so
+  it uses `λ × (32/128)² = λ/16`. The factor is E3's measured 1/batch² scaling of the stored
+  curvature. That this carries the *optimum* across batch sizes is untested: it is Part 5's item 9.
+  So a stage-2 failure of a `λ`-based candidate reads "fails at batch 128 under the 1/batch²
+  conversion", and not "fails".
+- **`q` and `τ` (A and C)** are free of scale and are used unchanged.
+- **Every other setting keeps its value**, including the settings counted in steps
+  (`clip_ema_horizon`, `clip_calibrate_at`, `T_eig`, `TCov`).
+- **Decay:** decoupled, at the bench's own rate for the Fisher arms, `1e-3 × 1e-2 = 1e-5` per step at
+  the top of the cosine, whatever `λ` is (Part 5, rule 3). That applies to the clip arms too, unlike
+  in E16, because the partner here is AdamW, which decays.
+- **Step-size cap:** as in stage 1. `lr = cap × λ` with `cap = 1/3` for the `λ`-based candidates, and
+  the bench's `lr = 1e-3` for the clip.
+- **Parameters no hooked module owns:** as in stage 1. On ViT-S these are `cls_token` and
+  `pos_embed`, **0.47 %** of the parameters (12 672 of 2 693 578). E6 measured freezing them inert on
+  `vit_micro_cifar`, where they are 9.7 %.
+
+**Stage 2 rules, per dataset, per candidate and per mode.** The primary number is final test
+accuracy, measured once after the last epoch, with nothing selected. Best validation accuracy is
+reported next to it, for continuity with campaign 2's 4.10 and 4.68.
+
+1. `gap` = test accuracy of the candidate minus that of `adamw` in the same job. The candidate
+   **closes the gap** if `gap ≥ 0` on all three seeds.
+2. It **narrows the gap** if its `gap` is larger than the shipped arm's (same mode, same job) on all
+   three seeds.
+3. Otherwise it **does not close the gap**.
+
+Three seeds give weak evidence. Under a symmetric null, three results of the same sign occur with
+probability 1/4. A pass says "worth five seeds", not "established".
+
+**Not submitted until four things exist:** the addendum naming the candidates; `vit_small_cifar`
+entries in the E15/E16 drivers; the harness fields that carry the transferred settings into
+`HParams` for stage 2, inert and bit-identical when unset; and a one-run calibration of ViT-S at
+batch 32. That last one is also where the cost comes from. It is not measured. The estimate from the
+batch-128 time (997 s for 50 epochs, campaign 2) is 6 to 10 minutes per 15-epoch run.
+
+**What E17 cannot settle.** One architecture, trained on two datasets. "Transfers to ViT-S" means
+"transfers to one more network", not "transfers". And stage 2 for the `λ`-based candidates rests on
+the 1/batch² conversion.
+
+### E18 — pre-registered: is ViT-S's deficit against AdamW the deficit of momentum SGD?
+
+Written on 21 September 2026, before any E18 job was submitted. Same state of E15 and E16 as at E17.
+
+**The question.** Campaign 2's sixth finding (`CLAUDE.md`, and
+`docs/reports/campaign2_cifar100_imagenet.md`) offers one reading, and says it is untested. At the
+shipped `λ`, the operator each Fisher arm divides by is almost `λ I`. Each arm is then momentum SGD at
+a learning rate of `lr (1 − β) / λ`. On the ViT benches that is `1e-3 × 0.1 / 3e-3 = 0.033`. If this
+holds on ViT-S, its 4.10- and 4.68-point deficit against AdamW is what momentum SGD at that rate does
+on this ViT. It would not then be evidence about curvature. E18 tests it with an arm that *is* that
+limit.
+
+**The arm, `sgdm`.** `benchmarks/common/optimizers.py::LambdaLimitSGD`. It is `AdaFisherMulti`'s own
+update with every Fisher estimate replaced by `λ I`:
+
+```
+m_t   = β m_{t−1} + (1 − β) g_t
+θ    ← θ (1 − lr × wd)                          decoupled decay, as AdaFisherW
+θ    ← θ − lr / (1 − β^t) × m_t / λ             a parameter of a hooked module
+θ    ← θ − lr / (1 − β^t) × m_t                 cls_token, pos_embed: AdaFisher's own fallback
+```
+
+It takes the Fisher arms' `lr`, `λ`, `β` and decay convention, not AdamW's `baseline_lr`. It has no
+setting of its own. The fallback line is kept on purpose. Dividing `cls_token` and `pos_embed` by `λ`
+too would make this arm differ from the Fisher arms in a second way. It computes no curvature, so a
+step costs what a momentum-SGD step costs.
+
+Two tests pin it (`tests/test_sgdm_arm.py`, 19 tests). **First, it is AdaFisher minus the
+curvature.** `AdaFisherMulti` with `gammas = (1.0, 0.0)` multiplies every running average by 0, so
+the operator it divides by is exactly `λ`. The arm reproduces that optimizer **bit for bit**
+(`torch.equal` on every parameter). This holds on 12 configurations: all four hooked layer types, and
+a ViT with `cls_token` and `pos_embed`, each under three decay settings and two `TCov`. **Second, it
+is torch's momentum SGD.** Torch's buffer is `b_t = β b_{t−1} + g_t`, and `m_t = (1 − β) b_t` exactly.
+So the arm equals `torch.optim.SGD(momentum=β)` at learning rate `lr (1 − β) / (λ (1 − β^t))`. The
+test checks this in float64, to 1e-10.
+
+**What is already known, and what is not.**
+
+- **For `diag`, the reading is almost arithmetic.** Each of its two factors is min-max normalised to
+  [0, 1] and then averaged with the coefficients (0.08, 0.008), starting from 1. So after `k` factor
+  updates each is at most `X_k = 0.08^k + (0.008/0.92)(1 − 0.08^k)`. The amount `diag` adds above `λ`
+  is then at most `X_k²`: 7.7e-3, then 2.3e-4, then 8.5e-5, and 7.56e-5 in the limit.
+  `tests/test_sgdm_arm.py` checks that bound. At `λ = 3e-3`, `diag`'s step is at least these fractions
+  of `sgdm`'s, coordinate by coordinate: **0.279** during steps 0-99, **0.930** during steps 100-199,
+  and **0.973** from step 200 on. That holds on any network. So at an equal number of steps, the only
+  open question for `diag` is whether a 2.5 % smaller step and the first 200 steps of 17 550 change
+  the outcome.
+- **For the four Kronecker modes nothing bounds it.** Their operator is built from stored factors
+  whose size depends on the network. Lot 5 measured it at `cond ≤ 1.1035` on four regime-A models.
+  E1 measured `λ` above every curvature direction on seven networks. **ViT-S is in neither
+  measurement.**
+
+**The runs.** Datasets `vit_small_cifar` and `vit_small_cifar100`, seeds 0, 1 and 2. One job per
+(dataset, seed), with two invocations of the bench (`fisher_ref/slurm/e18_sgdm_control.sh`).
+
+1. **Campaign 2's grouped job, verbatim, with `sgdm` added last to `--arms`.** The flags are those of
+   `train_vit_small_cifar_all.sh`: `--epochs 50 --budget-mode wct --reference-arm diag
+   --max-epoch-factor 3 --lr-schedule budget --checkpoints 0,0.01,0.1,0.5,1`. `diag` runs its 17 550
+   steps unbudgeted. Its time becomes the budget of the other seven arms, `sgdm` included.
+2. **`sgdm` alone at matched steps:** `--budget-mode epochs --epochs 50 --lr-schedule nominal`. That
+   is exactly `diag`'s 17 550 steps under `diag`'s own schedule. Same initialisation, same batch
+   order.
+
+All seven shipped arms are re-run, not reused from campaign 2. Under the wall-clock-time protocol only
+the reference arm reproduces across jobs, so every comparison is made inside one job. Seeds 1 and 2
+exist for no ViT-S arm at all. Three seeds give a first measure of its seed-to-seed spread.
+
+Results go to `benchmarks/outputs/controls/e18_sgdm/<dataset>/<model>/seed<n>/{wct,matched_steps}/`.
+That tree is outside every directory `fisher_ref/checkpoints.py` reads.
+
+**Reproduction control, a gate.** At seed 0, `diag`'s per-step training loss must be **bit-identical**
+to campaign 2's over all 17 550 steps. Its best validation accuracy must be 67.68 % and 40.80 %. If
+not, nothing else is read until the difference is explained. The six budgeted shipped arms at seed 0
+are compared with campaign 2 as well. That comparison is reported as the cross-job noise of a
+budgeted arm on this model. It is not a gate.
+
+**Endpoint, and one margin fixed now.** The primary number is final test accuracy: measured once,
+after the last epoch, with nothing selected. Best validation accuracy is reported next to it.
+Comparisons are paired by seed, within one dataset. The margin is `m = 1.0` point, a quarter of the
+smaller gap the reading has to explain.
+
+**The decision rules, per dataset.**
+
+1. **Does `sgdm` reproduce `diag` at matched steps?** `Δ₁` = test accuracy of `sgdm` at matched
+   steps minus that of `diag`. They are **equivalent** if the mean of `Δ₁` ± 2 standard errors lies
+   inside ±`m`. They are **different** if the mean of `Δ₁` is more than 2 standard errors from zero.
+   Otherwise the result is **unresolved**.
+2. **The reading.** Write `D_sgdm` = test accuracy of `sgdm` minus that of `adamw`, both in the
+   wall-clock job. Write `D_diag` = test accuracy of `diag` minus that of `adamw`.
+   - **Confirmed** if three things hold: rule 1 says "equivalent"; the mean of `D_sgdm` is below −2
+     standard errors, so momentum SGD loses to AdamW too; and the mean of `D_sgdm − D_diag` is within
+     ±`m`.
+   - **Refuted** if rule 1 says "different", or if the mean of `D_diag` is below −2 standard errors
+     while that of `D_sgdm` is not. Either way the Fisher arm then loses something momentum SGD does
+     not.
+   - **Unresolved** otherwise.
+3. **Does curvature buy anything at equal wall-clock time?** For each Kronecker mode, `Δ_f` = its test
+   accuracy minus that of `sgdm`, in the wall-clock job, with rule 1's 2-standard-error criterion.
+   Eight comparisons (four modes, two datasets) make one 2-standard-error "win" by chance plausible.
+   So a mode counts as "curvature helps here" only if it wins on both datasets.
+
+**Predictions, written now so they can fail.**
+
+- Rule 1: equivalent on both datasets.
+- Rule 2: confirmed on both datasets.
+- Rule 3: every Kronecker mode ties or loses against `sgdm`. Campaign 2 gave them 1.5 to 9.4 % fewer
+  steps than `diag` in the same budget (seed 0: `kfac` 17 121 and 17 055, `tkfac` 16 975 and 17 287,
+  `ekfac` 15 947 and 16 165, `tekfac` 15 901 and 16 128, against 17 550). `sgdm`'s step costs about
+  what AdamW's does, so it should complete about as many steps as AdamW (18 526 and 18 954).
+
+**What each outcome would mean.**
+
+- **Confirmed:** at the shipped `λ`, the ViT-S results measure momentum SGD at 0.033, not curvature,
+  so the deficit is not evidence against curvature. It would not show that curvature helps ViT-S at a
+  lower `λ`. That is E17's question.
+- **Refuted:** the Fisher arms lose something momentum SGD at the same rate does not. That has to be
+  explained before any claim about ViT-S is made.
+
+**Relation to E17.** `sgdm` uses the shipped `lr`, `λ` and `β` and has no setting of its own, so E18
+does not spoil E17's held-out status. E18's runs are not E17's comparison partners, because E17's
+stage 2 re-runs its own inside one job. They serve E17 as a cross-job check.
+
+**Cost, from measured times.** In campaign 2 one ViT-S arm took 997 s of training on CIFAR-10 and
+990 s on CIFAR-100, plus about 6 % for validation. One job runs 8 arms at wall-clock budget plus 1 at
+matched steps: 9 × ~1 060 s, about 2.65 hours, plus about 40 s of setup. The time limit is 3:45. Six
+jobs, about 16 GPU-hours on `h100_1g.10gb` slices.
+
+**Submitted** on 21 September 2026, after the rules above were written. Jobs 21532555, 21532557 and
+21532559 run `vit_small_cifar`, seeds 0, 1 and 2. Jobs 21532556, 21532558 and 21532560 run
+`vit_small_cifar100`, seeds 0, 1 and 2. Each has a 3:45 limit. The code reached the cluster by copying
+three files, not by a commit: `benchmarks/common/optimizers.py`, which the cluster held at `51bbe0f` and
+which now differs from it only by the `sgdm` arm; `tests/test_sgdm_arm.py`; and this job script.
+SHA-256 of the two files the jobs run, identical on both sides: `optimizers.py` `42eb27c8…403c9`, job
+script `d010a91b…f358`. A local smoke run of both invocations on 512 images went through every arm,
+the report, the plots and the checkpoints, and the matched-steps `sgdm` took exactly `diag`'s step
+count.
+
+**Reproduction gate: passed**, checked while the jobs ran by comparing only the `diag` rows. At
+seed 0, `diag`'s per-step training loss is identical to campaign 2's at all 17 550 of 17 550 steps,
+on both datasets. Its best validation accuracy is 67.68 % and 40.80 %, and its test accuracy 67.24 %
+and 40.67 %, as in campaign 2.
+
+### E15 — done. One safety constant per layer wins everywhere, and the win comes from the layers.
+
+Ten jobs (21523753-62), all COMPLETED, no crashed run: `cnn_gn_cifar` in 1 h 18 to 1 h 31 per
+seed, `vit_micro_cifar` in 2 h 56 to 3 h 04. Outputs:
+`fisher_ref/outputs/e15_layer_damping_{cnn_gn_cifar,vit_micro_cifar}_s{0..4}.json`.
+
+**The protocol held.** All six repro cells reproduce E13's and E14's seed-0 test accuracy to
+**0.00 points** (65.18, 67.41, 68.55 on `cnn_gn_cifar`; 54.23, 54.36, 54.92 on `vit_micro_cifar`).
+So the new code path changes nothing except what it was built to change.
+
+**Result 1 — the pre-registered verdicts.** Each arm family's value is chosen on the five-seed mean
+of the final validation accuracy (rule 1). Test accuracy in %, five-seed mean ± standard error. `Δ`
+is paired by seed.
+
+| network | mode | reference | best single `λ` | S1-b | network-adaptive | rule 2: S1-b − single | rule 5: S1-b − network-adaptive |
+|---|---|---|---|---|---|---|---|
+| `cnn_gn_cifar` | `kfac` | 61.38 | 65.27 (1e-10) | **69.58** (`τ`=1) | 65.52 (`τ`=1) | **+4.32 ± 0.30, win** | **+4.07 ± 0.34, win** |
+| | `ekfac` | 60.75 | 68.24 (1e-10) | **70.20** (0.1) | 68.44 (3e-3) | **+1.96 ± 0.46, win** | **+1.76 ± 0.29, win** |
+| | `tekfac` | 60.81 | 68.14 (3e-11) | **70.06** (0.1) | 68.38 (1e-2) | **+1.92 ± 0.28, win** | **+1.67 ± 0.33, win** |
+| `vit_micro_cifar` | `kfac` | 45.81 | 52.76 (1e-11) | **57.33** (3) | 54.37 (1e-2, edge) | **+4.56 ± 0.41, win** | **+2.96 ± 0.21, win** |
+| | `ekfac` | 46.14 | 54.90 (1e-10) | **60.95** (0.1) | 56.63 (3e-3) | **+6.05 ± 0.26, win** | **+4.32 ± 0.22, win** |
+| | `tekfac` | 46.24 | 54.78 (1e-10) | **60.76** (0.1) | 56.67 (3e-3) | **+5.98 ± 0.27, win** | **+4.08 ± 0.32, win** |
+
+- **Rule 2: S1-b wins in all six pairs**, by +1.9 to +6.1 points. The smallest margin is 4.3 paired
+  standard errors, and S1-b is ahead on every one of the 30 (pair, seed) cells.
+- **Rule 5: S1-b also beats the network-adaptive arm in all six pairs**, by +1.7 to +4.3 points. By
+  the note added before submission, the win is therefore read as **per-layer**. It does not come
+  from being relative, and it does not come from escaping the identity's start-up leftover. The
+  network-adaptive arm itself only ties the single `λ` on `cnn_gn_cifar` (+0.21 to +0.25, none
+  above rule 2's threshold of 2 standard errors). It beats it by +1.6 to +1.9 on `vit_micro_cifar`. Being relative helps a
+  little on one network. Being per-layer helps a lot on both.
+- **Rule 3: S1 per layer is adopted as the next fix.** It wins for `ekfac` and `tekfac` on both
+  networks, and for `kfac` too.
+- **Rule 4, as written: not tuning-free.** No single `τ` lies in the plateau of all six pairs.
+  `ekfac`/`tekfac` have `τ = 0.1` in their plateau on both networks: {0.1}, {0.3, 0.1}, {0.1},
+  {0.1}. `kfac` wants {1, 0.3} on `cnn_gn_cifar` and {3} on `vit_micro_cifar`. That is adjacent but
+  disjoint, and ten to thirty times higher than the other two, as the pre-registration expected from
+  its factored damping. So the reading that holds is "one `τ` per damping rule", and it holds for
+  `ekfac`/`tekfac` on two networks. That is a finding to test on a third network, not a verdict,
+  since rule 4 was written for all six pairs.
+
+Against the default `λ`, S1-b gains **+8.2 to +14.8 points**: 70.2% against 60.8% on
+`cnn_gn_cifar`/`ekfac`, and 61.0% against 46.1% on `vit_micro_cifar`/`ekfac`. The best single `λ`
+gave +3.9 to +8.8.
+
+One asterisk. The network-adaptive arm's best value on `vit_micro_cifar`/`kfac` is at the bottom of
+its grid (`τ` = 0.01), so it is a bound. It rises slowly there, by about 0.3 points per half-decade
+(53.75, 54.06, 54.37). That is far too slowly to close the 2.96 points rule 5 measured.
+
+**Result 2 — the paper's own rule is not the best one, but it beats the best single `λ`.**
+`τ = 1` is TEKFAC's eq. (3.5) without its floor. It reaches 68.74 / 68.77 on `cnn_gn_cifar` and
+57.40 / 57.49 on `vit_micro_cifar` (`ekfac` / `tekfac`). That is 1.3 to 3.6 points under the best
+`τ` (0.1), and still 0.5 to 2.7 points above the best single `λ`.
+
+**Result 3 — what S1-b actually does to each layer.** From the per-layer logs: the time-average
+from step 4 000 onwards, geometric mean over five seeds, at each family's chosen value. The first
+number is `λ_l` divided by the best single `λ`. The two percentages are the fraction of that layer's
+directions whose curvature exceeds its `λ`, under S1-b and under the best single `λ`.
+
+| network, mode | head | the other layers | last block and final norm (`vit_micro_cifar` only) |
+|---|---|---|---|
+| `cnn_gn_cifar`, `ekfac` | **303×**; 15% / 57% | 0.36-0.55×; 36-58% / 15-22% | — |
+| `cnn_gn_cifar`, `tekfac` | **986×**; 13% / 66% | 1.2-1.7×; 35-55% / 39-62% | — |
+| `cnn_gn_cifar`, `kfac` | **26×**; 3% / 27% | 0.017-0.032×; 10-15% / 0-0.1% | — |
+| `vit_micro_cifar`, `ekfac` | **370×**; 38% / 86% | 0.24-2.7×, patch embedding 11× | 0.05-0.5×; 17-56% / 0-4% |
+| `vit_micro_cifar`, `tekfac` | **342×**; 36% / 86% | 0.24-2.6×, patch embedding 10× | 0.04-0.5×; 17-54% / 0-4% |
+| `vit_micro_cifar`, `kfac` | **593×**; 8% / 73% | 0.2-2.7×, patch embedding 15× | 0.16-0.8×; 5-10% / 0% |
+
+The pre-registered expectation holds **in part**. The head does get a constant hundreds of times
+above the single optimum in five pairs of six (26 times with `kfac` on `cnn_gn_cifar`). Under a
+single `λ`, 27% to 86% of the head's directions were being shrunk; under S1-b, 3% to 38% are. But
+the other layers do not all stay near the single optimum. On `vit_micro_cifar` the last block and
+the final norm get a constant **2 to 20 times lower**. There, a single `λ` shrank almost nothing (0% to
+4% of directions above it) and S1-b lets the curvature act on 17% to 56% of them. With `kfac` on
+`cnn_gn_cifar`, the whole body gets a constant 30 to 60 times lower.
+
+So S1-b does two things at once. It **stops shrinking the head's steps**, and it **lets the
+curvature act in the flattest layers**, which a single `λ` leaves as plain momentum. Put simply, it
+evens out across layers the share of directions that the curvature actually reaches. A "relative
+`λ` for the head only" arm, the follow-up the pre-registration named, would test the first effect
+alone. The logs predict it would not recover all of the gain.
+
+**Result 4 — the weight-decay confound of E10/E13 is negligible.** Same cell as E13, same `λ`,
+paired by seed, with the decay at its fixed rate instead of vanishing: `kfac` −0.23 ± 0.25,
+`ekfac` −0.08 ± 0.21, `tekfac` −0.16 ± 0.10. None is more than 1.6 standard errors from zero. E13's
+gains stand. Part 5's rule 3 stays, as protocol hygiene.
+
+**Consequence for E17, stated and not resolved here.** E17, pre-registered in this document before
+E15's results were read, sends S1-b to ViT-S only if E15 rule 3 says "adopted" *and* E15 rule 4 says
+"tuning-free". Rule 3 says adopted. Rule 4 **as written** covers every (network, mode) pair E15 ran,
+which is six pairs including `kfac`, and it fails there. E17's own text, however, averages "over the
+four pairs", which reads as `ekfac`/`tekfac` only, the two modes E17 transfers. Over those four pairs
+rule 4 holds, with `τ = 0.1` the only value inside every plateau. Which reading governs is E17's
+decision to make, recorded before any E17 job is submitted, and not something to settle by looking
+at these numbers.
+
+**What E15 does not establish.**
+- Two networks, both small (24 k and 21 k parameters), at batch 32 for 15 epochs, with the shipped
+  estimator. This is the E-protocol, not the benchmark's wall-clock protocol.
+- Whether `τ = 0.1` transfers to a third network, for `ekfac`/`tekfac`.
+- Whether S1-b survives a change of batch size. It should, since a relative `λ` absorbs the 1/batch²
+  factor by construction, but that has not been run.
+- Whether it helps on `resnet20_cifar`, where a single `λ` bought nothing.
