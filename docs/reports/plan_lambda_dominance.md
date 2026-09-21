@@ -1413,3 +1413,83 @@ add `λ` to a per-direction rescaling and agree exactly; `kfac` and `tkfac` add 
 are then inverted, and land elsewhere. **Fix S1 needs one constant per damping rule, not one
 constant.** That is a sharper and more implementable statement than anything earlier in this
 document, and it is the first version of S1 that two independent networks support.
+
+### E14 — pre-registered: does `tau` predict the best safety constant on two networks it was not fitted on?
+
+Written and committed **before** the runs were submitted.
+
+**The question.** E10 and E13 located the best safety constant on two networks and read `tau`
+from it. `tau` is the best constant divided by the network's mean curvature. The two readings agree
+across those two networks for `ekfac`/`tekfac`, and the four modes split along their damping rule.
+Two networks are enough to *suggest* a rule, not to test one. This experiment tests it on two
+networks that played no part in fitting `tau`: `cnn_gn_cifar` and `resnet20_cifar`.
+
+**Where each `tau` comes from.** Every value below is a five-seed result from E10, E11 or E13, with
+the ordering corrected, except the upper end of `tkfac`'s range. That one is E8's single-seed
+`cct_2_3x2_cifar` peak, whose margin of 5.59 points survives E10's measured floor. `tkfac` has no
+eigenbasis, so the ordering defect does not touch it.
+
+| mode | `tau`, low end | `tau`, high end | read from |
+|---|---|---|---|
+| `ekfac` | 5.9e-7 | 1.4e-6 | `vit_micro_cifar` (E13), `cct_2_3x2_cifar` (E10) |
+| `tekfac` | 5.9e-7 | 1.4e-6 | the same |
+| `tkfac` | 1.9e-6 | 4.1e-6 | `vit_micro_cifar` (E13), `cct_2_3x2_cifar` (E8, one seed) |
+| `kfac` | 6.0e-8 | 1.2e-7 | `vit_micro_cifar` (E13), `cct_2_3x2_cifar` (E11) |
+
+**Which curvature the prediction uses.** It must be the same statistic `tau` was divided by, which is
+E9's mean curvature at step 8000, at batch 32. E9 measured it on `cnn_gn_cifar`, per mode: `kfac`
+4.09e-4, `ekfac` 3.33e-4, `tkfac` 4.58e-4, `tekfac` 4.16e-4. E9 did not measure `resnet20_cifar`.
+For it, the only measurement is E1's mid-training range, 2.0e-5 to 2.7e-5. On the two networks where
+both exist, E1 reads 1.3 to 1.8 times higher than E9 at step 8000. So the `resnet20_cifar`
+predictions may be up to 1.8 times too high. That is less than one step of the grid below.
+
+**The predictions.** Each is the `tau` range multiplied by that network's curvature.
+
+| network | `ekfac` | `tekfac` | `tkfac` | `kfac` |
+|---|---|---|---|---|
+| `cnn_gn_cifar` | 2.0e-10 .. 4.5e-10 | 2.5e-10 .. 6.0e-10 | 8.6e-10 .. 1.9e-9 | 2.5e-11 .. 4.7e-11 |
+| `resnet20_cifar` | 1.2e-11 .. 3.7e-11 | 1.2e-11 .. 3.9e-11 | 3.7e-11 .. 1.1e-10 | 1.2e-12 .. 3.1e-12 |
+
+**The competing hypothesis.** It says the best constant is a fixed number, and not proportional to
+the curvature. On `cnn_gn_cifar` that number is 1e-8: E4 and E7 put all four modes' peaks there, at
+one seed, with the ordering defect still in place. This is 1.3 to 2.6 orders of magnitude away from
+the predictions for `ekfac`, `tekfac` and `kfac`, and about one order away for `tkfac`. The two
+hypotheses can therefore be told apart. On `resnet20_cifar`, E4 saw every mode flat to within a point
+from 1e-4 down to 1e-10. That window stopped above every prediction in the table.
+
+**The protocol.** Everything is E13's, except the network and the window:
+
+- batch 32 and 15 epochs;
+- the shipped estimator and the corrected eigenbasis ordering (`E4_EIG_BEFORE_RESCALE=1`);
+- the learning rate moved together with the constant, so the step-size cap stays still (Part 5,
+  rule 1);
+- the parameters the optimizer does not precondition stay trainable;
+- each seed is its own job, and each job re-runs its own reference arm.
+
+| network | seeds | window, half-decade spacing | runs per seed | measured cost per run |
+|---|---|---|---|---|
+| `cnn_gn_cifar` | 0-4 | 1e-7, 3e-8, ..., 3e-12 (10 values) | 44 | ~71 s (E4, job 21295804) |
+| `resnet20_cifar` | 0-2 | 1e-8, 3e-9, ..., 3e-13 (10 values) | 44 | ~280 s (E4, job 21295805) |
+
+Each window contains the competing hypothesis's 1e-8 and reaches at least a factor of 3 below the
+lowest prediction. The curve can therefore fall off on both sides, which E8 showed is what locates a
+peak. `resnet20_cifar` gets three seeds rather than five because one seed costs about 3.4 hours.
+
+**The decision rules, fixed now.** They use E13's definition of a plateau: every constant whose
+seed-mean accuracy lies within one standard error of the best seed-mean.
+
+1. **Per (network, mode):** the prediction is **confirmed** if the plateau intersects the predicted
+   range widened by a factor of 3 on each side. That is one grid step, and it is also the width E13
+   measured for the narrowest plateaus. It is **refuted** if the plateau does not intersect that
+   range. It is **unresolved** if the best constant sits at the edge of the window.
+2. **The competing hypothesis** is supported on `cnn_gn_cifar` for a mode if that mode's plateau
+   contains 1e-8.
+3. **The rule is supported** if the prediction is confirmed for `ekfac` and `tekfac` on both
+   networks. This is the claim fix S1 would rest on. It is **refuted** if it fails for either of
+   the two on either network.
+4. **The split by damping rule is supported** if, on each network, `kfac`'s plateau lies entirely
+   below `ekfac`'s and `tekfac`'s, and those two plateaus overlap each other.
+
+What these rules do not settle: a network whose curve is flat across the whole window (as
+`resnet20_cifar` was down to 1e-10) produces a plateau that intersects everything. That case is
+reported as **uninformative**, not as a confirmation.
