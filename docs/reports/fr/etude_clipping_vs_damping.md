@@ -8,6 +8,33 @@ centrale ; elle vit dans le répertoire de travail temporaire de la session, pas
 *Rédigé en français à la demande explicite de l'utilisateur ; la langue de référence du projet reste
 l'anglais (`CLAUDE.md`).*
 
+> **Mise à jour du 21 septembre 2026 — deux choses ont changé depuis cette étude.**
+>
+> 1. **Une correction : le `win_rate` de Sophia est la part de coordonnées *non* écrêtées.** Les §4.3,
+>    §6 et §7.3 ci-dessous disent « proportion écrêtée entre 0,1 et 0,5 ». Le README de Sophia (relu le
+>    21 septembre 2026) demande un `train/win_rate` entre 0,1 et 0,5 et précise qu'« un grand ρ donne un
+>    grand `win_rate` ». Or dans `clip(m / (ρ·h + ε), 1)`, un grand ρ écrête *moins*. La cible publiée
+>    est donc une proportion écrêtée de **0,5 à 0,9**. Le texte ci-dessous est laissé tel qu'écrit.
+> 2. **Les familles A et B sont maintenant implémentées et vont être testées (E16).** Cette étude les
+>    jugeait dégénérées au `λ` livré, et c'est toujours vrai. Mais E7 à E14 ont trouvé un point de
+>    fonctionnement, `λ` entre 1e-11 et 1e-10, où `λ` ne domine plus et où les deux familles peuvent
+>    différer de l'amortissement additif. L'option `rescale_form = "add" | "floor" | "clip"`
+>    d'`AdaFisherMulti` (`ekfac`/`tekfac` seulement) réalise la famille A (`max(s, λ)`) et la famille B
+>    avec trois seuils (`clip_threshold`) : `"quantile"` (recalculé à chaque pas pour écrêter une
+>    proportion `q`, ce qui normalise aussi le pas), `"ema"` (le pas suit de nouveau la taille du
+>    momentum) et `"fixed"` (un seuil calibré puis gelé : un écrêtage conditionnel, comme celui de
+>    Sophia). Les trois seuils sont fixés **couche par couche** : l'audit d'avant soumission a mesuré
+>    que l'erreur d'échelle de la courbure stockée varie jusqu'à quatre ordres de grandeur d'une couche
+>    à l'autre, si bien qu'un seul seuil pour tout le réseau n'aurait pas été un seuil cohérent.
+>    L'algorithme est écrit en LaTeX dans [`clipping_algorithme.tex`](clipping_algorithme.tex).
+>    Le plan et les règles de décision pré-enregistrées sont dans
+>    [`plan_floor_clip.md`](../plan_floor_clip.md) et dans la section E16 de
+>    [`plan_lambda_dominance.md`](../plan_lambda_dominance.md).
+>    Tous les bras d'E16 corrigent aussi la courbure stockée des couches de normalisation (option
+>    `norm_exact_rescaling`, §11 de `plan_floor_clip.md`). Sans elle, la colonne d'échelle d'une
+>    LayerNorm est sous-estimée d'un facteur 80 à 989 (mesuré au pas 300). Le correctif E14 est
+>    donc relancé dans E16 avec la même option, au lieu d'être relu dans les fichiers d'E14.
+
 ---
 
 ## 1. La réponse courte

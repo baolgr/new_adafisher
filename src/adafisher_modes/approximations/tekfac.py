@@ -52,6 +52,14 @@ unrelated quantity.
 patch-based (``kfac_conv_1602.01407.pdf`` p. 14), and ``precondition`` then applies the small
 operator independently at each kernel offset.
 
+**How the division is done (``rescale_form``, ``"add"`` by default).** ``"add"`` divides by
+``Theta + lambda`` as above. ``"floor"`` divides by ``max(Theta, lambda)``, and ``"clip"`` replaces the
+safety constant by a Sophia-type per-coordinate cap on the undamped step, with a threshold that is
+recomputed every step (``"quantile"``), follows the momentum's recent size (``"ema"``), or is one
+constant for the whole network (``"fixed"``). Both alternatives live in
+:mod:`adafisher_modes.approximations._rescale_utils`; ``docs/reports/plan_floor_clip.md`` is the
+experiment they exist for.
+
 ``f_tilde`` builds the dense operator and exists only for tests; ``precondition`` never forms it.
 """
 
@@ -60,10 +68,15 @@ from __future__ import annotations
 from typing import Dict, Optional, Sequence, Tuple, Union
 
 from torch import Tensor, diag, kron
-from torch.nn import Conv2d, Module
+from torch.nn import BatchNorm2d, Conv2d, LayerNorm, Module
 
 from adafisher_modes.ema import seed_or_accumulate, update_running_avg
-from adafisher_modes.factors import augment_input, flatten_output_grad
+from adafisher_modes.factors import (
+    augment_input,
+    flatten_output_grad,
+    norm_exact_kfe_squares,
+    normalized_norm_input,
+)
 
 from ._eigh_utils import eigenbasis
 from ._kron_utils import (
@@ -72,6 +85,7 @@ from ._kron_utils import (
     split_conv2d_direction_sua,
     split_direction,
 )
+from ._rescale_utils import ClipRule, check_rescale_args, floored, rescale
 from ._tkfac_utils import bootstrap_raw_factors, instantaneous_raw_factors
 from .base import FisherApproximation, pop_cached_input
 
@@ -88,7 +102,17 @@ class TEKFACApproximation(FisherApproximation):
         conv_sua: bool = False,
         ema_seed_first: bool = False,
         eig_before_rescale: bool = False,
+        rescale_form: str = "add",
+        clip_fraction: Optional[float] = None,
+        clip_guard: float = 1e-3,
+        clip_threshold: str = "quantile",
+        clip_ema_horizon: Optional[int] = None,
+        clip_calibrate_at: Optional[int] = None,
+        clip_calibration_window: Optional[int] = None,
+        norm_exact_rescaling: bool = False,
     ) -> None:
+        check_rescale_args(rescale_form, clip_fraction, clip_guard, clip_threshold,
+                           clip_ema_horizon, clip_calibrate_at, clip_calibration_window)
         self.Lambda = Lambda
         self.beta_factors = tuple(beta_factors) if beta_factors is not None else tuple(gammas)
         self.beta_theta = tuple(beta_theta) if beta_theta is not None else tuple(gammas)
@@ -97,6 +121,16 @@ class TEKFACApproximation(FisherApproximation):
         self.conv_sua = conv_sua
         self.ema_seed_first = ema_seed_first
         self.eig_before_rescale = eig_before_rescale
+        self.rescale_form = rescale_form
+        self.clip_fraction = clip_fraction
+        self.clip_guard = clip_guard
+        self.norm_exact_rescaling = norm_exact_rescaling
+        self._cached_x_hat: Dict[Module, Tensor] = {}
+        self._clip: Optional[ClipRule] = None
+        if rescale_form == "clip":
+            assert clip_fraction is not None  # check_rescale_args
+            self._clip = ClipRule(clip_threshold, clip_fraction, clip_guard, clip_ema_horizon,
+                                  clip_calibrate_at, clip_calibration_window)
         self._theta_observed: set = set()
         self._eig_step: Dict[Module, int] = {}
         self._delta: Dict[Module, Tensor] = {}
@@ -109,9 +143,12 @@ class TEKFACApproximation(FisherApproximation):
 
     def update_input_factor(self, module: Module, h: Tensor, step: int) -> None:
         self._cached_h_bar[module] = augment_input(h, module, sua=self.conv_sua)
+        if self.norm_exact_rescaling and isinstance(module, (BatchNorm2d, LayerNorm)):
+            self._cached_x_hat[module] = normalized_norm_input(h, module)
 
     def update_output_factor(self, module: Module, s: Tensor, step: int) -> None:
         h_bar = pop_cached_input(self._cached_h_bar, module)
+        x_hat = self._cached_x_hat.pop(module, None)
         s_flat = flatten_output_grad(s, module)
         delta_i, phi_raw_i, psi_raw_i = instantaneous_raw_factors(h_bar, s_flat)
         # Same start-up condition as seed_or_accumulate's: step 0, or the first time this module is
@@ -137,11 +174,17 @@ class TEKFACApproximation(FisherApproximation):
             self._rebuild_eigenbasis(module)
             self._eig_step[module] = step
         if module in self._Q_Phi and step % self.T_re == 0:
-            h_kfe = h_bar @ self._Q_Phi[module]
-            s_kfe = s_flat @ self._Q_Psi[module]
-            # Intra-batch estimate of Theta (eq. 3.2), the same construction as ekfac's s*
-            # estimator with (Q_A, Q_B) replaced by (Q_Phi, Q_Psi).
-            theta_i = (s_kfe.t() ** 2) @ (h_kfe**2) / h_bar.size(0)
+            if x_hat is not None:
+                # norm_exact_rescaling: the normalisation layer's exact per-row gradient, as in
+                # ekfac, in TKFAC's basis.
+                theta_i = norm_exact_kfe_squares(x_hat, s_flat, self._Q_Psi[module],
+                                                 self._Q_Phi[module])
+            else:
+                h_kfe = h_bar @ self._Q_Phi[module]
+                s_kfe = s_flat @ self._Q_Psi[module]
+                # Intra-batch estimate of Theta (eq. 3.2), the same construction as ekfac's s*
+                # estimator with (Q_A, Q_B) replaced by (Q_Phi, Q_Psi).
+                theta_i = (s_kfe.t() ** 2) @ (h_kfe**2) / h_bar.size(0)
             if self.ema_seed_first and module not in self._theta_observed:
                 # Same one-step handover as ekfac's s*: refresh() must leave a value behind for
                 # precondition() to read on the step the eigenbasis is created, and the first
@@ -195,15 +238,47 @@ class TEKFACApproximation(FisherApproximation):
             return None
         return self._Phi_raw[module].size(0) * self._Psi_raw[module].size(0)
 
+    @property
+    def consumes_bias_corrected_momentum(self) -> bool:
+        """True under ``rescale_form="clip"``: the optimizer then hands ``precondition`` the
+        bias-corrected momentum and applies the result as it is. See
+        :mod:`adafisher_modes.approximations._rescale_utils`."""
+        return self._clip is not None
+
+    @property
+    def _clip_stats(self) -> Dict[Module, Dict[str, Tensor]]:
+        """Per-module diagnostics of the clip at its last step, computed on access (empty for the
+        other forms)."""
+        return {} if self._clip is None else self._clip.stats
+
+    def begin_step(self, step: int) -> None:
+        if self._clip is not None:
+            self._clip.begin_step(step)
+
+    def _rescale(self, M_kfe: Tensor, module: Module) -> Tensor:
+        """The division by ``Theta`` inside the eigenbasis, in the form ``rescale_form`` selects."""
+        if self._clip is not None:
+            return self._clip.apply(module, M_kfe, self._Theta[module])
+        return rescale(M_kfe, self._Theta[module], self.lambda_for(module), self.rescale_form)
+
     def f_tilde(self, module: Module) -> Tensor:
         """Dense ``(d_out * d_in_aug)^2`` reconstruction of
-        ``F~ = kron(Q_Psi, Q_Phi) diag(Theta + lambda) kron(Q_Psi, Q_Phi)^T``: output factor outer,
+        ``F~ = kron(Q_Psi, Q_Phi) diag(Theta + lambda) kron(Q_Psi, Q_Phi)^T``
+        (``diag(max(Theta, lambda))`` under ``rescale_form="floor"``): output factor outer,
         input factor inner, matching ``Theta``'s own row-major flattening. Built from the current
         eigenbasis and ``Theta``. For tests and debugging only -- ``precondition`` never forms this
         matrix.
         """
         Q_Phi, Q_Psi = self._Q_Phi[module], self._Q_Psi[module]
-        scale = (self._Theta[module] + self.lambda_for(module)).flatten()
+        if self.rescale_form == "clip":
+            raise NotImplementedError(
+                "rescale_form='clip' is not a linear operator: the coordinates whose undamped "
+                "step exceeds the threshold are clipped, so there is no matrix to reconstruct"
+            )
+        if self.rescale_form == "floor":
+            scale = floored(self._Theta[module], self.lambda_for(module)).flatten()
+        else:
+            scale = (self._Theta[module] + self.lambda_for(module)).flatten()
         Q = kron(Q_Psi, Q_Phi)
         return Q @ diag(scale) @ Q.t()
 
@@ -217,10 +292,10 @@ class TEKFACApproximation(FisherApproximation):
         bias_shape = None if bias_direction is None else bias_direction.shape
         if self.conv_sua and isinstance(module, Conv2d):
             M = augment_conv2d_direction_sua(weight_direction, bias_direction)
-            M_kfe = (Q_Psi.t() @ M @ Q_Phi) / (self._Theta[module] + self.lambda_for(module))
+            M_kfe = self._rescale(Q_Psi.t() @ M @ Q_Phi, module)
             direction = Q_Psi @ M_kfe @ Q_Phi.t()
             return split_conv2d_direction_sua(direction, weight_direction.shape, bias_shape)
         M = augment_direction(weight_direction, bias_direction)
-        M_kfe = (Q_Psi.t() @ M @ Q_Phi) / (self._Theta[module] + self.lambda_for(module))
+        M_kfe = self._rescale(Q_Psi.t() @ M @ Q_Phi, module)
         direction = Q_Psi @ M_kfe @ Q_Phi.t()
         return split_direction(direction, weight_direction.shape, bias_shape)

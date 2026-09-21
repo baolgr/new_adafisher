@@ -186,8 +186,20 @@ def _kfac_blocks(approx: Any, module: nn.Module, dtype: torch.dtype,
     return damped, undamped, checks
 
 
+def _refuse_non_additive(approx: Any) -> None:
+    """The two readers below rebuild ``s + Lambda``. Under ``rescale_form="floor"`` the optimizer
+    divides by ``max(s, Lambda)`` instead, and under ``"clip"`` by no fixed operator at all, so a
+    reading would be silently wrong rather than approximate."""
+    form = getattr(approx, "rescale_form", "add")
+    if form != "add":
+        raise NotImplementedError(
+            f"P2 reads the additive operator s + Lambda; this optimizer uses rescale_form={form!r}"
+        )
+
+
 def _ekfac_blocks(approx: Any, module: nn.Module, dtype: torch.dtype,
                   device: Any) -> tuple[BlockOps, BlockOps, Dict[str, float]]:
+    _refuse_non_additive(approx)
     q_a = _cast(approx._Q_A[module], dtype, device)
     q_b = _cast(approx._Q_B[module], dtype, device)
     s = _cast(approx._s_star[module], dtype, device)
@@ -217,6 +229,7 @@ def _tkfac_blocks(approx: Any, module: nn.Module, dtype: torch.dtype,
 
 def _tekfac_blocks(approx: Any, module: nn.Module, dtype: torch.dtype,
                    device: Any) -> tuple[BlockOps, BlockOps, Dict[str, float]]:
+    _refuse_non_additive(approx)
     q_phi = _cast(approx._Q_Phi[module], dtype, device)
     q_psi = _cast(approx._Q_Psi[module], dtype, device)
     theta = _cast(approx._Theta[module], dtype, device)

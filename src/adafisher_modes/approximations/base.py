@@ -27,7 +27,8 @@ the single-tensor-or-list convention of the reference implementation's own ``_ge
 
 **``precondition`` receives the raw first moment, not a bias-corrected one.** The optimizer folds
 the Adam bias-correction scalar ``1 - beta**t`` into its own step size instead, exactly as the
-reference implementation does.
+reference implementation does. The one exception is ``rescale_form="clip"``
+(``consumes_bias_corrected_momentum``), whose threshold is compared with the momentum itself.
 """
 
 from __future__ import annotations
@@ -100,6 +101,18 @@ class FisherApproximation(ABC):
         :meth:`lambda_for` for a mode that adds the damping at division time; ``kfac`` and
         ``tkfac`` bake it into inverses at ``refresh`` and override this to return that value."""
         return self.lambda_for(module)
+
+    @property
+    def consumes_bias_corrected_momentum(self) -> bool:
+        """Whether :meth:`precondition` must receive the bias-corrected momentum
+        ``m / (1 - beta^t)``, its result then being applied without further correction. True only
+        for ``ekfac``/``tekfac`` under ``rescale_form="clip"``, which compares the momentum against
+        a threshold; every other mode receives the raw momentum, as the note above says."""
+        return False
+
+    def begin_step(self, step: int) -> None:
+        """Called by the optimizer before it walks the modules of one step, with the same step index
+        the hooks used. No-op by default."""
 
     def mean_curvature(self, module: Module) -> Optional[Tensor]:
         """Mean eigenvalue of ``module``'s *undamped* stored curvature, i.e. its trace divided by

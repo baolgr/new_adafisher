@@ -87,6 +87,30 @@ layer with ``affine=False`` has no weight to precondition and is skipped.
     parameter with no curvature (the plain-momentum fallback) is scaled by the shared ``Lambda``.
     With decoupled weight decay the decay factor is ``1 - lr * weight_decay``, so under this knob
     it does not move with the damping.
+``rescale_form``, ``clip_threshold``, ``clip_fraction``, ``clip_guard``, and three more
+    ``ekfac`` and ``tekfac`` only: how the projected direction is divided by the stored curvature
+    inside the eigenbasis. ``"add"`` (the default) is ``s + lambda``, what both papers prescribe.
+    ``"floor"`` is ``max(s, lambda)``: values above ``lambda`` are used as they are. ``"clip"`` is
+    a Sophia-type per-coordinate cap on the *undamped* step; ``lambda`` then plays no role. Its
+    threshold is ``clip_threshold``, always per module: ``"quantile"`` clips a fraction
+    ``clip_fraction`` of the module's active coordinates at every step (a per-module
+    normalisation); ``"ema"`` does the same but lets the step follow the momentum's size relative
+    to its bias-corrected average over ``clip_ema_horizon`` steps; ``"fixed"`` freezes, at step
+    ``clip_calibrate_at``, the median of the module's quantile over the preceding
+    ``clip_calibration_window`` steps (the three more: ``clip_ema_horizon``,
+    ``clip_calibrate_at``, ``clip_calibration_window``). Under ``"clip"`` the mode receives the
+    bias-corrected momentum. ``clip_guard`` keeps a coordinate of
+    numerically zero curvature and near-zero momentum from being clipped to a full step. See
+    :mod:`adafisher_modes.approximations._rescale_utils` and ``docs/reports/plan_floor_clip.md``.
+``norm_exact_rescaling``
+    ``ekfac`` and ``tekfac`` only. Estimate a normalisation layer's eigen-rescaling (``s*``,
+    ``Theta``) from its exact per-row gradient ``[delta * x_hat, delta]`` instead of the input
+    factor's surrogate ``[z * delta, delta]`` (``z`` = the raw input's channel mean, ``CLAUDE.md``
+    §4.6). The factors and the eigenbasis are unchanged; EKFAC's Lemma 1 makes the new statistic the
+    optimal diagonal in that basis. Measured before the fix: on ``vit_micro_cifar`` the surrogate
+    under-states the scale column 800-8 000x. Inert on a network with no hooked normalisation
+    layer. Refused with ``fisher_batch_samples`` on a network with a ``BatchNorm2d``, whose batch
+    statistics cannot be recomputed from part of the batch.
 
 Distributed training is not supported: the reference's all-reduce over the two factors has no
 equivalent here, and silently accepting the flag would be worse than omitting it.
@@ -135,6 +159,14 @@ class AdaFisherMulti(Optimizer):
         damping: str = "global",
         damping_tau: Optional[float] = None,
         hold_cap: bool = False,
+        rescale_form: str = "add",
+        clip_fraction: Optional[float] = None,
+        clip_guard: float = 1e-3,
+        clip_threshold: str = "quantile",
+        clip_ema_horizon: Optional[int] = None,
+        clip_calibrate_at: Optional[int] = None,
+        clip_calibration_window: Optional[int] = None,
+        norm_exact_rescaling: bool = False,
         **mode_kwargs,
     ) -> None:
         if fisher_mode not in MODES:
@@ -184,6 +216,40 @@ class AdaFisherMulti(Optimizer):
                 f"eig_before_rescale only applies to the two modes that have an eigenbasis to "
                 f"order against a rescaling, 'ekfac' and 'tekfac'; got fisher_mode={fisher_mode!r}."
             )
+        clip_kwargs = {"clip_fraction": clip_fraction, "clip_ema_horizon": clip_ema_horizon,
+                       "clip_calibrate_at": clip_calibrate_at,
+                       "clip_calibration_window": clip_calibration_window}
+        if norm_exact_rescaling:
+            if fisher_mode not in ("ekfac", "tekfac"):
+                raise ValueError(
+                    f"norm_exact_rescaling only applies to the two modes that estimate an "
+                    f"eigen-rescaling, 'ekfac' and 'tekfac'; got fisher_mode={fisher_mode!r}"
+                )
+            if fisher_batch_samples is not None and any(
+                    isinstance(m, BatchNorm2d) for m in model.modules()):
+                raise ValueError(
+                    "norm_exact_rescaling recomputes a BatchNorm2d's normalised activation from "
+                    "its batch statistics, which fisher_batch_samples would compute on part of "
+                    "the batch only; use one or the other"
+                )
+            mode_kwargs = {"norm_exact_rescaling": True, **mode_kwargs}
+        if (rescale_form != "add" or clip_threshold != "quantile"
+                or any(v is not None for v in clip_kwargs.values())):
+            if fisher_mode not in ("ekfac", "tekfac"):
+                raise ValueError(
+                    f"rescale_form and clip_fraction only apply to the two modes that divide "
+                    f"coordinate by coordinate in an eigenbasis, 'ekfac' and 'tekfac'; got "
+                    f"fisher_mode={fisher_mode!r}. kfac and tkfac invert their factors without "
+                    f"ever diagonalising them, and diag's min-max removes the curvature's scale."
+                )
+            if rescale_form == "clip" and (hold_cap or damping != "global"):
+                raise ValueError(
+                    "rescale_form='clip' does not use lambda at all, so neither hold_cap (which "
+                    "scales the step by lambda) nor a relative damping (which sets lambda) means "
+                    "anything with it"
+                )
+            mode_kwargs = {"rescale_form": rescale_form, "clip_guard": clip_guard,
+                           "clip_threshold": clip_threshold, **clip_kwargs, **mode_kwargs}
         self.approx = MODES[fisher_mode](
             Lambda=Lambda, gammas=gammas, ema_seed_first=ema_seed_first, **mode_kwargs
         )
@@ -269,6 +335,13 @@ class AdaFisherMulti(Optimizer):
             self._update_moment(hparams, bias_param, beta) if bias_param is not None else (None, None)
         )
 
+        if self.approx.consumes_bias_corrected_momentum:
+            # The clip compares the momentum with a threshold, so it must see the bias-corrected
+            # momentum; its result is then applied as it is. New tensors: never touch exp_avg.
+            weight_exp_avg = weight_exp_avg / weight_bc
+            bias_exp_avg = None if bias_exp_avg is None else bias_exp_avg / bias_bc
+            weight_bc = 1.0
+            bias_bc = None if bias_bc is None else 1.0
         direction = self.approx.precondition(module, weight_exp_avg, bias_exp_avg)
         if self.hold_cap:
             lam = self.approx.applied_lambda(module)
@@ -355,6 +428,7 @@ class AdaFisherMulti(Optimizer):
         stepped: set[int] = set()
         if self.damping != "global":
             self._set_relative_damping()
+        self.approx.begin_step(self.steps)
         for group in self.param_groups:
             hparams = {k: group[k] for k in ("lr", "beta", "weight_decay")}
             for param in group["params"]:

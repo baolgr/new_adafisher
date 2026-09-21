@@ -540,3 +540,62 @@ def flatten_norm_output_grad(s: Tensor, layer: Module) -> Tensor:
 def _s_full_norm(s: Tensor, layer: Module) -> Tensor:
     s_pool = flatten_norm_output_grad(s, layer)
     return s_pool.t() @ s_pool / s_pool.size(0)
+
+
+# ----------------------------------------------------------------------------------------------
+# The exact per-row gradient of a normalisation layer, for the eigen-rescaling estimators of ekfac
+# and tekfac (AdaFisherMulti(norm_exact_rescaling=True), off by default).
+# ----------------------------------------------------------------------------------------------
+
+
+def normalized_norm_input(h: Tensor, layer: Module) -> Tensor:
+    """``(T, C)``: the layer's *normalised* activation ``x_hat`` at every row, row-paired with
+    :func:`flatten_norm_output_grad`. The gradient with respect to the scale parameter at one row
+    is ``delta_t * x_hat_t`` (element-wise), so this is what the exact per-row gradient needs; the
+    input factor keeps using :func:`augment_norm_input`'s raw channel mean (``CLAUDE.md`` §4.6).
+
+    Recomputed from the forward hook's raw input with the statistics the layer itself used:
+    ``LayerNorm`` normalises every row over its channels (biased variance, the layer's ``eps``);
+    ``BatchNorm2d`` uses the batch's per-channel statistics when it normalises with them -- in
+    training, or when it keeps no running statistics -- and its running statistics otherwise,
+    exactly PyTorch's rule.
+    """
+    if isinstance(layer, LayerNorm):
+        _check_layernorm_supported(layer)
+        mean = h.mean(dim=-1, keepdim=True)
+        var = h.var(dim=-1, unbiased=False, keepdim=True)
+        return _pool_layernorm((h - mean) / torch.sqrt(var + layer.eps), layer)
+    if isinstance(layer, BatchNorm2d):
+        batch_stats = layer.training or (layer.running_mean is None and layer.running_var is None)
+        if batch_stats:
+            mean = h.mean(dim=(0, 2, 3))
+            var = h.var(dim=(0, 2, 3), unbiased=False)
+        else:
+            mean, var = layer.running_mean, layer.running_var
+        x_hat = (h - mean[None, :, None, None]) / torch.sqrt(var[None, :, None, None] + layer.eps)
+        return _pool_batchnorm2d(x_hat)
+    raise NotImplementedError(
+        f"normalized_norm_input only supports BatchNorm2d and LayerNorm; got {type(layer)}"
+    )
+
+
+def norm_exact_kfe_squares(x_hat: Tensor, s_rows: Tensor, Q_out: Tensor, Q_in: Tensor) -> Tensor:
+    """``(C, 2)``: the mean over rows of the squared exact per-row gradient of a normalisation
+    layer, projected into the eigenbasis ``Q_out (x) Q_in``.
+
+    The exact per-row gradient with respect to the layer's ``(scale, shift)`` pair is the ``C x 2``
+    matrix ``G_t = [delta_t * x_hat_t, delta_t]``, in the optimizer's own column order (scale in
+    column 0, shift in column 1; ``_kron_utils.augment_direction``), and it sums over rows to
+    ``[weight.grad, bias.grad]``. Its projection is ``Q_out^T G_t Q_in``, i.e. column ``k`` of it is
+    ``(delta_t * x_hat_t) @ Q_out * Q_in[0, k] + delta_t @ Q_out * Q_in[1, k]``. EKFAC's Lemma 1
+    makes the mean of its squares the optimal diagonal in that basis.
+
+    The surrogate the rescaling estimators use by default is the same formula with
+    ``delta_t * x_hat_t`` replaced by ``z_t * delta_t`` (``z_t`` = the raw input's channel mean): the
+    per-row "gradient" of the 2 x 2 input factor's model, which is not the layer's gradient.
+    """
+    scale_kfe = (s_rows * x_hat) @ Q_out
+    shift_kfe = s_rows @ Q_out
+    projected = scale_kfe[:, :, None] * Q_in[0][None, None, :] + shift_kfe[:, :, None] * Q_in[1][
+        None, None, :]
+    return projected.pow(2).mean(dim=0)

@@ -51,6 +51,14 @@ input batch stays row-aligned with the pooled output gradients either way, becau
 over the same output grid. Only ``Q_A``'s size changes, and ``precondition`` applies the resulting
 small operator independently at each kernel offset.
 
+**How the division is done (``rescale_form``, ``"add"`` by default).** ``"add"`` divides by
+``s* + lambda`` as above. ``"floor"`` divides by ``max(s*, lambda)``, and ``"clip"`` replaces the
+safety constant by a Sophia-type per-coordinate cap on the undamped step, with a threshold that is
+recomputed every step (``"quantile"``), follows the momentum's recent size (``"ema"``), or is one
+constant for the whole network (``"fixed"``). Both alternatives live in
+:mod:`adafisher_modes.approximations._rescale_utils`; ``docs/reports/plan_floor_clip.md`` is the
+experiment they exist for.
+
 ``f_tilde`` builds the dense operator and exists only for tests; ``precondition`` never forms it.
 """
 
@@ -59,10 +67,16 @@ from __future__ import annotations
 from typing import Dict, Optional, Sequence, Tuple, Union
 
 from torch import Tensor, diag, eye, kron
-from torch.nn import Conv2d, Module
+from torch.nn import BatchNorm2d, Conv2d, LayerNorm, Module
 
 from adafisher_modes.ema import seed_or_accumulate, update_running_avg
-from adafisher_modes.factors import augment_input, compute_s_full, flatten_output_grad
+from adafisher_modes.factors import (
+    augment_input,
+    compute_s_full,
+    flatten_output_grad,
+    norm_exact_kfe_squares,
+    normalized_norm_input,
+)
 
 from ._eigh_utils import eigenbasis
 from ._kron_utils import (
@@ -71,6 +85,7 @@ from ._kron_utils import (
     split_conv2d_direction_sua,
     split_direction,
 )
+from ._rescale_utils import ClipRule, check_rescale_args, floored, rescale
 from .base import FisherApproximation, pop_cached_input
 
 
@@ -83,13 +98,33 @@ class EKFACApproximation(FisherApproximation):
         conv_sua: bool = False,
         ema_seed_first: bool = False,
         eig_before_rescale: bool = False,
+        rescale_form: str = "add",
+        clip_fraction: Optional[float] = None,
+        clip_guard: float = 1e-3,
+        clip_threshold: str = "quantile",
+        clip_ema_horizon: Optional[int] = None,
+        clip_calibrate_at: Optional[int] = None,
+        clip_calibration_window: Optional[int] = None,
+        norm_exact_rescaling: bool = False,
     ) -> None:
+        check_rescale_args(rescale_form, clip_fraction, clip_guard, clip_threshold,
+                           clip_ema_horizon, clip_calibrate_at, clip_calibration_window)
         self.Lambda = Lambda
         self.gammas = gammas
         self.T_eig = T_eig
         self.conv_sua = conv_sua
         self.ema_seed_first = ema_seed_first
         self.eig_before_rescale = eig_before_rescale
+        self.rescale_form = rescale_form
+        self.clip_fraction = clip_fraction
+        self.clip_guard = clip_guard
+        self.norm_exact_rescaling = norm_exact_rescaling
+        self._cached_x_hat: Dict[Module, Tensor] = {}
+        self._clip: Optional[ClipRule] = None
+        if rescale_form == "clip":
+            assert clip_fraction is not None  # check_rescale_args
+            self._clip = ClipRule(clip_threshold, clip_fraction, clip_guard, clip_ema_horizon,
+                                  clip_calibrate_at, clip_calibration_window)
         self._s_star_observed: set = set()
         self._eig_step: Dict[Module, int] = {}
         self._A: Dict[Module, Tensor] = {}
@@ -110,6 +145,8 @@ class EKFACApproximation(FisherApproximation):
         # estimator needs the input and the gradient row-paired, which is why this is cached rather
         # than recomputed.
         self._cached_h_bar[module] = h_bar
+        if self.norm_exact_rescaling and isinstance(module, (BatchNorm2d, LayerNorm)):
+            self._cached_x_hat[module] = normalized_norm_input(h, module)
 
     def update_output_factor(self, module: Module, s: Tensor, step: int) -> None:
         B_i = compute_s_full(s, module)
@@ -118,6 +155,7 @@ class EKFACApproximation(FisherApproximation):
                            self.gammas, step, self.ema_seed_first)
 
         h_bar = pop_cached_input(self._cached_h_bar, module)
+        x_hat = self._cached_x_hat.pop(module, None)
         if self.eig_before_rescale and step % self.T_eig == 0:
             # Rebuild the eigenbasis from A and B as they stand for *this* step, before the
             # gradient is projected into it, so that s* is measured in the basis precondition()
@@ -127,12 +165,17 @@ class EKFACApproximation(FisherApproximation):
             self._eig_step[module] = step
         if module in self._Q_A:
             s_flat = flatten_output_grad(s, module)
-            h_kfe = h_bar @ self._Q_A[module]
-            s_kfe = s_flat @ self._Q_B[module]
-            # Intra-batch estimate of s* (Algorithm 1's COMPUTE SCALINGS step): the per-example
-            # projected gradient in the KFE is (s_kfe_n (x) h_kfe_n); its squared entries, averaged
-            # over the batch, are exactly (s_kfe_n_i)^2 * (h_kfe_n_j)^2 averaged over n.
-            g2 = (s_kfe.t() ** 2) @ (h_kfe**2) / h_bar.size(0)
+            if x_hat is not None:
+                # norm_exact_rescaling: the normalisation layer's exact per-row gradient
+                # [delta * x_hat, delta], not the input factor's surrogate [z * delta, delta].
+                g2 = norm_exact_kfe_squares(x_hat, s_flat, self._Q_B[module], self._Q_A[module])
+            else:
+                h_kfe = h_bar @ self._Q_A[module]
+                s_kfe = s_flat @ self._Q_B[module]
+                # Intra-batch estimate of s* (Algorithm 1's COMPUTE SCALINGS step): the per-example
+                # projected gradient in the KFE is (s_kfe_n (x) h_kfe_n); its squared entries,
+                # averaged over the batch, are exactly (s_kfe_n_i)^2 * (h_kfe_n_j)^2 averaged over n.
+                g2 = (s_kfe.t() ** 2) @ (h_kfe**2) / h_bar.size(0)
             if self.ema_seed_first and module not in self._s_star_observed:
                 # refresh() had to put *something* in s*, because precondition() reads it on the
                 # very step the eigenbasis is created, before any gradient has been projected into
@@ -185,14 +228,46 @@ class EKFACApproximation(FisherApproximation):
             return None
         return self._A[module].size(0) * self._B[module].size(0)
 
+    @property
+    def consumes_bias_corrected_momentum(self) -> bool:
+        """True under ``rescale_form="clip"``: the optimizer then hands ``precondition`` the
+        bias-corrected momentum and applies the result as it is. See
+        :mod:`adafisher_modes.approximations._rescale_utils`."""
+        return self._clip is not None
+
+    @property
+    def _clip_stats(self) -> Dict[Module, Dict[str, Tensor]]:
+        """Per-module diagnostics of the clip at its last step, computed on access (empty for the
+        other forms)."""
+        return {} if self._clip is None else self._clip.stats
+
+    def begin_step(self, step: int) -> None:
+        if self._clip is not None:
+            self._clip.begin_step(step)
+
+    def _rescale(self, M_kfe: Tensor, module: Module) -> Tensor:
+        """The division by ``s*`` inside the eigenbasis, in the form ``rescale_form`` selects."""
+        if self._clip is not None:
+            return self._clip.apply(module, M_kfe, self._s_star[module])
+        return rescale(M_kfe, self._s_star[module], self.lambda_for(module), self.rescale_form)
+
     def f_tilde(self, module: Module) -> Tensor:
         """Dense ``(d_out * d_in_aug)^2`` reconstruction of
-        ``F~ = kron(Q_B, Q_A) diag(s* + lambda) kron(Q_B, Q_A)^T``: output factor outer, input
+        ``F~ = kron(Q_B, Q_A) diag(s* + lambda) kron(Q_B, Q_A)^T`` (``diag(max(s*, lambda))`` under
+        ``rescale_form="floor"``): output factor outer, input
         factor inner, matching ``s*``'s own row-major flattening. Built from the current eigenbasis
         and ``s*``. For tests and debugging only -- ``precondition`` never forms this matrix.
         """
         Q_A, Q_B = self._Q_A[module], self._Q_B[module]
-        scale = (self._s_star[module] + self.lambda_for(module)).flatten()
+        if self.rescale_form == "clip":
+            raise NotImplementedError(
+                "rescale_form='clip' is not a linear operator: the coordinates whose undamped "
+                "step exceeds the threshold are clipped, so there is no matrix to reconstruct"
+            )
+        if self.rescale_form == "floor":
+            scale = floored(self._s_star[module], self.lambda_for(module)).flatten()
+        else:
+            scale = (self._s_star[module] + self.lambda_for(module)).flatten()
         Q = kron(Q_B, Q_A)
         return Q @ diag(scale) @ Q.t()
 
@@ -206,10 +281,10 @@ class EKFACApproximation(FisherApproximation):
         bias_shape = None if bias_direction is None else bias_direction.shape
         if self.conv_sua and isinstance(module, Conv2d):
             M = augment_conv2d_direction_sua(weight_direction, bias_direction)
-            M_kfe = (Q_B.t() @ M @ Q_A) / (self._s_star[module] + self.lambda_for(module))
+            M_kfe = self._rescale(Q_B.t() @ M @ Q_A, module)
             direction = Q_B @ M_kfe @ Q_A.t()
             return split_conv2d_direction_sua(direction, weight_direction.shape, bias_shape)
         M = augment_direction(weight_direction, bias_direction)
-        M_kfe = (Q_B.t() @ M @ Q_A) / (self._s_star[module] + self.lambda_for(module))
+        M_kfe = self._rescale(Q_B.t() @ M @ Q_A, module)
         direction = Q_B @ M_kfe @ Q_A.t()
         return split_direction(direction, weight_direction.shape, bias_shape)
