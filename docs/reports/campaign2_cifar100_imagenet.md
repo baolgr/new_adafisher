@@ -1,8 +1,8 @@
 # Campaign 2: CIFAR-100, ImageNet, and the two large CIFAR-10 models re-run
 
-*The results of the training jobs that ran on 20 September 2026, read in one place. Plain language
-throughout. Every number here was measured on the cluster, unless it is labelled otherwise. Every
-result rests on **one seed** (seed 0), and every section says what that allows.*
+*The results of the training jobs that ran on 20 and 21 September 2026, read in one place. Plain
+language throughout. Every number here was measured on the cluster, unless it is labelled otherwise.
+Every result rests on **one seed** (seed 0), and every section says what that allows.*
 
 ---
 
@@ -11,41 +11,38 @@ result rests on **one seed** (seed 0), and every section says what that allows.*
 We trained six image classifiers on CIFAR-100 and six on ImageNet. We also re-ran the two large
 CIFAR-10 models, whose first run had been made before two protocol fixes. Each benchmark has seven
 arms: the five Fisher modes (`diag`, `kfac`, `ekfac`, `tkfac`, `tekfac`) plus `adam` and `adamw`.
-Every arm gets the same wall-clock time. That makes 13 complete benchmarks and 91 arms. A 14th
-benchmark, ViT-S/16 on ImageNet at 224 px, has only its reference arm so far; its other six arms are
-still running.
+Every arm gets the same wall-clock time. That makes 14 benchmarks and 98 arms, all complete.
 
-1. **The data is sound.** Over 7.4 million recorded steps there is not one non-finite loss. The
+1. **The data is sound.** Over 8.4 million recorded steps there is not one non-finite loss. The
    clock never runs backwards. No arm overshoots its time budget by more than 0.35 s, which is less
    than one of its own steps.
-2. **The Fisher modes beat the better of the two Adam baselines on 9 of the 13 benchmarks.** The
+2. **The Fisher modes beat the better of the two Adam baselines on 9 of the 14 benchmarks.** The
    margins run from +0.7 to +21.0 points of best validation accuracy. The largest single result is
    CCT on CIFAR-100: 55.8% against 34.8%.
-3. **They lose on 4 benchmarks, and the losses have a pattern.** ViT-S loses to `adamw` on CIFAR-10
-   (−4.1 points) and on CIFAR-100 (−4.7). Two of the four small networks trained on ImageNet
-   downsampled to 32x32 also lose: the small GroupNorm CNN (−5.7) and ResNet-20 (−1.5). The last
-   one is inside the seed-to-seed noise; the other three are not.
+3. **They lose on 5 benchmarks, and the losses have a pattern.** ViT-S loses to `adamw` on all three
+   datasets: CIFAR-10 (−4.1 points), CIFAR-100 (−4.7) and ImageNet at 224 px (−6.8). Two of the four
+   small networks trained on ImageNet downsampled to 32x32 also lose: the small GroupNorm CNN (−5.7)
+   and ResNet-20 (−1.5). The last one is inside the seed-to-seed noise; the other four are not.
 4. **ResNet-50 trained on ImageNet at 224 px for 30 epochs reaches 74.2% on the official ILSVRC
    validation set with `diag`, against 70.9% for `adamw` and 65.0% for `adam`.** The gap between
    `diag` and `adam` is +9.25 points. The AdaFisher paper reports +9.17 for the same pair, after 90
    epochs rather than 30 (Table 3). The two protocols differ, so this is context and not a
    reproduction. But the size of the gap comes back.
 5. **The five modes split into the same two groups as in the seed table.** `{diag, kfac, tkfac}`
-   rank ahead of `{ekfac, tekfac}` in 66 of the 78 possible cross-group comparisons. `tkfac` beats
-   `tekfac` on 13 benchmarks out of 13. The two losing modes are again the two that fit the fewest
-   steps into the same time: 0.87 to 0.88 of `diag`'s count, on average, against 0.94 to 0.96
-   for the others.
+   rank ahead of `{ekfac, tekfac}` in 72 of the 84 possible cross-group comparisons. `tkfac` beats
+   `tekfac` on 14 benchmarks out of 14. The two losing modes are again the two that fit the fewest
+   steps into the same time: 0.88 of `diag`'s count, on average, against 0.95 to 0.96 for the
+   others.
 6. **The learning-rate schedule fix did what it was predicted to do on ResNet-50/CIFAR-10.** Before
    the fix, `ekfac` and `tekfac` were cut off mid-way down the cosine and read 90.0% and 90.8%.
    After it they read 94.1% and 93.8%, that is +4.1 and +3.1 points. The spread between the five
    modes on that model shrank from 3.9 points to 0.5.
 7. **Between the two Adam baselines, `adam` collapses where the weight decay is large.** On the
    three architectures run with weight decay 0.01 (the two ViTs and CCT), `adam` trails `adamw` by
-   3.8 to 26.7 points. On ImageNet it reaches only 0.8% on the micro ViT, where guessing gives 0.1%.
-   `adam` adds the
-   weight decay to the gradient, and `adamw` applies it separately. That this causes the collapse
-   is a likely explanation, but it has not been tested. It does mean `adamw` is the baseline to
-   compare against on those benchmarks.
+   3.8 to 53.5 points. On ImageNet it reaches only 0.8% on the micro ViT, where guessing gives 0.1%,
+   and 6.3% on ViT-S against 59.7% for `adamw`. `adam` adds the weight decay to the gradient, and
+   `adamw` applies it separately. That this causes the collapse is a likely explanation, but it has
+   not been tested. It does mean `adamw` is the baseline to compare against on those benchmarks.
 
 **What this campaign does not say.** All seven arms run at their default settings, including the
 default safety constant `λ` (the number added to every curvature value before dividing by it).
@@ -109,11 +106,11 @@ runs with `fisher_batch_samples=32`. The batch size is 128 on CIFAR and 256 on I
 | | `resnet20_imagenet` | 334 072 | 40 | 21450216 | 14:00:24 | 23:00 |
 | | `cct_2_3x2_imagenet` | 411 433 | 40 | 21450217 | 9:16:57 | 23:00 |
 | ImageNet-1K, 224 px | `resnet50_imagenet` | 25 557 032 | 30 | 21450222 (`diag`), 21468627-32 | 6:24:54, then 6:23:40 to 6:24:50 per arm | 12:00 each |
-| | `vit_small_imagenet` | 22 050 664 | 30 | 21450223 (`diag`), 21496658-63 **running** | 9:29:17 for `diag` | 12:00 each |
+| | `vit_small_imagenet` | 22 050 664 | 30 | 21450223 (`diag`), 21496658-63 | 9:29:17, then 9:28:30 to 9:29:26 per arm | 12:00 each |
 
 Each grouped job runs all seven arms one after the other. The two 224 px models run one arm per job:
 the `diag` job measures the budget, then `dispatch_arms` submits the six others with that budget
-(21450224 for ResNet-50 and 21496598 for ViT-S).
+(21450224 for ResNet-50 and 21496598 for ViT-S). The six ViT-S arms ran overnight, 20-21 September.
 
 **The four "ImageNet32" benchmarks are not ImageNet-1K.** They train on the full 1.28 M ImageNet
 images squashed to 32x32 (Chrabaszcz et al. 2017, arXiv:1707.08819 §2), so that the four
@@ -124,7 +121,7 @@ them.
 
 ## 2. Is the data sound?
 
-Checked mechanically, on every recorded step of every arm (7 403 836 steps):
+Checked mechanically, on every recorded step of every arm (8 416 589 steps):
 
 - **Zero non-finite losses.**
 - **Zero backwards steps of the clock**: within each arm the elapsed time only increases.
@@ -133,7 +130,7 @@ Checked mechanically, on every recorded step of every arm (7 403 836 steps):
   single step, which is the bound the training loop guarantees.
 - **The data pipeline is not the bottleneck on ImageNet.** The "compute share" column (the fraction
   of an arm's time spent in its forward, backward and optimizer step) is 92.5% to 99.0% on all 35
-  ImageNet32 arms and 97.3% to 97.8% on the seven ResNet-50 arms. The job headers had estimated the
+  ImageNet32 arms and 97.3% to 98.5% on the fourteen arms at 224 px. The job headers had estimated the
   ImageNet32 jobs as "data-loader bound" at about 2 h per arm. They measured 21 and 26 min per arm
   for the two smallest networks (the job's elapsed time divided by 7).
 
@@ -159,7 +156,7 @@ best" the better of `adam` and `adamw`. The last column is the same comparison o
 | `resnet20_imagenet` (32 px) | 26.24 | 26.51 | 26.17 | 26.48 | 26.27 | 26.73 | **28.04** | −1.54 | −1.35 |
 | `cct_2_3x2_imagenet` (32 px) | 26.83 | 26.53 | 26.64 | **27.08** | 26.81 | 3.63 | 23.58 | **+3.51** | +2.99 |
 | `resnet50_imagenet` (224 px) | **77.56** | 77.28 | 76.87 | 77.14 | 76.96 | 68.22 | 74.29 | **+3.28** | +3.52 |
-| `vit_small_imagenet` (224 px) | 52.98 | — | — | — | — | — | — | *pending* | |
+| `vit_small_imagenet` (224 px) | 52.98 | 52.70 | 52.01 | 52.76 | 52.07 | 6.27 | **59.74** | **−6.77** | −6.57 |
 
 In bold, in the accuracy columns: the best of the seven arms. In bold, in the margin column: margins
 larger than 2.4 points, the largest seed-to-seed spread this project has measured (`vit_micro_cifar`,
@@ -174,10 +171,12 @@ beats the better baseline, by +2.6 to +18.5 points.
 `cnn_gn_cifar100`, `resnet50_cifar`, `vit_micro_imagenet` and `resnet20_imagenet`. One seed cannot
 say who wins there.
 
-**Where the Fisher modes lose clearly.** Three benchmarks.
+**Where the Fisher modes lose clearly.** Four benchmarks.
 
-- **ViT-S on CIFAR-10 and CIFAR-100**, both times against `adamw`, both by about 4 to 5 points.
-  This is the one architecture where the loss repeats across datasets. It is also a new pattern: on
+- **ViT-S on CIFAR-10, CIFAR-100 and ImageNet at 224 px**, every time against `adamw`, by 4.1, 4.7
+  and 6.8 points. This is the one architecture where the loss repeats across datasets, and it grows
+  with the dataset: on ImageNet `adamw` is ahead by 6.6 points on the official validation set too
+  (56.23% against 49.66%). It is also a new pattern: on
   the six classification models of the seed table, the Fisher modes beat the better baseline in 34
   of 35 (mode, seed) cells (`CLAUDE.md`, "The seed axis completed"). The micro ViT, which shares
   ViT-S's code and its hyperparameters, wins by +9.2 on CIFAR-100. What differs between the two is
@@ -205,6 +204,7 @@ Where the weight decay is 0.01, `adam` and `adamw` are not two equally good base
 | benchmark | weight decay | `adam` | `adamw` | `adam − adamw` |
 |---|---|---|---|---|
 | `vit_small_cifar` | 0.01 | 45.66 | 71.78 | **−26.12** |
+| `vit_small_imagenet` | 0.01 | 6.27 | 59.74 | **−53.47** |
 | `vit_small_cifar100` | 0.01 | 18.76 | 45.48 | **−26.72** |
 | `cct_2_3x2_imagenet` | 0.01 | 3.63 | 23.58 | **−19.94** |
 | `cct_2_3x2_cifar100` | 0.01 | 24.28 | 34.80 | **−10.52** |
@@ -219,8 +219,8 @@ gradient before Adam divides by its running scale. `adamw` applies it to the wei
 (`benchmarks/common/optimizers.py:138-143`). The gap is large on every benchmark with the larger
 weight decay. That is consistent with this difference being the cause, but no run has changed the
 weight decay alone, so it is not established. It also means the ViT and CCT rows of section 3 must
-be read against `adamw`. That is what "baseline best" does: `adamw` is the better of the two on 12
-benchmarks of 13, the exception being `resnet20_cifar100` (`adam` ahead by 3.7).
+be read against `adamw`. That is what "baseline best" does: `adamw` is the better of the two on 13
+benchmarks of 14, the exception being `resnet20_cifar100` (`adam` ahead by 3.7).
 
 ---
 
@@ -228,32 +228,32 @@ benchmarks of 13, the exception being `resnet20_cifar100` (`adam` ahead by 3.7).
 
 The seed table found, over 24 paired cells on CIFAR-10 and MNIST, that `{diag, kfac, tkfac}` beat
 `{ekfac, tekfac}`, and that the two losing modes are the two that fit the fewest steps into the same
-time. The 13 benchmarks here are a new sample: different datasets, one seed each, with all arms of
+time. The 14 benchmarks here are a new sample: different datasets, one seed each, with all arms of
 one benchmark sharing their initialisation and data order.
 
 **The ranking replicates.** Mean rank among the five modes, by best validation accuracy (1 is best):
 
-| mode | mean rank here (13 benchmarks) | mean rank in the seed table (24 cells) | in the bottom two here |
+| mode | mean rank here (14 benchmarks) | mean rank in the seed table (24 cells) | in the bottom two here |
 |---|---|---|---|
-| `kfac` | **2.15** | 2.08 | 2 / 13 |
-| `tkfac` | **2.31** | 2.42 | 1 / 13 |
-| `diag` | **2.46** | 2.42 | 5 / 13 |
-| `ekfac` | 3.77 | 4.17 | 9 / 13 |
-| `tekfac` | 4.31 | 3.92 | 9 / 13 |
+| `kfac` | **2.21** | 2.08 | 2 / 14 |
+| `tkfac` | **2.29** | 2.42 | 1 / 14 |
+| `diag` | **2.36** | 2.42 | 5 / 14 |
+| `ekfac` | 3.86 | 4.17 | 10 / 14 |
+| `tekfac` | 4.29 | 3.92 | 10 / 14 |
 
-Of the 78 possible comparisons between a mode of the first group and a mode of the second,
-**66 go to the first group** (85%). Head to head, with an exact two-sided sign test over the 13
-benchmarks: `tkfac > tekfac` **13/13** (p = 2.4e-4); `kfac > ekfac`, `kfac > tekfac` and
-`tkfac > ekfac` 11/13 each (p = 0.023); `diag > ekfac` and `diag > tekfac` 10/13 (p = 0.09). Inside
-the first group no pair separates (`diag` vs `kfac` 7/13, `kfac` vs `tkfac` 9/13). Inside the
-second neither (`ekfac` vs `tekfac` 9/13).
+Of the 84 possible comparisons between a mode of the first group and a mode of the second,
+**72 go to the first group** (86%). Head to head, with an exact two-sided sign test over the 14
+benchmarks: `tkfac > tekfac` **14/14** (p = 1.2e-4); `kfac > ekfac`, `kfac > tekfac` and
+`tkfac > ekfac` 12/14 each (p = 0.013); `diag > ekfac` and `diag > tekfac` 11/14 (p = 0.057). Inside
+the first group no pair separates (`diag` vs `kfac` 8/14, `kfac` vs `tkfac` 9/14). Inside the
+second neither (`ekfac` vs `tekfac` 9/14).
 
 **The mechanism is the same one.** Steps completed inside the same time budget, relative to `diag`,
-averaged over the 13 benchmarks:
+averaged over the 14 benchmarks:
 
 | `diag` | `kfac` | `tkfac` | `ekfac` | `tekfac` | `adam` | `adamw` |
 |---|---|---|---|---|---|---|
-| 1.00 | 0.96 | 0.94 | **0.88** | **0.87** | 1.11 | 1.12 |
+| 1.00 | 0.96 | 0.95 | **0.88** | **0.88** | 1.11 | 1.11 |
 
 The largest deficits are on the two ResNet-50 CIFAR benchmarks, where `ekfac` and `tekfac` complete
 0.76 of `diag`'s steps: 38 epochs against 45 for `kfac`/`tkfac` and 50 for `diag`. This is the cost
@@ -261,7 +261,7 @@ of projecting every step into and out of an eigenbasis (`plan_lot7.md` §6).
 
 **Why the correlation between steps and accuracy now means something.** Across the four budgeted
 Fisher arms of a benchmark, the number of epochs completed correlates with best validation accuracy
-at +0.56 to +0.98 on 11 of the 13 benchmarks. In campaign 1 a similar correlation (+0.92 to +0.98,
+at +0.56 to +0.99 on 12 of the 14 benchmarks. In campaign 1 a similar correlation (+0.92 to +0.98,
 over all five Fisher arms) could not be read, because an expensive arm also stopped earlier on its cosine and so trained at a
 higher final learning rate. Here every arm finishes its own cosine, so that confound is gone.
 What remains is the number of steps. Two caveats: with four or five points per benchmark, this
@@ -344,7 +344,7 @@ on the official set.
 - **One seed.** The seed-to-seed spread measured in this project runs from 0.04 points
   (`cnn_gn_cifar`, `resnet20_cifar`, at batch 128) to 2.4 points (`vit_micro_cifar`, E13). No
   per-benchmark difference under about 2.4 points in section 3 is a finding. The two-group result
-  of section 5 does not depend on this, because it pools 13 benchmarks.
+  of section 5 does not depend on this, because it pools 14 benchmarks.
 - **The default `λ`.** At `λ = 1e-3` or `3e-3`, the preconditioner the optimizer actually divides by
   is within about 10% of a multiple of the identity (`plan_exp_lot5.md` §6, on four regime-A
   networks). And the E-series of `plan_lambda_dominance.md` gains 5 to 10 points on
@@ -356,9 +356,6 @@ on the official set.
 - **Untuned baselines.** `adam`/`adamw` run at one learning rate per family (1e-3 on CNNs, 1e-4 on
   transformers), fixed in each benchmark's `HParams`. They were not swept here.
 - **ImageNet32 is not ImageNet-1K** (section 1.3).
-- **ViT-S at 224 px** is not in yet. Its reference arm reads 52.98% validation and 49.66% on the
-  official set after 30 epochs. The six other arms were submitted at 23:52 on 20 September, with the
-  same 33 535 s budget each.
 
 ---
 

@@ -207,8 +207,7 @@ root on `v^(t)` — is **identical across the five modes**.
 > the superseded/duplicated result trees moved to `benchmarks/archives/` so `outputs/<model>/`
 > holds exactly one report plus one checkpoint-only directory per arm.
 
-> **CIFAR-100 and ImageNet-1K: done — campaign 2 has run 13 of 14 benchmarks; ViT-S/16 at 224 px
-> is still running.** Results in `docs/reports/campaign2_cifar100_imagenet.md`, summarised at the end
+> **CIFAR-100 and ImageNet-1K: done — campaign 2 has run all 14 benchmarks.** Results in `docs/reports/campaign2_cifar100_imagenet.md`, summarised at the end
 > of this block. The six
 > image-classification architectures (`cnn_gn`, `vit_micro`, `resnet20`, `cct_2_3x2`, `resnet50`,
 > `vit_small`) now exist on three datasets instead of one: **12 new `benchmarks/<model>/` folders**
@@ -254,38 +253,64 @@ root on `v^(t)` — is **identical across the five modes**.
 > (job 21447397, `stage_imagenet_tmpdir`, 26 min), and `benchmarks/slurm/imagenet/README.md` is still
 > the file to read before submitting anything there.
 >
-> **Campaign 2, run on 20 September 2026 (one seed, seed 0; `docs/reports/campaign2_cifar100_imagenet.md`).**
-> Six CIFAR-100 benchmarks, the four ImageNet32 ones, ResNet-50 on ImageNet at 224 px, and a re-run of
+> **Campaign 2, run on 20-21 September 2026 (one seed, seed 0; `docs/reports/campaign2_cifar100_imagenet.md`).**
+> Six CIFAR-100 benchmarks, the four ImageNet32 ones, ResNet-50 and ViT-S/16 on ImageNet at 224 px, and a re-run of
 > `resnet50_cifar`/`vit_small_cifar` under the fixed protocol (they had been run before the
-> checkpoint and schedule fixes). All jobs `COMPLETED`; 7.4 M recorded steps, **zero** non-finite
-> losses, every budget respected within `+0.35 s`. `vit_small_imagenet` has only its `diag` arm
-> (52.98% val, 49.66% on the ILSVRC val set, 30 epochs); jobs 21496658-63 run the other six.
+> checkpoint and schedule fixes). All jobs `COMPLETED`; 8.4 M recorded steps, **zero** non-finite
+> losses, every budget respected within `+0.35 s`.
 > Five things to carry:
-> 1. **The Fisher modes beat the better of `adam`/`adamw` clearly on 6 of 13 benchmarks** (+3.3 to
+> 1. **The Fisher modes beat the better of `adam`/`adamw` clearly on 6 of 14 benchmarks** (+3.3 to
 >    **+21.0** points, CCT on CIFAR-100: 55.8% against 34.8%), sit inside the one-seed noise on 4,
->    and **lose clearly on 3**: ViT-S against `adamw` on CIFAR-10 (−4.1) and CIFAR-100 (−4.7), and
->    `cnn_gn` on ImageNet32 (−5.7, all arms at 6-12%). ViT-S is the one architecture where the loss
->    repeats across datasets; the micro ViT, same code and hyperparameters, wins by +9.2.
+>    and **lose clearly on 4**: ViT-S against `adamw` on all three datasets (CIFAR-10 −4.1,
+>    CIFAR-100 −4.7, ImageNet 224 px −6.8: 52.98% against 59.74%), and `cnn_gn` on ImageNet32 (−5.7,
+>    all arms at 6-12%). ViT-S is the one architecture where the loss repeats across datasets; the
+>    micro ViT, same code and hyperparameters, wins by +9.2 on CIFAR-100.
 > 2. **ResNet-50, ImageNet-1K, 30 epochs: `diag` 74.24% on the ILSVRC val set**, `kfac` 74.45,
 >    `adamw` 70.93, `adam` 64.99. The `diag − adam` gap is **+9.25**, against **+9.17** in the
 >    AdaFisher paper's Table 3 at 90 epochs. Different protocols, so context, not a reproduction.
-> 3. **The two groups of the seed table replicate on 13 new benchmarks**: `{diag, kfac, tkfac}`
->    ahead of `{ekfac, tekfac}` in 66 of 78 cross-group pairs, `tkfac > tekfac` 13/13; mean ranks
->    `kfac` 2.15, `tkfac` 2.31, `diag` 2.46, `ekfac` 3.77, `tekfac` 4.31. Same mechanism: steps
->    completed in the same budget, relative to `diag`, are 0.96 / 0.94 / 0.88 / 0.87.
+> 3. **The two groups of the seed table replicate on 14 new benchmarks**: `{diag, kfac, tkfac}`
+>    ahead of `{ekfac, tekfac}` in 72 of 84 cross-group pairs, `tkfac > tekfac` 14/14; mean ranks
+>    `kfac` 2.21, `tkfac` 2.29, `diag` 2.36, `ekfac` 3.86, `tekfac` 4.29. Same mechanism: steps
+>    completed in the same budget, relative to `diag`, are 0.96 / 0.95 / 0.88 / 0.88.
 > 4. **The schedule fix is measured on `resnet50_cifar`**: `ekfac` 90.04 -> 94.12 and `tekfac`
 >    90.76 -> 93.84 once they complete their cosine; the spread between the five modes goes from
 >    3.88 to 0.50 points. `diag`, unbudgeted, reproduces to the digit (93.94, and 67.68 on ViT-S).
 > 5. **`adam` collapses wherever the weight decay is 0.01** (the ViTs and CCT): 3.8 to 26.7 points
->    behind `adamw`, 0.82% on `vit_micro_imagenet`. `adam` is `torch.optim.Adam(weight_decay=...)`,
+>    behind `adamw` (up to 53.5 on `vit_small_imagenet`), 0.82% on `vit_micro_imagenet`. `adam` is `torch.optim.Adam(weight_decay=...)`,
 >    i.e. decay added to the gradient; that this is the cause is likely and **untested**. Compare
 >    those benchmarks against `adamw`.
+> 6. **The Fisher arms gain most of their accuracy while the learning rate anneals, and `adamw`
+>    does not.** Measured on every local result tree of campaign 2 and the CIFAR-10 runs (20 trees,
+>    seed 0): the best validation accuracy each arm adds during the **last 25 % of its own run**.
+>    In **19 of 20** trees every one of the five Fisher modes gains more than `adamw`; the one
+>    exception is `cnn_gn_cifar100` (Fisher +0.54 at least, `adamw` +0.86). The gap is largest on the
+>    ResNets: `resnet20_imagenet` Fisher **+7.0 to +9.4** points against `adamw` +0.4,
+>    `resnet50_imagenet` **+5.4 to +8.4** against +0.6, `resnet50_cifar100` +4.8 to +8.1 against +0.7.
+>    On ResNet-50 at 224 px, `adamw` leads for most of the run (52.6 % against 38-42 % at a tenth of
+>    it) and the Fisher arms overtake it only at the end, finishing with a *higher* training loss
+>    (1.09 against 0.91) and a *higher* validation accuracy. **One reading, not tested:** this is
+>    what large-step momentum SGD does — noisy while the learning rate is high, converging as it
+>    decays, generalising better than Adam on a ResNet and worse on a ViT. It is the reading
+>    `plan_lambda_dominance.md` §1.1 predicts: once `lam` dominates the curvature the update is
+>    `lr/lam` times the momentum. Converted to `torch.optim.SGD(momentum=0.9)`, whose buffer *sums*
+>    gradients where AdaFisher's *averages* them, that is a learning rate of
+>    **`(lr/lam)(1 - beta) = 0.1`** at `lam = 1e-3` — the textbook ResNet-on-ImageNet value — and
+>    **0.033** at `lam = 3e-3` (the ViT/CCT benches). Two reasons it is only a reading: `lam`
+>    dominance was measured on the regime-A models only, and ResNet-50 here also runs SUA and
+>    `fisher_batch_samples=32`. **The test that settles it:** an SGD-momentum arm at that learning
+>    rate, on the cheap 32 px benches first. If it tracks the Fisher arms, these results measure
+>    SGD, not curvature. A curvature-free stand-in already exists for six small networks
+>    (`plan_lambda_dominance.md` E0, `fisher_ref/outputs/warmup_sgd_baseline_small.json`); none has
+>    been run at this scale. An alternative the gains alone do not exclude: an arm that is further
+>    from its plateau at 75 % simply has more left to gain.
 > All of it is at the **shipped** `lam` (1e-3 or 3e-3), where lot 5 measured the applied
 > preconditioner to be almost a multiple of the identity: it says how these optimizers do as
 > shipped, not what curvature buys. The ImageNet `--time` values in `generate_jobs.py` were
 > estimates and are now measured with wide margins (e.g. 2:32 against 16:00 for `cnn_gn_imagenet`,
 > 14:00 against 23:00 for `resnet20_imagenet`, 9:29 against 12:00 for `vit_small_imagenet/diag`, the
-> tightest); they have not been changed yet.
+> tightest); they have not been changed yet. Local copy: the whole `outputs/imagenet/` tree, **including its 210
+> checkpoints** (7.8 GB, 390 files), was pulled on 2026-09-21 and checked byte-for-byte against the
+> cluster.
 
 > **Fisher-drift campaign, plan v1 + lot 0: done.** `docs/reports/plan_exp_draft.md` is now **the**
 > campaign plan: `plan_exp_draft_v0.md` (the original French draft, kept verbatim) adapted to what
@@ -1757,7 +1782,7 @@ scale, and independently at each of the `k_h·k_w` kernel offsets (`plan_lot6.md
 | Fisher-drift campaign (step 1) | `mlp_ln_mnist` (A1, 26 634), `cnn_gn_cifar` (A2, 24 458), `vit_micro_cifar` (A3, 21 098), `resnet20_cifar` (B2, 269 722), `cct_2_3x2_cifar` (B1, 283 723) | `plan_exp_draft.md` §4's five new models, each on the shared harness with all 7 arms and `--checkpoints`. Implemented and smoke-tested; **no convergence run yet** |
 
 | CIFAR-100 (new) | the six image-classification architectures with `num_classes=100`: `cnn_gn_cifar100` (30 308), `vit_micro_cifar100` (24 068), `resnet20_cifar100` (275 572), `cct_2_3x2_cifar100` (295 333), `resnet50_cifar100` (23 705 252), `vit_small_cifar100` (2 710 948) | same protocol, same hyperparameters, same 7 arms as CIFAR-10. **Run in campaign 2**, one seed (`docs/reports/campaign2_cifar100_imagenet.md`) |
-| ImageNet-1K (new) | `resnet50_imagenet` (25 557 032) and `vit_small_imagenet` (22 050 664) at the native **224 px**; `cnn_gn_imagenet` (88 808), `vit_micro_imagenet` (53 768), `resnet20_imagenet` (334 072), `cct_2_3x2_imagenet` (411 433) on **downsampled ImageNet32** | AdaFisher's own ImageNet transforms; 7 arms each. Dataset staged; **run in campaign 2**, one seed, except `vit_small_imagenet`'s six budgeted arms (running) — `docs/reports/campaign2_cifar100_imagenet.md` |
+| ImageNet-1K (new) | `resnet50_imagenet` (25 557 032) and `vit_small_imagenet` (22 050 664) at the native **224 px**; `cnn_gn_imagenet` (88 808), `vit_micro_imagenet` (53 768), `resnet20_imagenet` (334 072), `cct_2_3x2_imagenet` (411 433) on **downsampled ImageNet32** | AdaFisher's own ImageNet transforms; 7 arms each. Dataset staged; **run in campaign 2**, one seed — `docs/reports/campaign2_cifar100_imagenet.md` |
 
 The workspace contains no pre-existing classification bench: `FisherAdapTune` only ships crack
 segmentation (SAM2 / SegFormer) and a synthetic example.
