@@ -1928,7 +1928,28 @@ and E16's own baseline** (`plan_floor_clip.md` §11).
   `h100_1g.10gb` slice, E14's own hardware, plus 30 CPU merges. Projected at 22, 49 and 58 min per
   shard on the three networks, against 2 to 5 hours per job before.
 
-The rest of this section is the thrice-amended pre-registration.
+**Fourth amendment, 2026-09-21: two ResNets, exploratory** (`plan_floor_clip.md` §12). This was
+written after one test job on `cnn_gn_cifar` (seed 0, `ekfac`, all its cells read) and before any
+ResNet run. The question is whether the clip is robust to a residual network with a BatchNorm after
+every convolution, where `λ` barely matters.
+- **`resnet20_cifar`:** E16's full design, five seeds. Its `λ` grid is 1e-10 to 1e-12, centred on
+  E14's optimum (1e-11).
+- **`resnet50_cifar`:** first a calibration. That is an `add` scan at seed 0 over 1e-8 to 3e-13 in
+  both modes, plus a timing of each clip arm (wall time only). The rule fixed now takes as grid the
+  five lattice values centred on the geometric mean of the two modes' best validation `λ`. Then a
+  reduced design: seeds 0-2, `add` on that grid, and the three clip arms at q in {0.95, 0.7, 0.3}.
+  The benchmark's `fisher_batch_samples=32` becomes `None`, which caps nothing at batch 32;
+  `conv_sua` stays on.
+- **How they are read:** rules 1-2 per (network, mode). A clip arm is **robust** on a network if it
+  loses to add in neither mode, **not robust** if it loses in one, and **incomplete** otherwise.
+  Whether the voting networks' transferable q lies in the network's own plateau is reported.
+- **What they do not do:** they vote in none of rules 0-6 and feed nothing to E17. A defect in their
+  files is listed apart and does not invalidate the voting verdicts. They need one commit per
+  network, not the voting networks' commit, since pairing never crosses networks.
+- **Prediction:** the clip arms tie with add on ResNet-20.
+
+The rest of this section is the pre-registration as amended three times; the fourth amendment adds
+networks and changes none of it.
 
 Written **before** any cluster run. The code, its tests and the driver exist (they are what makes
 the rules below checkable); nothing has been submitted. The full specification, the code changes

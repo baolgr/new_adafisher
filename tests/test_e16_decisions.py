@@ -50,10 +50,11 @@ def _acc(family: str, value: float, seed: int, planted: dict, grid: list) -> flo
     return 0.60 + NOISE[seed] + planted.get(family, 0.0) - penalty + jitter
 
 
-def _write(tmp: Path, planted: dict, mutate=None) -> None:
+def _write(tmp: Path, planted: dict, mutate=None, models=MODELS, planted_by_model=None) -> None:
     exact = {"norm_exact_rescaling": True}
-    for model in MODELS:
+    for model in models:
         lam_grid = LAMBDA_GRID[model]
+        model_planted = (planted_by_model or {}).get(model, planted)
         for seed in SEEDS:
             for mode in MODES:
                 cells = {}
@@ -64,21 +65,21 @@ def _write(tmp: Path, planted: dict, mutate=None) -> None:
                         overrides=overrides)
 
                 for v in lam_grid:
-                    put("add", v, _acc("add", v, seed, planted, lam_grid), dict(exact))
-                    put("floor", v, _acc("floor", v, seed, planted, lam_grid),
+                    put("add", v, _acc("add", v, seed, model_planted, lam_grid), dict(exact))
+                    put("floor", v, _acc("floor", v, seed, model_planted, lam_grid),
                         {"rescale_form": "floor", **exact})
                 for arm in CLIP_ARMS:
                     fixed = arm == "clipfixed"
                     for q in CLIP_GRID:
                         extra = ({"log": [{"step": 21000, "layers": {"head": {"calibrated": 1.0}}}]}
                                  if fixed else {})
-                        put(arm, q, _acc(arm, q, seed, planted, CLIP_GRID),
+                        put(arm, q, _acc(arm, q, seed, model_planted, CLIP_GRID),
                             {"rescale_form": "clip", "clip_threshold":
                              {"clipema": "ema", "clip": "quantile", "clipfixed": "fixed"}[arm],
                              **exact}, **extra)
                 for f in CLIPLR_FACTORS:
-                    acc = (_acc("clipema", 0.7, seed, planted, CLIP_GRID)
-                           + planted.get("cliplr", 0.0) + 0.0003 * seed)
+                    acc = (_acc("clipema", 0.7, seed, model_planted, CLIP_GRID)
+                           + model_planted.get("cliplr", 0.0) + 0.0003 * seed)
                     put("cliplr", f, acc, {"rescale_form": "clip", "clip_threshold": "ema",
                                            **exact})
                 checks = {}
@@ -170,3 +171,48 @@ def test_the_lr_control_qualifies_the_main_arm(tmp_path: Path) -> None:
     assert res.returncode == 0, res.stdout + res.stderr
     report = json.loads((tmp_path / "decisions.json").read_text())
     assert "LIMITED BY LR" in report["verdict_clipema"]
+
+
+EXTRA = "resnet20_cifar"
+
+
+def test_an_exploratory_network_without_files_is_reported_not_run(tmp_path: Path) -> None:
+    _write(tmp_path, planted={"clipema": 0.02})
+    res = _run(tmp_path)
+    assert res.returncode == 0, res.stdout + res.stderr
+    report = json.loads((tmp_path / "decisions.json").read_text())
+    assert report["exploratory"][EXTRA] == "not run"
+
+
+def test_an_exploratory_loss_says_not_robust_and_votes_in_nothing(tmp_path: Path) -> None:
+    voting = {"clipema": 0.02, "clip": -0.02}
+    _write(tmp_path, planted=voting, models=[*MODELS, EXTRA],
+           planted_by_model={EXTRA: {"clipema": -0.02, "clipfixed": 0.02}})
+    res = _run(tmp_path)
+    assert res.returncode == 0, res.stdout + res.stderr
+    report = json.loads((tmp_path / "decisions.json").read_text())
+    # The voting verdicts are exactly those of the voting networks alone.
+    assert report["verdict_clipema"].startswith("better than the E14 fix")
+    assert report["verdict_clip"].startswith("worse than the E14 fix")
+    assert report["transfer_clipema"] == [CLIP_GRID[1]]
+    extra = report["exploratory"][EXTRA]
+    assert extra["verdict_clipema"].startswith("not robust")
+    assert extra["verdict_clipfixed"].startswith("robust")
+    assert extra["verdict_clip"].startswith("robust")
+    assert extra["ekfac|plateau_clipema"]["inside"] == [CLIP_GRID[1]]
+    assert extra["problems"] == []
+
+
+def test_a_defect_in_an_exploratory_file_leaves_the_voting_verdicts_valid(tmp_path: Path) -> None:
+    def mutate(model, seed, mode, e16):
+        if (model, seed, mode) == (EXTRA, 2, "ekfac"):
+            e16["cells"][f"ekfac|clip|{CLIP_GRID[0]:g}"].update(crashed=True, test_acc=None)
+
+    _write(tmp_path, planted={"clipema": 0.02}, mutate=mutate, models=[*MODELS, EXTRA])
+    res = _run(tmp_path)
+    assert res.returncode == 0, res.stdout + res.stderr
+    report = json.loads((tmp_path / "decisions.json").read_text())
+    assert report["problems"] == []
+    extra = report["exploratory"][EXTRA]
+    assert extra["problems"] and all(v == "incomplete" for k, v in extra.items()
+                                     if k.startswith("verdict_"))

@@ -5,7 +5,8 @@ jobs are written and only the first (network, seed, mode) is submitted. The deci
 [`plan_lambda_dominance.md`](plan_lambda_dominance.md), section "E16 — pre-registered", and are
 repeated in §5 below so this document can be read alone.*
 
-*Amended three times on 2026-09-21, every time before any submission.*
+*Amended four times on 2026-09-21. The first three came before any submission; the fourth after one
+test job on `cnn_gn_cifar` and before any ResNet run.*
 - *First (§9): family B went from one arm to three, because the single clip was a per-layer
   normalisation more than a clip.*
 - *Second (§10): a six-agent audit found a design error (a threshold shared by the whole network),
@@ -14,6 +15,9 @@ repeated in §5 below so this document can be read alone.*
 - *Third (§11): the normalisation layers' curvature statistic, which the audit had recorded as a
   limit, is now corrected in every arm. E16 therefore reruns its own add baseline instead of reusing
   E14's cells. The jobs are split by mode and by shard, one process per 1g slice.*
+- *Fourth (§12): two ResNets are added as exploratory networks: ResNet-20 with the full design, and
+  ResNet-50 after a calibration of its lambda grid and cost. They are read by rules of their own,
+  pre-registered in §12, and vote in none of rules 0-6.*
 
 ---
 
@@ -590,7 +594,9 @@ exactly as its source experiment ran it".
 | the corrected normalisation statistic, and E16's own baseline | **done** (§11) |
 | tests: 120 new; full suite 1014 passed, 41 skipped | **done** |
 | driver, decisions script, job scripts | **done**. Local smokes: every arm on all three networks; two shards run concurrently and merged, with the determinism check and the inertness check passing |
-| the cluster jobs (30 x 3 shards + 30 merges) | **first (network, seed, mode) submitted** (`cnn_gn_cifar`, seed 0, `ekfac`); read its timing and its seed-0 checks, then the rest |
+| the cluster jobs (30 x 3 shards + 30 merges) | **test done** on `cnn_gn_cifar`, seed 0, `ekfac` (jobs 21543912-15, commit `7663d62`): all 4 COMPLETED, 36 of 36 cells, the three seed-0 checks identical, clip cells at 0.80-0.84x their projected time. **The other 29 were submitted on 2026-09-21 from the same clone at the same commit**, `/home/blgr/new_adafisher_e16` at `7663d62`: 87 shard jobs (21546022-21546138 with their merges), so the test cell is part of the set. That clone is not touched until they have all run |
+| ResNet-20 (exploratory, §12): 10 x 3 shards + 10 merges | code done (fourth amendment's commit), not submitted; runs from a separate checkout at that commit, since the voting clone must stay at `7663d62` |
+| ResNet-50 (exploratory, §12): calibration, 12 jobs; then its reduced E16 | calibration code done, not submitted; the reduced E16 is coded once the calibration has fixed its grid |
 | results | — |
 
 ---
@@ -729,3 +735,99 @@ seed-0 diagnostic (`repro`), and the pipeline is checked by a determinism check 
   instead of 15 jobs of 2 to 5 hours.
 - Projected, each shard takes 22 / 49 / 58 min on cnn / vit / cct, for the same total 1g-slice time
   (§4 has the table, and why not a larger slice).
+
+---
+
+## 12. Fourth amendment (same day): two ResNets, exploratory
+
+**Why.** E16's three networks were chosen because their accuracy responds to `λ`. That is the right
+choice for comparing ways to handle `λ`, but it leaves out the architecture most of this repository's
+results are about: a residual convolutional network with a BatchNorm after every convolution. The
+question here is different, and narrower: **is the clip robust to that architecture?** In other
+words, does it keep up with the E14 fix on a network where `λ` barely matters?
+- On `resnet20_cifar`, E14 found `add` flat to within 0.6 points from `λ` = 1e-8 down to 1e-11.
+- `resnet50_cifar` has never run under the E protocol at all.
+
+**When this was written, and what had been seen.** After the `cnn_gn_cifar` seed-0 `ekfac` test job
+(§8), whose 36 cells had been read; before any ResNet run under E16. Nothing in rules 0-6, their
+networks, grids or seeds changes. The ResNets vote in none of them and feed nothing to E17.
+
+### ResNet-20: the full design, five seeds
+
+- **Arms and grids:** E16's exactly, with `norm_exact_rescaling` on in every arm but repro. That
+  covers its 19 BatchNorm layers, where the option is not inert.
+- **`λ` grid:** 1e-10, 3e-11, 1e-11, 3e-12, 1e-12, centred on the optimum of E14's three-seed sweep
+  (1e-11 for both modes). The seed-0 checks use 1e-11. The repro diagnostic compares with E14's
+  stored seed-0 cell (`e14_seeds_resnet20_eigfix`).
+- **Nothing is frozen:** every parameter belongs to a hooked module. The weight decay is the
+  benchmark's, coupled, in every arm.
+- **Seeds 0-4,** as the voting networks. E14 had three.
+- **Cost, projected:**
+  - `add` runs are measured at ~290 s on a 1g slice (E4, E14).
+  - The clip runs are projected: cnn's measured extra cost per hooked layer and per step (0.16 /
+    0.32 / 0.47 ms for clipfixed / clip / clipema), times ResNet-20's 39 hooked layers. That gives
+    ~420-680 s per clip run.
+  - The largest shard comes to ~97 min, with the limit at 2:30. The total is ~46 h of 1g slices.
+
+### ResNet-50: calibrate, then a reduced design, three seeds
+
+- **The two unknowns.** Under the E protocol ResNet-50 has no located `λ` optimum, and without one
+  the `add` grid would be a guess. A guess that missed would put `add` off its optimum and favour
+  the clip. Its cost is also only estimated: ~30 min per `add` run, scaled from campaign 2's
+  0.214 s per step at batch 128 on a 1g slice.
+- **Step 1, the calibration** (`fisher_ref/experiments/e16_resnet50_calibration.py`, 12 jobs):
+  - `add` at seed 0, both modes, 15 epochs, E16's exact protocol, at the ten values of E14's
+    ResNet-20 window (1e-8 to 3e-13);
+  - plus two epochs of `add` and of each clip arm at q = 0.7, **of which only the wall time is
+    kept**. No accuracy of a clip arm on ResNet-50 exists before its grid is fixed.
+- **The grid rule, fixed now.** The five lattice values (1 and 3 times a power of ten) centred on
+  the geometric mean of the two modes' best final validation accuracy in the scan, snapped to the
+  lattice in log. The code is `grid_from_scan`, tested on worked examples. If a mode's best value is
+  at an edge of the scan, the summary says so, and that is recorded as a deviation.
+- **Step 2, the reduced E16,** also fixed now:
+  - seeds 0-2, both modes;
+  - `add` on the five-value grid, and the three clip arms at q in {0.95, 0.7, 0.3};
+  - the seed-0 determinism check;
+  - no `floor`, no `cliplr`, no repro (there is no stored cell to compare with).
+
+  The measured cost sets the time limits, not the design. The ResNet-50 entries of the E16 driver
+  and of the decision script are written once the grid is known, so its files come from a later
+  commit than the other networks'. That is allowed: pairing never crosses networks, and the decision
+  script requires one commit per network. The same holds for ResNet-20. The voting networks run
+  from `7663d62`, in a clone that must not change while their jobs wait (each job reads the code
+  when it starts). The fourth amendment's code, ResNet-20's arms and ResNet-50's calibration run
+  from a second checkout at the fourth amendment's commit.
+- **Two settings differ from the benchmark's own.** Both are recorded in every cell.
+  - `fisher_batch_samples=None` instead of 32. The benchmark's 32 is refused together with
+    `norm_exact_rescaling` on a network with BatchNorm. At batch 32 it caps nothing anyway, so the
+    estimator is the same.
+  - `norm_exact_rescaling=True`, as in every E16 arm.
+
+  `conv_sua=True` stays, since it is mandatory at this scale (`plan_lot8.md` §0.5). So the
+  ResNet-50 verdict is a verdict on the clip **under SUA**.
+
+### How the ResNets are read (pre-registered; `e16_decisions.py`, "exploratory" section)
+
+1. **Rules 1 and 2, per (network, mode).** Every family is compared with `add`, each at its
+   validation-selected value, paired by seed. The result is a win, tie or lose at 2 standard
+   errors.
+2. **Robustness, per clip arm and per network:**
+   - **robust** if it loses to `add` in neither mode;
+   - **not robust** if it loses in one;
+   - **incomplete** if anything is missing or invalid.
+3. **Transfer, reported.** Whether the q that transfers across the three voting networks (rule 4)
+   lies inside the ResNet's own plateau. On ResNet-50 this can only be read if that q is among
+   {0.95, 0.7, 0.3}.
+4. **Checks and scope.** A ResNet file goes through the same checks as a voting one, except the
+   single commit, which is per network. A defect is listed under the ResNet's own section and does
+   not invalidate the voting verdicts.
+
+**Predictions, written now.** `add` is flat in `λ` on ResNet-20 (E14), so the clip arms should
+**tie** with it there. A loss would mean the clip is not robust to a network made of BatchNorm and
+residual convolutions. No prediction is made for ResNet-50's level; its calibration comes first.
+
+**One code change that touches no run.** The `floor` arm's log computed its fraction of directions
+above `λ` in float64, which Apple's MPS backend lacks, so every `floor` cell crashed in a local
+smoke. It is now an integer count over the size: the same number, exactly, on every device. On CUDA
+nothing changes: the `floor` cells of the cnn test ran.
+

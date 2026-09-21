@@ -33,9 +33,20 @@ add's transferable lambda or, failing one, the geometric mean of add's six selec
 are printed at the end, as E17 defines them; where several values transfer, the one with the best
 validation accuracy averaged over the six pairs (E17's candidate-A rule).
 
+**Exploratory networks (fourth amendment, ``plan_floor_clip.md`` §12).** ``resnet20_cifar`` runs the
+same arms and grids but votes in none of the rules above and feeds nothing to E17. It is read in a
+section of its own, by rules pre-registered before any of its runs: for each clip arm, rules 1-2
+against add in each mode, and the arm is "robust" there if it loses in neither mode, "not robust"
+if it loses in one, "incomplete" otherwise. Also reported: whether the q that transfers across the
+three voting networks (rule 4) lies inside the network's own plateau. Its files go through the same
+checks (one commit per network, not necessarily the voting networks' one: pairing never crosses
+networks), but a defect there is listed under that section and does not make the voting verdicts
+invalid; a network with no file at all is reported "not run".
+
 Environment variables::
 
     E16_MODELS            comma-separated (default: cnn_gn_cifar,vit_micro_cifar,cct_2_3x2_cifar)
+    E16_EXPLORATORY       comma-separated (default: resnet20_cifar)
     E16_SEEDS             comma-separated (default: 0,1,2,3,4)
     E16_DIR               where the JSON files are (default: fisher_ref/outputs)
     E16_OUT               output path (default: fisher_ref/outputs/e16_decisions.json)
@@ -58,12 +69,16 @@ from fisher_ref.experiments.e16_floor_clip import (  # noqa: E402
     CLIPLR_ARM,
     CLIPLR_FACTORS,
     CLIPLR_Q,
+    EXPLORATORY,
     LAMBDA_GRID,
     NO_HOOKED_NORM,
+    VOTING,
 )
 
 MODELS = [m.strip() for m in os.environ.get(
-    "E16_MODELS", "cnn_gn_cifar,vit_micro_cifar,cct_2_3x2_cifar").split(",") if m.strip()]
+    "E16_MODELS", ",".join(VOTING)).split(",") if m.strip()]
+EXPLORATORY_MODELS = [m.strip() for m in os.environ.get(
+    "E16_EXPLORATORY", ",".join(EXPLORATORY)).split(",") if m.strip()]
 SEEDS = [int(s) for s in os.environ.get("E16_SEEDS", "0,1,2,3,4").split(",") if s.strip()]
 MODES = ["ekfac", "tekfac"]
 DIR = Path(os.environ.get("E16_DIR", str(ROOT / "fisher_ref/outputs")))
@@ -237,6 +252,70 @@ def family_verdict(vs: Dict[Tuple[str, str], str]) -> str:
     return "mixed"
 
 
+def exploratory(voting_commits: set, transfer: Dict[str, List[float]],
+                diagnostics: Dict[str, Any]) -> Dict[str, Any]:
+    """The fourth amendment's reading of the exploratory networks. Votes in nothing above."""
+    print("\n===== exploratory: the clip on other architectures (does not vote; "
+          "plan_floor_clip.md §12) =====")
+    out: Dict[str, Any] = {}
+    for model in EXPLORATORY_MODELS:
+        if not any((DIR / f"e16_floor_clip_{model}_s{s}_{md}.json").exists()
+                   for s in SEEDS for md in MODES):
+            out[model] = "not run"
+            print(f"{model}: not run")
+            continue
+        x_problems: List[str] = []
+        x_commits: set = set()
+        data = load(model, x_problems, x_commits, diagnostics)
+        if len(x_commits) > 1:
+            x_problems.append(f"the files come from {len(x_commits)} commits: {sorted(x_commits)}")
+        grids = {"add": LAMBDA_GRID[model], "floor": LAMBDA_GRID[model],
+                 **{a: CLIP_GRID for a in CLIP_ARMS}}
+        # Pairing never crosses networks, so one commit per network is what matters; a commit
+        # other than the voting networks' is reported, not a defect.
+        row: Dict[str, Any] = {"problems": x_problems, "commits": sorted(x_commits),
+                               "same_commit_as_voting": x_commits == voting_commits}
+        per_arm: Dict[str, List[str]] = {a: [] for a in CLIP_ARMS}
+        for mode in MODES:
+            chosen = {family: select(data, mode, family, values)[0]
+                      for family, values in grids.items()}
+            row[f"{mode}|chosen"] = chosen
+            print(f"{model:16s} {mode:6s}  chosen on validation: "
+                  + ", ".join(f"{k} {v}" for k, v in chosen.items()))
+            for family in FAMILIES:
+                if chosen["add"] is None or chosen[family] is None:
+                    v = "incomplete"
+                else:
+                    m, se, v = paired(data[(mode, family, chosen[family])],
+                                      data[(mode, "add", chosen["add"])])
+                    row[f"{mode}|{family}_minus_add"] = {"mean": m, "se": se, "verdict": v}
+                    print(f"    {family:9s} - add       = {m:+6.2f} +- {se:4.2f}   -> {v}")
+                if family in per_arm:
+                    per_arm[family].append(v)
+            for family in CLIP_ARMS:
+                one_se, two_sample = plateaus(data, mode, family, CLIP_GRID)
+                inside = [q for q in transfer.get(family, []) if q in one_se]
+                row[f"{mode}|plateau_{family}"] = {
+                    "one_se_of_best": one_se, "two_sample": two_sample,
+                    "voting_transferable": transfer.get(family, []), "inside": inside}
+                print(f"    {family:9s} plateau {one_se}; voting networks' transferable q "
+                      f"{transfer.get(family, [])} inside it: {inside}")
+        for family, vs in per_arm.items():
+            if x_problems or any(v not in ("win", "tie", "lose") for v in vs):
+                verdict = "incomplete"
+            elif "lose" in vs:
+                verdict = "not robust: loses to add in " + ", ".join(
+                    md for md, v in zip(MODES, vs) if v == "lose")
+            else:
+                verdict = f"robust: loses to add in neither mode ({vs.count('win')} of 2 wins)"
+            row[f"verdict_{family}"] = verdict
+            print(f"  {model}, {family}: {verdict}")
+        for p in x_problems:
+            print(f"  - {p}")
+        out[model] = row
+    return out
+
+
 def main() -> None:
     problems: List[str] = []
     commits: set = set()
@@ -370,6 +449,8 @@ def main() -> None:
     e17["note"] = ("every E16 arm ran with norm_exact_rescaling=True; a candidate is run the way "
                    "E16 ran it")
     report["e17"] = e17
+
+    report["exploratory"] = exploratory(commits, transfer, diagnostics)
 
     print("\n===== diagnostics (reported, not voted) =====")
     for key, value in diagnostics.items():

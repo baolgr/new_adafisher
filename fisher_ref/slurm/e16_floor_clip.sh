@@ -31,11 +31,12 @@
 #     One process per 1g slice: no two runs share a GPU. (A first design ran 3 processes on one
 #     h100_3g.40gb slice; on 2026-09-21 no 3g slice was free for ~1.5 h while 143 of 160 1g slices
 #     were, and the speed of 3 processes sharing a slice had never been measured.)
-#   --time, set per network by e16_submit.sh: 0:35 / 1:15 / 1:30 for cnn / vit / cct. The largest
-#     shard holds 12 cells: 22 / 49 / 58 minutes, from the add cells' times measured on 1g slices in
-#     E14/E13/E10 (75 / 152 / 212 s) and the clip arms' times projected by the audit (up to 1.9x
-#     that). About 1.5x on top, since the clip times are projections. Each cell prints its own
-#     seconds, so the first job tells whether the projections hold.
+#   --time, set per network by e16_submit.sh: 0:35 / 1:15 / 1:30 / 2:30 for cnn / vit / cct /
+#     resnet20. The largest shard holds 12 cells: 22 / 49 / 58 / 97 minutes, from the add cells'
+#     times measured on 1g slices in E14/E13/E10 (75 / 152 / 212 / 290 s) and the clip arms' times
+#     projected (the audit's per-operation costs; for resnet20, cnn's measured per-layer overhead
+#     times its 39 hooked layers). About 1.5x on top. Measured on cnn seed 0 (21543912-14): the clip
+#     cells ran at 0.80-0.84x their projection.
 
 set -euo pipefail
 cd "$SLURM_SUBMIT_DIR"

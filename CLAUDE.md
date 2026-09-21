@@ -789,9 +789,18 @@ root on `v^(t)` — is **identical across the five modes**.
 > (`fisher_ref/slurm/e16_submit.sh MODEL SEED MODE`): each (network, seed, mode)'s 34 cells (36 at
 > seed 0) split into 3 shards, each one process on one `h100_1g.10gb` slice (E14's own hardware),
 > then a CPU merge that runs the seed-0 checks. Largest shard projected at 22/49/58 min for
-> cnn/vit/cct, limits 0:35/1:15/1:30. About 62 h of 1g-slice time. All thirty must come from ONE
-> clean commit: they run from the clone `/home/blgr/new_adafisher_e16`, not the main checkout, and
-> that clone is not pulled until E16 is done. The feasibility study's Sophia range was inverted:
+> cnn/vit/cct, limits 0:35/1:15/1:30. About 62 h of 1g-slice time. All thirty come from ONE clean
+> commit: **submitted 2026-09-21 from the clone `/home/blgr/new_adafisher_e16` at `7663d62`** (the
+> cnn seed-0 `ekfac` test, 21543912-15, plus 21546022-21546138). That clone is not pulled or
+> modified until they have all run: a pending job reads the code when it starts. The ResNets run
+> from a separate checkout at the fourth amendment's commit (one commit per network is enough). **Fourth amendment (`plan_floor_clip.md` §12):** two
+> ResNets are added as *exploratory* networks, which vote in none of the pre-registered rules and
+> feed nothing to E17. `resnet20_cifar` gets the full design at 5 seeds (grid 1e-10..1e-12 around
+> E14's 1e-11, ~46 h of 1g, projected). `resnet50_cifar` is first calibrated
+> (`e16_resnet50_calibration.py`: an add scan at seed 0 over 1e-8..3e-13 plus clip timings, 12
+> jobs), then gets a reduced design at 3 seeds on the grid the pre-registered rule derives from the
+> scan. A clip arm is "robust" on a ResNet if it loses to add in neither mode. The feasibility
+> study's Sophia range was inverted:
 > `win_rate` is the fraction *not* clipped, so the published target is a clipped fraction of 0.5-0.9.
 
 > **E15 — one safety constant per layer: done, and adopted** (`plan_lambda_dominance.md`, "E15 —
@@ -1434,10 +1443,10 @@ Run these from the repository root on the laptop (the local checkout lives at
 ## Running the tests
 
 ```bash
-.venv/bin/pytest tests/ -v                                    # everything: 1055 collected, 1014 passed and
+.venv/bin/pytest tests/ -v                                    # everything: 1063 collected, 1022 passed and
                                                                #   41 skipped by default (40 gated on --runslow,
                                                                #   1 needing curvlinops). Measured 2026-09-21,
-                                                               #   after E16's third amendment.
+                                                               #   after E16's fourth amendment.
                                                                #   With --runslow, last measured 2026-09-20
                                                                #   before test_relative_damping.py: 862
                                                                #   passed, 1 skipped.
@@ -1485,6 +1494,9 @@ Run these from the repository root on the laptop (the local checkout lives at
 .venv/bin/pytest tests/test_e16_decisions.py -v                  # E16's decision script: an invalid or
                                                                  #   incomplete set of jobs is never read as a
                                                                  #   verdict; rule 5 qualifies rule 3
+.venv/bin/pytest tests/test_e16_resnet50_calibration.py -v       # E16's ResNet-50 calibration: the grid rule
+                                                                 #   on worked examples, the scan's coverage of
+                                                                 #   E14's window, the cells' overrides
 .venv/bin/pytest tests/test_norm_exact_rescaling.py -v           # norm_exact_rescaling (E16): x_hat is the
                                                                  #   layer's own normalised output, per-row
                                                                  #   gradients sum to the real grads, stored

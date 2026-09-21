@@ -10,6 +10,11 @@ the repro diagnostic -- ``norm_exact_rescaling`` on, so a normalisation layer's 
 estimated from its exact per-row gradient (``plan_floor_clip.md`` §11). E16 is self-contained: its
 add baseline is rerun here, under the same estimator, code and hardware as the other arms.
 
+**Networks.** ``VOTING``: the three the pre-registered rules vote on. ``EXPLORATORY``:
+``resnet20_cifar``, run with exactly the same arms and grids but only read as a robustness check of
+the clip on another architecture, by rules of its own (``plan_floor_clip.md`` §12). ResNet-50 is
+calibrated first, by ``e16_resnet50_calibration.py``.
+
   add        E14's fix: divide by s + lambda, lr = cap * lambda, nothing frozen, the benchmark's
              own weight decay. 5 values of lambda around E13/E14's optimum.
   floor      family A: divide by max(s, lambda); otherwise exactly as add, paired with it by seed.
@@ -144,7 +149,14 @@ LAMBDA_GRID = {
     "cnn_gn_cifar": [3e-10, 1e-10, 3e-11, 1e-11, 3e-12],
     "vit_micro_cifar": [1e-9, 3e-10, 1e-10, 3e-11, 1e-11],
     "cct_2_3x2_cifar": [3e-10, 1e-10, 3e-11, 1e-11, 3e-12],
+    # Exploratory (fourth amendment): not one of the three networks the pre-registered rules vote
+    # on. E14's three-seed sweep put both modes' optimum at 1e-11, on a plateau that is flat above it.
+    "resnet20_cifar": [1e-10, 3e-11, 1e-11, 3e-12, 1e-12],
 }
+# The networks the pre-registered rules 1-6 vote on, and the ones only read as a robustness check of
+# the clip on another architecture (plan_floor_clip.md §12).
+VOTING = ("cnn_gn_cifar", "vit_micro_cifar", "cct_2_3x2_cifar")
+EXPLORATORY = ("resnet20_cifar",)
 # Clip: the fraction of each module's active coordinates that is clipped. Sophia's README targets a
 # win_rate (the fraction NOT clipped) of 0.1-0.5, i.e. 0.5-0.9 here; the grid reaches past both
 # ends: 0.99 is almost sign-momentum in the eigenbasis, 0.1 almost the plain undamped step.
@@ -168,9 +180,10 @@ CHECK_LAMBDA = {
     ("cnn_gn_cifar", "ekfac"): 3e-11, ("cnn_gn_cifar", "tekfac"): 1e-10,
     ("vit_micro_cifar", "ekfac"): 1e-10, ("vit_micro_cifar", "tekfac"): 1e-10,
     ("cct_2_3x2_cifar", "ekfac"): 3e-11, ("cct_2_3x2_cifar", "tekfac"): 3e-11,
+    ("resnet20_cifar", "ekfac"): 1e-11, ("resnet20_cifar", "tekfac"): 1e-11,
 }
 BASELINE_FILE = {"cnn_gn_cifar": "e14_seeds_cnn_eigfix", "vit_micro_cifar": "e13_seeds_vit_eigfix",
-                 "cct_2_3x2_cifar": "e10_seeds_cct_eigfix"}
+                 "cct_2_3x2_cifar": "e10_seeds_cct_eigfix", "resnet20_cifar": "e14_seeds_resnet20_eigfix"}
 # The one network without a hooked normalisation layer: there norm_exact_rescaling must be inert.
 NO_HOOKED_NORM = {"cnn_gn_cifar"}
 # Order in which the cells are listed (and dealt to the shards): the checks, then the arms by
@@ -246,7 +259,8 @@ def _log(opt, names: Dict[Any, str]) -> Dict[str, Dict[str, float]]:
         s = rescaling[module]
         row = {"mean_curvature": float(s.mean())}
         if approx.rescale_form == "floor":
-            row["frac_above_lambda"] = float((s > approx.lambda_for(module)).double().mean())
+            # An integer count over the size: exact, and no float64 (which MPS lacks).
+            row["frac_above_lambda"] = int((s > approx.lambda_for(module)).sum()) / s.numel()
         elif module in stats:
             row.update({k: float(v) for k, v in stats[module].items()})
         out[names[module]] = row
