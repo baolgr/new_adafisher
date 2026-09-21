@@ -1,0 +1,393 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[french]{babel}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{booktabs,array,enumitem,xcolor,parskip,setspace}
+\usepackage[colorlinks=true,linkcolor=blue!50!black,urlcolor=blue!40!black]{hyperref}
+\usepackage{algorithm}
+\usepackage[noend]{algpseudocode}
+\usepackage{tcolorbox}
+\tcbuselibrary{skins,breakable}
+
+\setstretch{1.08}
+\emergencystretch=2em
+\setlist{itemsep=2pt,topsep=3pt}
+
+\newcommand{\fic}[1]{\texttt{\detokenize{#1}}}
+\newtcolorbox{enclair}[1][]{colback=blue!4!white, colframe=blue!35!black, boxrule=0.5pt, arc=2pt,
+  breakable, title={#1}, fonttitle=\bfseries, left=6pt, right=6pt, top=4pt, bottom=4pt}
+
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Mt}{\widetilde{M}}
+\newcommand{\hb}{\bar h}
+\newcommand{\mh}{\hat m}
+\DeclareMathOperator{\sign}{sign}
+\DeclareMathOperator{\rms}{rms}
+\DeclareMathOperator{\eigvecs}{vecp}
+\DeclareMathOperator{\med}{med}
+
+\floatname{algorithm}{Algorithme}
+\renewcommand{\algorithmicrequire}{\textbf{Entrées :}}
+\renewcommand{\algorithmicensure}{\textbf{Sortie :}}
+\algrenewcommand\algorithmicif{\textbf{si}}
+\algrenewcommand\algorithmicthen{\textbf{alors}}
+\algrenewcommand\algorithmicelse{\textbf{sinon}}
+\algrenewcommand\algorithmicfor{\textbf{pour}}
+\algrenewcommand\algorithmicdo{\textbf{faire}}
+
+\title{\Large Écrêter au lieu d'amortir :\\ l'expression du clipping et l'algorithme d'entraînement\\[6pt]
+\large Famille B de l'expérience E16 (\fic{docs/reports/plan_floor_clip.md})}
+\author{}
+\date{Septembre 2026}
+
+\begin{document}
+\maketitle
+
+\begin{enclair}[En bref]
+Les modes \fic{ekfac} et \fic{tekfac} divisent chaque coordonnée du pas, dans une base propre, par
+une courbure stockée à laquelle on ajoute une constante de sécurité $\lambda$. La famille B remplace
+cette addition par un \emph{écrêtage} : on divise par la courbure seule, puis on plafonne chaque
+coordonnée à un seuil $\gamma$. Le seuil est toujours fixé \emph{couche par couche}, parce que
+l'erreur d'échelle de la courbure stockée varie d'une couche à l'autre jusqu'à quatre ordres de
+grandeur. Trois façons de le fixer sont implémentées, parce qu'elles ne posent pas la même question :
+\begin{itemize}
+  \item \textbf{quantile} : $\gamma$ recalculé à chaque pas pour écrêter une proportion fixe $q$ des
+        coordonnées. C'est une normalisation du pas par couche autant qu'un écrêtage ;
+  \item \textbf{ema} (bras principal) : le même seuil, corrigé par la taille du momentum rapportée à sa
+        moyenne (corrigée du biais) sur environ $1\,000$ pas, pour que le pas suive de nouveau le
+        momentum ;
+  \item \textbf{fixe} : la médiane du seuil de la couche sur les $1\,000$ pas précédant le pas
+        $2\,000$, puis gelée. C'est un écrêtage conditionnel, comme celui de Sophia.
+\end{itemize}
+C'est l'option \fic{rescale_form="clip"} d'\fic{AdaFisherMulti}, avec \fic{clip_threshold} et
+\fic{clip_fraction=q}, implémentée dans\\ \fic{src/adafisher_modes/approximations/_rescale_utils.py}.
+\end{enclair}
+
+\section{Notations}
+
+Tout est écrit pour \fic{ekfac}. Pour \fic{tekfac}, il suffit de remplacer $Q_A \to Q_\Phi$,
+$Q_B \to Q_\Psi$ et $s^\star \to \Theta$.
+
+Pour une couche $\ell$, on appelle \emph{ligne} un couple (exemple, position) : une seule position
+pour une couche dense appliquée à un vecteur, $T_\ell$ positions pour une convolution (les positions
+de sortie) ou pour une couche appliquée à une séquence de $T_\ell$ jetons. Pour chaque ligne $t$ :
+\begin{itemize}
+  \item $\hb_{t}$ est l'entrée de la couche, sous la forme que lui donne l'optimiseur :
+        \begin{itemize}
+          \item couche dense ou convolution \emph{avec} biais : l'entrée (le patch, pour une
+                convolution), augmentée d'un $1$ pour le biais ;
+          \item couche \emph{sans} biais : l'entrée seule, sans le $1$ ;
+          \item couche de normalisation (\fic{LayerNorm}, \fic{BatchNorm2d}) :
+                $\hb_t = (z_t,\ 1)$, où $z_t$ est la moyenne sur les canaux de l'entrée \emph{brute},
+                pas de l'activation normalisée (déviation 4.6 de \fic{CLAUDE.md}). Les paramètres
+                d'échelle et de décalage forment alors une matrice $C \times 2$ ;
+        \end{itemize}
+  \item pour une couche de normalisation, $\hat x_t \in \mathbb R^C$ est l'activation normalisée de la
+        ligne, recalculée avec les statistiques qu'utilise la couche : par jeton pour
+        \fic{LayerNorm} ; pour \fic{BatchNorm2d}, celles du batch en entraînement et les statistiques
+        courantes en évaluation. Le vrai gradient de la ligne par rapport à (échelle, décalage) est
+        la matrice $C\times 2$ $\,[\delta_t \odot \hat x_t,\ \delta_t]$ ;
+  \item $\delta_{t}$ est le gradient de la perte moyenne du batch par rapport à la sortie de la couche
+        à cette ligne ;
+  \item $A = \E[\hb\hb^\top]$ et $B = \E[\delta\delta^\top]$, moyennes sur les $N\,T_\ell$ lignes du
+        batch, sont les deux facteurs de Kronecker, tenus en moyenne glissante ; $Q_A$ et $Q_B$ sont
+        leurs vecteurs propres ;
+  \item $s^\star$, de la forme de la matrice des paramètres ($d_\text{out} \times d_\text{in}$, avec
+        une colonne de plus pour le biais s'il existe), est la courbure stockée dans la base propre
+        $Q_B \otimes Q_A$ (le « rééchelonnement » d'EKFAC) ;
+  \item $m$ est le momentum de la couche, poids et biais réunis dans une matrice de cette même forme,
+        $n$ son nombre de coordonnées, et $\mh_t = m_t/(1-\beta^{t+1})$ le momentum corrigé du biais.
+\end{itemize}
+
+\textbf{Une conséquence des lignes : l'échelle de $s^\star$ dépend de la couche.} Moyenner sur
+$N\,T_\ell$ lignes au lieu de $N$ exemples divise la courbure stockée d'une couche partagée par un
+facteur de l'ordre de $T_\ell$ (\fic{plan_exp_lot3.md} §5.2). Le surrogate des couches de
+normalisation ajoute une erreur de plus. Mesuré au pas $2\,000$ avec ce surrogate, par rapport à la
+tête : de $1/422$ à $1/7\,400$ sur les convolutions de \fic{cnn_gn_cifar}, de $1/251$ à $1/5\,620$ sur
+\fic{vit_micro_cifar}, de $1/91$ à $1/2\,724$ sur \fic{cct_2_3x2_cifar}. C'est pourquoi aucun seuil
+n'est partagé entre couches. L'option \fic{norm_exact_rescaling}, activée dans tous les bras d'E16,
+supprime la seconde erreur (§\ref{sec:remarques}), pas la première.
+
+On projette le momentum corrigé dans la base propre :
+\[
+  \Mt = Q_B^\top\, \mh\, Q_A .
+\]
+Toutes les opérations qui suivent sur $\Mt$ et $s^\star$ sont faites coordonnée par coordonnée.
+
+\section{Trois façons de diviser par la courbure}
+
+Dans chaque cas, la couche se déplace de $-\eta\, Q_B\, U\, Q_A^\top$, et seule la matrice $U$
+change :
+
+\begin{center}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{@{}lll@{}}
+\toprule
+forme & $U_i$ & taux d'apprentissage \\
+\midrule
+\fic{add} (correctif E14, défaut) & $\dfrac{\Mt_i}{s^\star_i + \lambda}$ & $\eta = \text{cap}\cdot\lambda$ \\[6pt]
+\fic{floor} (famille A) & $\dfrac{\Mt_i}{\max(s^\star_i,\ \lambda)}$ & $\eta = \text{cap}\cdot\lambda$ \\[6pt]
+\fic{clip} (famille B) & voir \eqref{eq:U} & $\eta$ du benchmark \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Pour \fic{add} et \fic{floor}, $\Mt$ est projeté depuis le momentum brut $m$, et la correction de
+biais est appliquée ensuite au pas, comme dans AdaFisher ; l'opérateur étant linéaire, cela revient
+au même. Dans ces deux formes, $\lambda$ fixe à la fois le plancher de la courbure et, avec
+$\eta = \text{cap}\cdot\lambda$, la taille maximale du pas. Dans la troisième, $\lambda$ n'intervient
+plus du tout.
+
+\section{L'expression du clipping}
+
+\subsection{L'opération d'écrêtage}
+
+Pour une couche, à un pas donné :
+\begin{align}
+  r_i &= \frac{|\Mt_i|}{s^\star_i}
+      && \text{taille du pas \emph{non amorti} de la coordonnée } i, \label{eq:r}\\
+  g &= \kappa\ \rms(\Mt) = \kappa\Bigl(\tfrac1n\textstyle\sum_j \Mt_j^2\Bigr)^{1/2},\quad \kappa = 10^{-3}
+      && \text{garde,} \label{eq:guard}\\
+  \mathcal A &= \{\, i : |\Mt_i| > g \,\}, \quad n_a = |\mathcal A|
+      && \text{coordonnées actives,} \label{eq:active}\\
+  U_i &=
+  \begin{cases}
+    \sign(\Mt_i)\,\min\Bigl(\dfrac{r_i}{\gamma},\ 1\Bigr) & i \in \mathcal A, \\[10pt]
+    \dfrac{\Mt_i}{\max(\gamma\, s^\star_i,\ g)} & i \notin \mathcal A.
+  \end{cases} \label{eq:U}
+\end{align}
+\begin{itemize}
+  \item Une coordonnée active est \emph{écrêtée} quand $r_i \ge \gamma$ : $U_i = \pm1$, elle bouge
+        exactement de $\eta_t$. L'écrêtage est \emph{défini} par ce test, sur le tenseur $r$ même dont
+        $\gamma$ est tiré ; le nombre de coordonnées écrêtées est donc exact par construction (aux
+        ex-æquo près).
+  \item Une coordonnée active non écrêtée vaut $\Mt_i/(\gamma\, s^\star_i)$ : le pas de Newton non
+        amorti, divisé par $\gamma$. Elle garde la forme que dicte la courbure.
+  \item Une coordonnée inactive bouge d'au plus $|\Mt_i|/g < 1$.
+  \item Pour une coordonnée active, $\operatorname{clip}\bigl(x/(\gamma s),\,1\bigr) = x/\max(\gamma s,\,|x|)$ :
+        l'écrêtage est un plancher sur la courbure, mais un plancher proportionnel au momentum
+        lui-même ($|\Mt_i|/\gamma$), et non une constante $\lambda$.
+\end{itemize}
+
+\textbf{Lien avec Sophia} (Liu et al., arXiv:2305.14342). La mise à jour de Sophia est
+$\theta \leftarrow \theta - \eta\,\operatorname{clip}\bigl(m/(\rho\,h + \epsilon),\,1\bigr)$.
+Le $\gamma$ ci-dessus joue le rôle de $\rho$. Sophia fixe un seul $\rho$ pour tout le réseau, ce qui a
+un sens chez elle parce que son estimation $h$ a la bonne échelle dans toutes les couches (§2.3) ;
+ici ce n'est pas le cas. Sophia surveille la proportion de coordonnées non écrêtées (son
+\fic{win_rate}, entre $0{,}1$ et $0{,}5$, soit une proportion écrêtée de $0{,}5$ à $0{,}9$).
+
+\subsection{La garde et les coordonnées actives}
+
+La proportion écrêtée $q$ ne compte que les coordonnées actives. Ce choix a été imposé par une mesure.
+Dans la base propre, beaucoup de coordonnées sont nulles en arithmétique exacte : le gradient vit dans
+l'espace engendré par les entrées du batch, et $A$ n'a que peu de directions observées. En float32,
+ces coordonnées valent du bruit d'arrondi. Mesuré sur un batch de 6 exemples : $|\Mt_i|$ descend
+jusqu'à $10^{-13}$, et la médiane de $r$ est entièrement fixée par ces coordonnées. Si on les
+comptait, le seuil tomberait dans le bruit et toutes les coordonnées réelles seraient écrêtées. Sans
+garde, une direction de courbure exactement nulle (les directions de la tête qui ajoutent une même
+constante à tous les logits) ferait un pas entier piloté par l'arrondi.
+
+\textbf{Le niveau $\kappa = 10^{-3}$ est un choix, pas un écart mesuré.} Sur les vraies couches, des
+coordonnées réelles descendent jusqu'à $5\cdot10^{-6}\,\rms$ et des lignes nulles montent jusqu'à
+$9{,}8\cdot10^{-4}\,\rms$. Tout verdict sur l'écrêtage est donc un verdict à $\kappa = 10^{-3}$.
+
+\subsection{Trois façons de fixer le seuil $\gamma$, toutes couche par couche}
+
+On note $\operatorname{quant}_q(r)$ la $c$-ième plus grande valeur de $\{r_i : i \in \mathcal A\}$,
+avec $c = \max(\lfloor q\, n_a \rfloor, 1)$. Elle est calculée par un tri et une lecture d'indice sur
+le GPU, sans que $n_a$ ne remonte à l'hôte.
+
+\paragraph{Quantile : recalculé à chaque pas.}
+\[
+  \gamma_t = \operatorname{quant}_q(r_t) .
+\]
+Exactement $c$ coordonnées actives sont écrêtées à chaque pas. Pour tous $a, b > 0$,
+$U(a\Mt,\ b\,s^\star) = U(\Mt,\ s^\star)$ : aucune erreur d'échelle de la courbure stockée n'atteint
+le pas. Mais la taille du momentum non plus. La plus grande coordonnée de chaque couche bouge de
+$\eta_t$ à chaque pas, même quand le gradient s'éteint. C'est donc une \emph{normalisation du pas par
+couche} avec un écrêtage de sa forme. Cette règle sert de contrôle.
+
+\paragraph{EMA : le pas suit de nouveau le momentum.}
+Avec $\mu_t = \rms(\Mt_t)$ et $w = 1/H$, $H = 1\,000$ pas :
+\[
+  \nu_t = (1-w)\,\nu_{t-1} + w\log\mu_t, \qquad
+  d_t = (1-w)\,d_{t-1} + w, \qquad
+  \log\bar\mu_t = \frac{\nu_t}{d_t}, \qquad
+  \gamma_t = \operatorname{quant}_q(r_t)\cdot\frac{\bar\mu_t}{\mu_t},
+\]
+avec $\nu_0 = d_0 = 0$ : c'est la moyenne glissante corrigée du biais d'Adam, appliquée à $\log\mu$.
+Un pas de momentum nul ne porte pas de taille et n'est pas compté.
+\begin{itemize}
+  \item Si le momentum a sa taille habituelle ($\mu_t = \bar\mu_t$), c'est exactement la règle
+        quantile.
+  \item S'il est $a$ fois plus petit que sur les $\sim H$ derniers pas, les coordonnées non écrêtées
+        sont $a$ fois plus petites et moins de coordonnées sont écrêtées. Un pic est écrêté plus fort.
+  \item L'échelle de la courbure reste absorbée à chaque pas : seule la taille du momentum est
+        retardée.
+  \item La moyenne porte sur $\mu$ et non sur $\gamma$, parce que $\gamma$ contient aussi l'échelle de
+        $s^\star$, qui saute à chaque mise à jour des facteurs ($s^\star$ est à 92 \% un seul
+        minibatch).
+  \item \textbf{Pourquoi la correction de biais.} Le premier momentum corrigé est un seul gradient,
+        mesuré $4{,}4$ à $5$ fois plus grand en moyenne quadratique que le momentum une fois installé.
+        Une moyenne initialisée avec lui restait décalée de plus de 10 \% pendant 12 à 18 \% d'un
+        entraînement.
+\end{itemize}
+
+\paragraph{Fixe : un écrêtage conditionnel.}
+\[
+  \gamma_t =
+  \begin{cases}
+    \operatorname{quant}_q(r_t) & t < t_\text{cal}, \\[3pt]
+    \med\bigl\{\operatorname{quant}_q(r_\tau) : t_\text{cal} - W \le \tau < t_\text{cal}\bigr\}
+      \ \text{gelée} & t \ge t_\text{cal},
+  \end{cases}
+\]
+avec $t_\text{cal} = 2\,000$ et $W = 1\,000$ (médiane inférieure). Après la calibration, l'écrêtage
+n'agit que là où le pas non amorti dépasse le plafond, et en dessous le pas est proportionnel au
+momentum.
+\begin{itemize}
+  \item \textbf{Une médiane sur une fenêtre}, parce que le quantile d'un seul pas est un tirage :
+        il variait d'un facteur $3{,}6$ d'une mise à jour des facteurs à l'autre.
+  \item \textbf{Couche par couche}, à cause de l'erreur d'échelle propre à chaque couche. Cela rend
+        aussi la bascule continue : la valeur gelée est celle que la couche utilisait. Mesuré sur de
+        vrais réseaux : la taille du pas change d'un facteur $0{,}92$ à $1{,}04$ à la bascule.
+  \item $t_\text{cal}$ et le début de la fenêtre sont au-delà des $10\cdot T_\text{Cov} = 1\,000$ pas
+        nécessaires à l'effacement de la graine identité (époque 2 sur 15 à batch 32).
+  \item Après la calibration, la proportion écrêtée dérive librement ; elle est journalisée. C'est le
+        diagnostic de Sophia.
+\end{itemize}
+
+\subsection{Propriétés communes}
+
+\begin{enumerate}
+  \item \textbf{Pas borné.} $|U_i| \le 1$ : chaque coordonnée de la base propre bouge d'au plus
+        $\eta_t$, quelle que soit la courbure.
+  \item \textbf{Momentum corrigé du biais.} L'écrêtage compare le momentum à un seuil, ce qui n'est
+        pas une opération linéaire. Il reçoit donc $\mh$, et le pas est appliqué sans nouvelle
+        division par $1-\beta^{t+1}$. Pour la règle quantile, c'est sans effet (invariance d'échelle).
+  \item \textbf{Les deux limites.} Quand $q \to 1$, presque tout est écrêté : $U \approx \sign(\Mt)$,
+        une descente de signe dans la base propre. Quand $q \to 0$, $U \approx \Mt/(\gamma s^\star)$ :
+        le pas EKFAC non amorti, dont la plus grande coordonnée vaut $1$ (au moment de la
+        calibration, pour la règle fixe).
+\end{enumerate}
+
+\section{L'algorithme d'entraînement}
+
+Constantes livrées : moyenne glissante $X \leftarrow \rho_\text{old} X + \rho_\text{new} X_\text{inst}$
+avec $(\rho_\text{old}, \rho_\text{new}) = (0{,}08,\ 0{,}008)$ ; $T_\text{Cov} = T_\text{eig} = 100$ ;
+$\beta = 0{,}9$. Le calcul de la base propre se fait dans le hook backward, avant de projeter le
+gradient (\fic{eig_before_rescale=True}), pour que $s^\star$ soit mesuré dans la base qu'utilise
+ensuite le pas. Dans l'algorithme, $R_\ell = N\,T_\ell$ est le nombre de lignes de la couche $\ell$
+dans un batch.
+
+\begin{algorithm}[H]
+\caption{EKFAC avec écrêtage (famille B), $T$ pas d'entraînement}
+\label{alg:clip}
+\begin{algorithmic}[1]
+\Require paramètres $\theta$ ; taux de base $\eta$ et calendrier cosinus $\eta_t$ ; $\beta = 0{,}9$ ;
+  proportion écrêtée $q \in (0,1)$ ; $\kappa = 10^{-3}$ ; règle $\in\{$quantile, ema, fixe$\}$ ;
+  $H = 1\,000$ ; $t_\text{cal} = 2\,000$ ; $W = 1\,000$ ; weight decay $w_d$ (couplé ou découplé)
+\State pour chaque couche hookée $\ell$ : $A_\ell \gets I$, $B_\ell \gets I$, $m_\ell \gets 0$,
+       $\nu_\ell \gets 0$, $d_\ell \gets 0$, $\mathcal W_\ell \gets \varnothing$,
+       $\gamma^\text{fixe}_\ell \gets$ non défini
+\For{$t = 0, \dots, T-1$}
+  \State tirer un batch de $N$ exemples ; forward
+  \If{$t \bmod T_\text{Cov} = 0$}
+    \State chaque couche $\ell$ garde ses $R_\ell$ lignes $\hb_{\ell,r}$ \Comment{entrées, forme de §1}
+    \State et, sous \fic{norm_exact_rescaling}, chaque couche de normalisation ses $\hat x_{\ell,r}$
+  \EndIf
+  \State $L \gets \frac1N\sum_n \ell(f_\theta(x_n), y_n)$ ; backward
+  \If{$t \bmod T_\text{Cov} = 0$} \Comment{hooks backward, pour chaque couche $\ell$}
+    \State $A_\ell \gets \rho_\text{old}A_\ell + \rho_\text{new}\,\tfrac1{R_\ell}\sum_r \hb_{\ell,r}\hb_{\ell,r}^\top$
+    \State $B_\ell \gets \rho_\text{old}B_\ell + \rho_\text{new}\,\tfrac1{R_\ell}\sum_r \delta_{\ell,r}\delta_{\ell,r}^\top$
+    \If{$t \bmod T_\text{eig} = 0$}
+      \State $Q_{A,\ell} \gets \eigvecs(A_\ell + \varepsilon I)$, \ $Q_{B,\ell} \gets \eigvecs(B_\ell + \varepsilon I)$
+             \Comment{$\varepsilon = 10^{-6}\,\overline{\operatorname{diag}}$}
+      \If{premier calcul} $s^\star_\ell \gets \mathbf 1$ \EndIf
+    \EndIf
+    \If{$\ell$ est une couche de normalisation \textbf{et} \fic{norm_exact_rescaling}}
+      \State $G_\ell \gets \tfrac1{R_\ell}\sum_r \bigl(Q_{B,\ell}^\top\,
+             [\delta_{\ell,r}\odot\hat x_{\ell,r},\ \delta_{\ell,r}]\;Q_{A,\ell}\bigr)^{\odot 2}$
+             \Comment{vrai gradient de la ligne}
+    \Else
+      \State $G_\ell \gets \tfrac1{R_\ell}\sum_r \bigl(Q_{B,\ell}^\top \delta_{\ell,r}\bigr)^{\odot 2}\,
+             \bigl(Q_{A,\ell}^\top \hb_{\ell,r}\bigr)^{\odot 2\,\top}$ \Comment{carrés coordonnée par coordonnée}
+    \EndIf
+    \State $s^\star_\ell \gets \rho_\text{old}\,s^\star_\ell + \rho_\text{new}\,G_\ell$
+  \EndIf
+  \For{chaque couche hookée $\ell$, poids et biais ensemble}
+    \State $g_\ell \gets \nabla_{[W_\ell,\,b_\ell]} L$ \ ($+\,w_d\,[W_\ell, b_\ell]$ si weight decay couplé)
+    \State $m_\ell \gets \beta\, m_\ell + (1-\beta)\, g_\ell$ ; \ $\mh_\ell \gets m_\ell / (1-\beta^{t+1})$
+    \State $\Mt \gets Q_{B,\ell}^\top\, \mh_\ell\, Q_{A,\ell}$ ; \ $r \gets |\Mt| \oslash s^\star_\ell$ ;
+           \ $g \gets \kappa\,\rms(\Mt)$ ; \ $\mathcal A \gets \{i : |\Mt_i| > g\}$
+    \If{règle $=$ fixe \textbf{et} $\gamma^\text{fixe}_\ell$ défini}
+      \State $\gamma \gets \gamma^\text{fixe}_\ell$
+    \Else
+      \State $\gamma \gets \operatorname{quant}_q\bigl(r_{\mathcal A}\bigr)$
+             \Comment{$c$-ième plus grande, $c = \max(\lfloor q\,|\mathcal A|\rfloor, 1)$}
+      \If{règle $=$ ema \textbf{et} $\rms(\Mt) > 0$}
+        \State $\mu \gets \rms(\Mt)$ ; \ $\nu_\ell \gets (1-\tfrac1H)\nu_\ell + \tfrac1H\log\mu$ ;
+               \ $d_\ell \gets (1-\tfrac1H)d_\ell + \tfrac1H$
+        \State $\gamma \gets \gamma\cdot\exp(\nu_\ell/d_\ell)/\mu$
+      \EndIf
+      \If{règle $=$ fixe \textbf{et} $t_\text{cal} - W \le t < t_\text{cal}$} $\mathcal W_\ell \gets \mathcal W_\ell \cup \{\gamma\}$ \EndIf
+      \If{règle $=$ fixe \textbf{et} $t \ge t_\text{cal}$}
+        \State $\gamma^\text{fixe}_\ell \gets \med(\mathcal W_\ell)$ (ou $\gamma$ si $\mathcal W_\ell = \varnothing$) ;
+               \ $\gamma \gets \gamma^\text{fixe}_\ell$ \Comment{gelé}
+      \EndIf
+    \EndIf
+    \State $U_i \gets \sign(\Mt_i)\min(r_i/\gamma, 1)$ si $i \in \mathcal A$, sinon
+           $U_i \gets \Mt_i/\max(\gamma s^\star_{\ell,i}, g)$ \Comment{éq.~\eqref{eq:U}}
+    \State $D_\ell \gets Q_{B,\ell}\, U\, Q_{A,\ell}^\top$
+    \If{weight decay découplé} $[W_\ell, b_\ell] \gets (1-\eta_t w_d)\,[W_\ell, b_\ell]$ \EndIf
+    \State $[W_\ell, b_\ell] \gets [W_\ell, b_\ell] - \eta_t\, D_\ell$ \Comment{sans correction de biais}
+  \EndFor
+  \State autres paramètres : momentum simple avec correction de biais \Comment{gelés dans E16}
+  \State $\eta_{t+1} \gets$ calendrier cosinus
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\section{Remarques}
+\label{sec:remarques}
+
+\begin{itemize}
+  \item \textbf{Ce que fait la courbure ici.} Elle fixe la \emph{forme} du pas dans les trois règles.
+        Sa taille est bornée par $\eta_t$ coordonnée par coordonnée. Avec la règle quantile, la taille
+        du pas ne dépend plus que de $\eta_t$ ; avec les règles EMA et fixe, elle suit aussi le
+        momentum.
+  \item \textbf{Ce que chaque comparaison isole dans E16.} EMA contre quantile : le même écrêtage, avec
+        ou sans normalisation à chaque pas. Fixe contre \fic{add} : un plancher proportionnel au
+        momentum contre un plancher constant, l'énoncé le plus net de la famille B. Fixe contre EMA :
+        un seuil gelé contre un seuil qui suit le momentum, tous deux par couche.
+  \item \textbf{Couches de normalisation.} Sans option, leur $s^\star$ est estimé depuis
+        $\hb_t = (z_t, 1)$, construit sur la moyenne des canaux de l'entrée brute. Ce n'est donc pas
+        le second moment du vrai gradient de la ligne, $[\delta_t\odot\hat x_t,\ \delta_t]$. Mesuré au
+        pas $300$, la colonne qui porte l'échelle est $295$ à $989$ fois trop petite sur les
+        LayerNorm de \fic{vit_micro_cifar}, $80$ à $106$ fois sur celles de \fic{cct_2_3x2_cifar} ;
+        la colonne de décalage est juste ($\times 0{,}96$ à $1{,}03$). L'écrêtage l'exposait à
+        $q \le 0{,}3$, en freinant les pas de décalage d'un facteur $3$ à $117$.
+        L'option \fic{norm_exact_rescaling} corrige cela : $s^\star$ est la moyenne des carrés du
+        vrai gradient de chaque ligne, projeté dans la même base (algorithme~\ref{alg:clip}). Le
+        lemme~1 d'EKFAC en fait la diagonale optimale dans cette base, quelle que soit la base. La
+        base elle-même vient toujours de $A$, donc du surrogate. L'option est activée dans tous les
+        bras d'E16, y compris le correctif E14 qui y est relancé.
+  \item \textbf{Convolutions.} $m$ est le poids remis en forme
+        $C_\text{out}\times C_\text{in}k_hk_w$ (plus une colonne de biais s'il existe). Avec SUA, $\Mt$
+        a la forme $k_hk_w\times C_\text{out}\times C_\text{in}$ (même remarque), et $\gamma$ est
+        calculé sur l'ensemble des positions du noyau de la couche.
+  \item \textbf{Coût.} Par couche et par pas, en plus d'EKFAC : un tri sur $n$ valeurs, une lecture
+        d'indice et quelques opérations coordonnée par coordonnée. Pas de synchronisation avec l'hôte,
+        pas de décomposition supplémentaire. Les statistiques ne sont calculées que lorsqu'on les lit.
+  \item \textbf{Ce qui est comparé dans E16.} Les trois règles (7 valeurs de $q$ chacune), la famille A
+        ($\max(s^\star, \lambda)$, 5 valeurs de $\lambda$) et le correctif E14 ($s^\star + \lambda$,
+        les mêmes 5 valeurs, relancé dans E16), sur \fic{cnn_gn_cifar}, \fic{vit_micro_cifar} et
+        \fic{cct_2_3x2_cifar}, avec \fic{ekfac} et \fic{tekfac} et 5 graines. Les règles de décision
+        sont pré-enregistrées dans \fic{docs/reports/plan_lambda_dominance.md}, section E16.
+\end{itemize}
+
+\end{document}
