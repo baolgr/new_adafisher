@@ -1,4 +1,4 @@
-"""The single optimizer factory: eight arms, one hyperparameter record.
+"""The single optimizer factory: nine arms, one hyperparameter record.
 
 ``build_optimizer(arm, model, hp)`` returns a ready optimizer for one of:
 
@@ -14,6 +14,11 @@
   min-max normalisation, so it is the like-for-like partner of ``diag`` at its default
   ``minmax=True`` (``reference`` is the partner of ``diag --no-minmax``, which it matches
   bit-exactly). Its ``gamma`` is one scalar rather than a pair; see :func:`official_gamma`.
+* ``sgdm``, a control with no curvature at all: :class:`LambdaLimitSGD`, which is
+  ``AdaFisherMulti``'s own update with every Fisher estimate replaced by ``lam * I``. It takes the
+  Fisher arms' ``lr``, ``lam``, ``beta`` and decay convention, not ``baseline_lr``, because it
+  exists to be compared with them: it is what they reduce to when ``lam`` dominates the stored
+  curvature. E18 of ``docs/reports/plan_lambda_dominance.md``.
 
 :class:`HParams` is the arm-independent operating point. One instance lives with each model, as a
 literal in its ``bench.py``; this module owns only the field meanings and their defaults. Field
@@ -38,6 +43,7 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 from adafisher_modes import AdaFisherMulti
+from adafisher_modes.factors import SUPPORTED_MODULES
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FISHERADAPTUNE_ADAFISHER = REPO_ROOT / "reference_repos/FisherAdapTune/scripts/adafisher.py"
@@ -45,7 +51,7 @@ OFFICIAL_ADAFISHER = REPO_ROOT / "reference_repos/AdaFisher/optimizers/AdaFisher
 
 FISHER_ARMS = ("diag", "kfac", "ekfac", "tkfac", "tekfac")
 BASELINE_ARMS = ("adam", "adamw")
-ARMS = FISHER_ARMS + BASELINE_ARMS + ("reference", "official")
+ARMS = FISHER_ARMS + BASELINE_ARMS + ("reference", "official", "sgdm")
 
 
 @dataclass(frozen=True)
@@ -119,8 +125,89 @@ def official_gamma(hp: HParams) -> float:
     return gamma
 
 
+class LambdaLimitSGD(torch.optim.Optimizer):
+    """``AdaFisherMulti`` with every Fisher estimate replaced by ``lam * I``: the ``sgdm`` arm.
+
+    At the shipped damping the Fisher arms divide by a matrix that is almost exactly ``lam * I``
+    (lot 5 measured ``cond`` of it at 1.0000-1.1035 on the regime-A models). This arm is that limit
+    taken exactly, so that the only thing separating it from a Fisher arm is the curvature. Per
+    parameter, with ``eta`` the group's current learning rate and ``t`` the step count:
+
+        m_t   = beta * m_{t-1} + (1 - beta) * g_t          (g_t + wd * theta if the decay is coupled)
+        theta <- theta * (1 - eta * wd)                    (only if the decay is decoupled)
+        theta <- theta - eta / (1 - beta^t) * m_t / lam    (a parameter of a hooked module)
+        theta <- theta - eta / (1 - beta^t) * m_t          (any other parameter)
+
+    The last line is ``AdaFisherMulti``'s own fallback for parameters no hooked module owns (a ViT's
+    ``cls_token`` and ``pos_embed``), kept as it is: dividing those by ``lam`` too would make this
+    arm differ from the Fisher arms in a second way. Which parameters are hooked is decided exactly
+    as ``AdaFisherMulti._prepare_model`` decides it, and a hooked bias whose module's weight has no
+    gradient takes the fallback, as it does there.
+
+    **Why the arm is called ``sgdm``.** Write torch's momentum buffer ``b_t = beta * b_{t-1} + g_t``
+    (``torch.optim.SGD`` with ``dampening=0``, ``b_1 = g_1``). Then ``m_t = (1 - beta) * b_t``
+    exactly, so the hooked update is ``torch.optim.SGD(momentum=beta)`` at the learning rate
+    ``eta * (1 - beta) / (lam * (1 - beta^t))``. Once ``beta^t`` is negligible (``0.9^44 < 0.01``)
+    that is ``eta * (1 - beta) / lam``: 0.033 at the ViT benches' ``lr = 1e-3``, ``lam = 3e-3``.
+
+    No hook and no curvature statistic, so a step costs what a momentum-SGD step costs. Under the
+    wall-clock-time protocol the arm therefore completes more steps than any Fisher arm.
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        lr: float,
+        beta: float,
+        lam: float,
+        weight_decay: float = 0.0,
+        decoupled_weight_decay: bool = False,
+    ) -> None:
+        if lam <= 0:
+            raise ValueError(f"lam must be > 0; got {lam}")
+        super().__init__(model.parameters(), dict(lr=lr, beta=beta, weight_decay=weight_decay))
+        self.lam = lam
+        self.decoupled_weight_decay = decoupled_weight_decay
+        # id(param) -> the module that owns it, for the same modules AdaFisherMulti hooks.
+        self._owner: Dict[int, nn.Module] = {}
+        for module in model.modules():
+            if module.__class__.__name__ not in SUPPORTED_MODULES:
+                continue
+            if getattr(module, "weight", None) is None:
+                continue
+            self._owner[id(module.weight)] = module
+            if module.bias is not None:
+                self._owner[id(module.bias)] = module
+
+    @torch.no_grad()
+    def step(self, closure: Optional[Any] = None) -> None:
+        if closure is not None:
+            raise NotImplementedError("Closure not supported.")
+        for group in self.param_groups:
+            lr, beta, wd = group["lr"], group["beta"], group["weight_decay"]
+            for param in group["params"]:
+                if param.grad is None:
+                    continue
+                state = self.state[param]
+                if len(state) == 0:
+                    state["step"] = 0
+                    state["exp_avg"] = torch.zeros_like(param)
+                grad = param.grad
+                if wd != 0 and not self.decoupled_weight_decay:
+                    grad = grad.add(param, alpha=wd)
+                state["exp_avg"].mul_(beta).add_(grad, alpha=1 - beta)
+                state["step"] += 1
+                bias_correction = 1 - beta ** state["step"]
+                module = self._owner.get(id(param))
+                hooked = module is not None and module.weight.grad is not None
+                direction = state["exp_avg"] / self.lam if hooked else state["exp_avg"]
+                if self.decoupled_weight_decay and wd != 0:
+                    param.mul_(1 - lr * wd)
+                param.add_(direction, alpha=-lr / bias_correction)
+
+
 def build_optimizer(arm: str, model: nn.Module, hp: HParams, **overrides: Any) -> Any:
-    """The eight arms at ``hp``'s operating point.
+    """The nine arms at ``hp``'s operating point.
 
     ``overrides`` are passed straight to ``AdaFisherMulti`` and win over anything derived from
     ``hp``. They exist for experiments that vary one optimizer knob outside the ``HParams`` set,
@@ -133,8 +220,12 @@ def build_optimizer(arm: str, model: nn.Module, hp: HParams, **overrides: Any) -
     is the convention — ``Adam`` and ``AdaFisher`` couple it into the gradient, ``AdamW`` and
     ``AdaFisherW`` decouple it.
     """
-    if overrides and arm in ("adam", "adamw", "reference", "official"):
+    if overrides and arm in ("adam", "adamw", "reference", "official", "sgdm"):
         raise ValueError(f"arm {arm!r} takes no AdaFisherMulti overrides; got {sorted(overrides)}")
+    if arm == "sgdm":
+        return LambdaLimitSGD(model, lr=hp.lr, beta=hp.beta, lam=hp.lam,
+                              weight_decay=hp.weight_decay,
+                              decoupled_weight_decay=hp.decoupled_wd)
     if arm == "adam":
         return torch.optim.Adam(model.parameters(), lr=hp.baseline_lr,
                                 weight_decay=hp.weight_decay)
