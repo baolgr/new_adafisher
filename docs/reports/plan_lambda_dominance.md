@@ -587,7 +587,7 @@ momentum SGD) and no floor at all (`p = 0`).
 | 10 | **S1 per layer**, as a direct arm against the best single `λ` | **done: E15, adopted** (jobs 21523753-62) | wins 6/6 against the single `λ` and 6/6 against a network-wide relative `λ`; `τ = 0.1` fits `ekfac`/`tekfac` on both networks. Next: the held-out network is E17's (ViT-S), subject to how E17 reads E15 rule 4 (see E15's results); then a batch change and the head-only decomposition. Before E15 it had never been tested. The spread between layers is mostly the head (S1's status paragraph). Must hold the cap per layer and the weight-decay rate still (rules 1 and 3) |
 | 11 | **A floor or a clip instead of the added `λ`** (families A and B of `fr/etude_clipping_vs_damping.md`) | **E16, pre-registered**, code done and audited | the feasibility study found both degenerate at the shipped `λ`; E7-E14 found an operating point where `λ` no longer dominates, which is where they can differ. The clip is scale-free, so it is the one candidate that could transfer between networks where no single `λ` does |
 | 12 | **E15's and E16's verdicts, tested on a network nobody tuned them on** | **E17, pre-registered and amended**, waits for E16. From E15, candidate C does not qualify (rule 4 read literally); S1-b at `τ = 0.1` may run there only as an exploratory arm | their own transfer rules only ask whether one setting works on the networks it was chosen on. ViT-S is the network where the shipped Fisher arms lose to AdamW, and the λ work has never run it |
-| 13 | **Is ViT-S's deficit against AdamW the deficit of momentum SGD?** | **E18, pre-registered, running** (jobs 21532555-60); reproduction gate passed | at the shipped `λ` every Fisher arm should reduce to momentum SGD at `lr(1−β)/λ`. An arm that *is* that limit settles it, and needs nothing from E15 or E16 |
+| 13 | **Is ViT-S's deficit against AdamW the deficit of momentum SGD?** | **E18, done: refuted** (jobs 21532555-60) | at the shipped `λ` every Fisher arm should reduce to momentum SGD at `lr(1−β)/λ`. The arm that *is* that limit does **worse** than `diag` at equal steps (−6.2 points on CIFAR-10, −1.6 on CIFAR-100), so it does not explain the deficit. The gap is made in the first 200 steps, where `diag` has an implicit warm-up; a warm-up control would settle it |
 
 **On the reordering.** S2 was planned as a prerequisite for E2. It turned out not to be needed:
 moving `λ` and the learning rate together holds the cap exactly still, which is what S2 was for, and
@@ -2489,3 +2489,121 @@ at these numbers.
 - Whether S1-b survives a change of batch size. It should, since a relative `λ` absorbs the 1/batch²
   factor by construction, but that has not been run.
 - Whether it helps on `resnet20_cifar`, where a single `λ` bought nothing.
+
+### E18 — done. The reading is refuted, in the direction nobody predicted: momentum SGD does worse than `diag`, not the same.
+
+Six jobs (21532555-60), all COMPLETED with exit code 0, in 2 h 31 to 2 h 36 each. Outputs:
+`benchmarks/outputs/controls/e18_sgdm/{cifar10/vit_small_cifar,cifar100/vit_small_cifar100}/seed{0,1,2}/{wct,matched_steps}/`.
+Reports, CSVs, manifests and plots are pulled to the laptop. The checkpoints (2.7 GB) stay on the
+cluster, since no rule reads them. The logs (`fisher_ref/slurm/logs/e18_*.out`) hold no error. They
+contain two harmless warnings: a NumPy deprecation inside torchvision, and the backward-hook warning
+every bench prints.
+
+**The protocol held.** The reproduction gate passed before the jobs ended (see E18's pre-registration).
+The six budgeted shipped arms at seed 0 reproduce campaign 2's test accuracy to **at most 0.04
+points** on CIFAR-10 and **at most 0.31 points** on CIFAR-100. That is the cross-job noise of a
+budgeted arm on this model, as the pre-registration asked. Both `diag` and `sgdm` use the same
+weight-decay convention (decoupled, `wd = 0.01`), checked in `build_optimizer` and in the bench's
+`HParams`. So the two arms differ only by what E18 was built to remove.
+
+**The numbers.** Final test accuracy in %, three-seed mean ± standard error. Every `Δ` is paired by
+seed. "Matched" is the second invocation: `sgdm` alone, at `diag`'s exact 17 550 steps and schedule.
+
+| | CIFAR-10 | CIFAR-100 |
+|---|---|---|
+| `diag` | 67.34 ± 0.06 | 40.50 ± 0.61 |
+| `sgdm`, matched steps | 61.11 ± 0.52 | 38.93 ± 0.36 |
+| `sgdm`, wall-clock budget | 61.31 ± 0.52 | 39.31 ± 0.24 |
+| `adamw` | 71.37 ± 0.05 | 44.72 ± 0.40 |
+| **Rule 1**, `Δ₁` = `sgdm` (matched) − `diag` | **−6.23 ± 0.53**, different | **−1.58 ± 0.46**, different |
+| `D_sgdm` = `sgdm` − `adamw` | −10.06 ± 0.51 | −5.41 ± 0.17 |
+| `D_diag` = `diag` − `adamw` | −4.03 ± 0.11 | −4.22 ± 0.31 |
+| `D_sgdm − D_diag` | −6.03 ± 0.53 | −1.19 ± 0.43 |
+| **Rule 2** | **refuted** | **refuted** |
+
+Per seed, `Δ₁` is −5.63, −5.77, −7.29 on CIFAR-10 and −1.15, −2.49, −1.09 on CIFAR-100. `sgdm` is
+behind `diag` on all six (dataset, seed) cells. On best validation accuracy, reported next to the
+primary number, `Δ₁` is −6.81 ± 0.60 and −1.60 ± 0.81.
+
+- **Rule 1: different on both datasets.** The prediction was "equivalent". It failed. On CIFAR-10
+  the gap is 11.8 standard errors from zero and six times the margin `m = 1`.
+- **Rule 2: refuted on both datasets**, because rule 1 says "different". The pre-registered meaning of
+  "refuted" does not fit what happened, and this must be said plainly. That text reads "the Fisher arm
+  loses something momentum SGD does not". Here the opposite holds: momentum SGD at `lr (1 − β) / λ`
+  loses **more** than `diag`, and is 10.1 and 5.4 points behind AdamW where `diag` is 4.0 and 4.2
+  behind. The rule was written with the absolute value of `Δ₁` and its reading assumed `diag` would be
+  the worse arm. So the verdict is "refuted" and the reading is: **ViT-S's deficit against AdamW is not
+  the deficit of momentum SGD at that rate, because that momentum SGD is further behind still.**
+- **Rule 3: no mode wins on both datasets**, so "curvature helps here" holds for none.
+
+| mode − `sgdm`, wall-clock job | CIFAR-10 | CIFAR-100 |
+|---|---|---|
+| `kfac` | +5.70 ± 0.70, win | +0.07 ± 0.48, tie |
+| `ekfac` | +4.34 ± 0.58, win | −1.30 ± 1.17, tie |
+| `tkfac` | +5.62 ± 0.61, win | +0.36 ± 1.34, tie |
+| `tekfac` | +4.36 ± 0.60, win | −1.30 ± 1.15, tie |
+
+  The prediction "every Kronecker mode ties or loses" failed on CIFAR-10 and held on CIFAR-100. The
+  CIFAR-10 wins are not read as curvature, for the reason given below. Every Kronecker mode is itself
+  behind `diag` on both datasets: −0.33 to −1.69 points on CIFAR-10, −0.83 to −2.50 on CIFAR-100, with
+  `ekfac`/`tekfac` last, as in campaign 2.
+
+**Where the gap comes from: the first steps, not the rest of the run.** From step 200 on, `diag`'s
+step is between **0.973 and 1.00 times** `sgdm`'s, coordinate by coordinate, for the same momentum.
+This is arithmetic (see the pre-registration), not a measurement. The upper side holds because
+`F~_D ≥ λ` always. So a 6-point gap has to be made in the first 200 of 17 550 steps. There `diag`'s
+step can be as small as **0.279** times `sgdm`'s during steps 0-99, and 0.930 times during steps
+100-199. In practice `diag` runs with a warm-up that nobody chose: it comes from the identity each
+running average starts from. The per-step training losses, which share the initialisation and the
+batch order, agree with this reading:
+
+- **CIFAR-10.** Over its first 10 steps `sgdm`'s loss averages **2.61 to 3.14** and peaks at **3.70**
+  (seed 2), against 2.20 to 2.34 for `diag`, from the same 2.33-2.34 at step 0. `sgdm` draws level
+  or briefly ahead during steps 100-199, the moment `diag`'s step jumps from about 0.28 to about 0.93 of
+  `sgdm`'s. After that it is behind at every epoch, and the gap in validation accuracy **grows until
+  the end**: 1.4 to 4.3 points at epoch 1, 6.6 to 8.0 at epoch 20, 6.0 to 8.2 at epoch 49. The damage does
+  not wash out.
+- **CIFAR-100.** There is no early spike: 4.58-4.62 against 4.57-4.61 over the first 10 steps. The
+  two arms stay within 1 point of validation accuracy until about epoch 10, and end 1.6 points apart.
+
+**One reading, not tested: at `lr (1 − β) / λ = 0.033` with no warm-up, momentum SGD damages ViT-S
+early on CIFAR-10, and `diag` is protected by its implicit warm-up.** Two things support it. The
+gap is made where the arithmetic says it must be. And the spike appears on the dataset with the large
+gap and not on the one with the small gap. Two things it does not explain yet: why the CIFAR-10 start is so much rougher than the
+CIFAR-100 one from the same architecture and the same rate, and why the gap keeps growing for 17 000
+steps instead of settling.
+
+The same reading covers rule 3's CIFAR-10 wins. The four Kronecker modes also seed their running
+averages with the identity, so they also take small first steps (`CLAUDE.md`, the re-warm paragraph:
+the leftover identity is `0.08^k I` after `k` factor updates). Their 4-6-point lead over `sgdm` is
+then the same warm-up, not curvature. That is consistent with their all being behind `diag`.
+
+**Two predictions about cost, checked.** `sgdm` completes **1.03 times** `diag`'s steps in the same
+budget, not the ~1.06 of AdamW the pre-registration expected. Its median step costs 2.4 ms against
+1.1 ms for AdamW and 4.0 ms for `diag`, because it loops over parameters in Python where AdamW's
+update is fused. Those extra 3 % of steps are worth +0.20 ± 0.06 and +0.38 ± 0.14 points
+(wall-clock budget minus matched steps). The Kronecker modes complete 0.91 to 0.98 times `diag`'s
+steps, as in campaign 2.
+
+**What E18 establishes.**
+- Campaign 2's sixth finding cannot be put down to "these results measure momentum SGD, not
+  curvature" on ViT-S. Momentum SGD at the same rate does worse than every shipped Fisher arm on
+  CIFAR-10, and worse than `diag` on CIFAR-100.
+- It does **not** show that curvature helps ViT-S. After step 200, `diag` is momentum SGD to within
+  2.7 %. What separates the two is almost certainly the start, not the curvature.
+- ViT-S's seed-to-seed spread, measured for the first time: the standard error of a paired
+  difference is 0.1 to 0.5 point on CIFAR-10 and 0.2 to 1.3 on CIFAR-100. One seed was not enough
+  to rank the Kronecker modes on CIFAR-100; three are barely enough.
+
+**The test that settles the warm-up reading.** `sgdm` at matched steps with `diag`'s step envelope on
+its first 200 steps, i.e. its step multiplied by `λ / (X_k² + λ)` with `X_k` the bound on the min-max
+factors (0.279 then 0.930), or simply with a 200-step linear warm-up. Same protocol, three seeds,
+CIFAR-10 first, about 16 minutes per run. If `Δ₁` then falls inside ±`m`, campaign 2's reading holds
+**with a warm-up**: at the shipped `λ` the ViT-S results measure warmed-up momentum SGD. If it does
+not, something after step 200 separates `diag` from `sgdm`, and the 2.7 % bound says that something
+is not the size of the step. Not run; to be pre-registered before it is.
+
+**Consequence for E17.** Unchanged in status: E17 still waits for E16. But its stage 2 compares with
+AdamW, and E18 says a Fisher arm at a lower `λ`, whose early steps are no longer held down by the
+identity seed, may also lose the implicit warm-up. Any E17 arm that runs with `ema_seed_first` or at
+a `λ` where the leftover identity no longer dominates should be read with this in mind.

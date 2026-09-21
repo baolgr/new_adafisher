@@ -302,7 +302,10 @@ root on `v^(t)` — is **identical across the five modes**.
 >    SGD, not curvature. A curvature-free stand-in already exists for six small networks
 >    (`plan_lambda_dominance.md` E0, `fisher_ref/outputs/warmup_sgd_baseline_small.json`); none has
 >    been run at this scale. An alternative the gains alone do not exclude: an arm that is further
->    from its plateau at 75 % simply has more left to gain.
+>    from its plateau at 75 % simply has more left to gain. **Tested on ViT-S by E18** (see the
+   E17/E18 block below): momentum SGD at 0.033 does *not* track the Fisher arms there. It does
+   worse than `diag` by 6.2 points on CIFAR-10 and 1.6 on CIFAR-100, and the gap is made in the
+   first 200 steps. Not yet tested on the ResNets, where the reading was first proposed.
 > All of it is at the **shipped** `lam` (1e-3 or 3e-3), where lot 5 measured the applied
 > preconditioner to be almost a multiple of the identity: it says how these optimizers do as
 > shipped, not what curvature buys. The ImageNet `--time` values in `generate_jobs.py` were
@@ -817,7 +820,7 @@ root on `v^(t)` — is **identical across the five modes**.
 > run there only as an arm labelled exploratory. E16's candidates must run with
 > `norm_exact_rescaling=True`, as E16 does. E17 is blocked on four things: E16's results;
 > `vit_small_cifar` entries in the E15/E16 drivers; the `HParams` fields stage 2 needs; and a
-> batch-32 calibration of ViT-S. **E18 is running** (jobs 21532555-60). It tests campaign 2's
+> batch-32 calibration of ViT-S. **E18 is done** (jobs 21532555-60, all COMPLETED). It tests campaign 2's
 > untested reading: at the shipped `lambda`, every Fisher arm is momentum SGD at
 > `lr (1 - beta) / lambda`, which is 0.033 on the ViT benches. The new arm `sgdm`
 > (`benchmarks/common/optimizers.py::LambdaLimitSGD`) is that limit exactly: `AdaFisherMulti`'s
@@ -831,6 +834,20 @@ root on `v^(t)` — is **identical across the five modes**.
 > both datasets. **The reproduction gate passed:** at seed 0, `diag` is bit-identical to campaign 2
 > over 17 550 of 17 550 steps, on both datasets. Outputs go to
 > `benchmarks/outputs/controls/e18_sgdm/`, which `fisher_ref` does not read.
+> **Result: the reading is refuted, in the unexpected direction.** At matched steps `sgdm` is
+> **worse** than `diag`: test accuracy **−6.23 ± 0.53** points on CIFAR-10 and **−1.58 ± 0.46** on
+> CIFAR-100 (3 seeds, paired; behind on all six cells). Against `adamw` it is −10.1 and −5.4 where
+> `diag` is −4.0 and −4.2. So ViT-S's deficit is **not** that of momentum SGD at 0.033, which is
+> further behind still. No Kronecker mode beats `sgdm` on both datasets (4.3-5.7 points ahead on
+> CIFAR-10, tied on CIFAR-100), so rule 3 gives "curvature helps" nowhere. **Where the gap comes
+> from:** after step 200 `diag`'s step is 0.973-1.00 times `sgdm`'s by arithmetic, so the gap is
+> made in the first 200 steps, where `diag`'s step can fall to 0.279 times `sgdm`'s: an implicit
+> warm-up coming from the identity seed. On CIFAR-10 `sgdm`'s loss spikes over its first 10 steps
+> (to 3.70, against about 2.3 for `diag`), and the gap then grows until the end; on CIFAR-100 there
+> is no spike and the gap stays small. That warm-up reading is **untested**; the control that
+> settles it is `sgdm` with `diag`'s early step envelope, or a 200-step linear warm-up, at matched
+> steps. The seed-0 budgeted arms reproduce campaign 2 to <= 0.04 (CIFAR-10) and <= 0.31 points
+> (CIFAR-100). `plan_lambda_dominance.md`, "E18 — done".
 
 ## Working language
 
