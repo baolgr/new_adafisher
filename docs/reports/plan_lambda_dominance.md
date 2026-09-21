@@ -2376,6 +2376,15 @@ seed 0, `diag`'s per-step training loss is identical to campaign 2's at all 17 5
 on both datasets. Its best validation accuracy is 67.68 % and 40.80 %, and its test accuracy 67.24 %
 and 40.67 %, as in campaign 2.
 
+**Code provenance, recorded when it changed.** Each job's first invocation started on `51bbe0f` plus
+the three copied files. At about 17:22 EDT on 21 September, while those first invocations were
+running, the cluster checkout was fast-forwarded to `178a758`. That commit contains the same three
+files, byte for byte, and adds E16's code in `src/adafisher_modes/`. Each job's second invocation,
+`sgdm` at matched steps, therefore starts on `178a758`. It runs nothing that changed. Between the
+two commits, `benchmarks/common/`, `benchmarks/models/` and `requirements-cluster.txt` differ only by
+`optimizers.py`, which the jobs already had in its committed form. The one thing the arm reads from
+the package, `factors.SUPPORTED_MODULES`, is unchanged; `factors.py` only gained new functions.
+
 ### E15 — done. One safety constant per layer wins everywhere, and the win comes from the layers.
 
 Ten jobs (21523753-62), all COMPLETED, no crashed run: `cnn_gn_cifar` in 1 h 18 to 1 h 31 per
