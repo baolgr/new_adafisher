@@ -30,3 +30,6 @@ benchmarks/archives/
 
 # LaTeX reports: sources and build artefacts both live on disk, never in the repo.
 docs/latex/
+
+# French translations of the audit report (LaTeX source and PDF): kept on disk, not tracked.
+docs/reports/fr/audit_*
