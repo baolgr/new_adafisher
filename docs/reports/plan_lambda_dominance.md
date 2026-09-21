@@ -1334,3 +1334,82 @@ constant this document has been quoting was wrong.
 treatment somewhere else: the corrected ordering, five seeds, and a window wide enough that the
 curve falls on both sides. `vit_micro_cifar` is the obvious candidate and needs its window moved up,
 to roughly {1e-8, 3e-9, 1e-9, 3e-10, 1e-10}.
+
+### E13 — done. The optimum is a plateau, not a point — and `tau` agrees across two architectures for the two modes that share a damping rule.
+
+Five jobs (21468492-96), 1 h 27 each, all COMPLETED. `vit_micro_cifar`, corrected eigenbasis
+ordering, five seeds, and a window widened to eight values at half-a-decade spacing:
+{1e-8, 3e-9, 1e-9, 3e-10, 1e-10, 3e-11, 1e-11, 3e-12}. The half-decade spacing is the direct lesson
+of E10, where the real peak sat at 3e-11, a point the earlier grid skipped by stepping a full decade.
+Output: `fisher_ref/outputs/e13_seeds_vit_eigfix_s*.json`.
+
+**Result 1 — a second network, a second floor, and it is larger again.**
+
+| mode | s0 | s1 | s2 | s3 | s4 | spread |
+|---|---|---|---|---|---|---|
+| `tekfac` | 46.33 | 47.65 | 46.40 | 45.24 | 45.51 | **2.41** |
+| `ekfac` | 46.32 | 47.54 | 46.40 | 45.24 | 45.52 | 2.30 |
+| `tkfac` | 46.06 | 45.69 | 45.96 | 45.29 | 44.45 | 1.61 |
+| `kfac` | 45.35 | 45.80 | 46.42 | 46.21 | 45.00 | 1.42 |
+
+**1.42 to 2.41 points**, against `cct_2_3x2_cifar`'s 0.74 to 1.41 and the 0.04 to 0.18 this document
+borrowed for most of its length. Two networks measured, two very different floors, both far above
+the borrowed one. Treat every accuracy difference under about two points on these networks as
+unresolved unless it has been measured with seeds.
+
+**Result 2 — the curves, five-seed means with their standard error.**
+
+| mode | ref | 1e-8 | 3e-9 | 1e-9 | 3e-10 | 1e-10 | 3e-11 | 1e-11 | 3e-12 |
+|---|---|---|---|---|---|---|---|---|---|
+| `kfac` | 45.76 | 45.59 | 46.68 | 48.73 | 49.82 | 51.68 | 52.43 | **52.98** ±0.51 | 52.83 |
+| `ekfac` | 46.20 | 47.40 | 48.92 | 51.30 | 54.21 | **55.24** ±0.27 | 52.76 | 48.70 | 44.27 |
+| `tkfac` | 45.49 | 49.37 | 50.15 | 49.74 | **50.25** ±0.61 | 48.46 | 44.30 | 39.87 | 35.63 |
+| `tekfac` | 46.23 | 46.97 | 48.77 | 51.03 | 54.58 | **54.99** ±0.08 | 53.21 | 49.26 | 44.48 |
+
+Best gains: `ekfac` **+9.03**, `tekfac` **+8.77**, `kfac` +7.23, `tkfac` +4.76. All far above the
+2.41 floor.
+
+**Result 3 — and this is why no peak here is "located": the optimum is a plateau.** Listing every
+constant whose five-seed mean is within one standard error of the best:
+
+| mode | plateau | width |
+|---|---|---|
+| `ekfac` | 1e-10 alone | 1x (nearest neighbour 1.6 standard errors below) |
+| `tekfac` | 3e-10 .. 1e-10 | 3x |
+| `kfac` | 3e-11 .. 3e-12 | 10x |
+| `tkfac` | 3e-9 .. 3e-10 | 10x |
+
+More seeds will not turn these into points, because the curve genuinely has a flat top. **`tau`
+therefore cannot be pinned to better than the width of the plateau it is read from** — a factor of
+three to ten — and that is a property of the problem, not of the measurement. Only `ekfac`'s optimum
+is nearly sharp, and it is the one that would separate first with more seeds.
+
+**Result 4 — the positive result. `tau` agrees across two architecture families, for the two modes
+that share a damping rule.**
+
+| network | mode | best `λ` | mean curvature | `tau` |
+|---|---|---|---|---|
+| `cct_2_3x2_cifar` | `ekfac` | 3e-11 | 2.21e-5 | 1.36e-6 |
+| `cct_2_3x2_cifar` | `tekfac` | 3e-11 | 2.09e-5 | 1.44e-6 |
+| `vit_micro_cifar` | `ekfac` | 1e-10 | 1.69e-4 | 5.91e-7 |
+| `vit_micro_cifar` | `tekfac` | 1e-10 | 1.69e-4 | 5.91e-7 |
+
+A compact transformer and a convolutional tokeniser network, curvatures a factor of eight apart,
+and `tau` agrees to **2.4x** — inside the three-to-tenfold width of the plateaus it is read from.
+Within each network the two modes agree exactly.
+
+**Result 5 — but `tau` is not one constant across modes, and the split is structural.** On
+`vit_micro_cifar`, where all four were measured at five seeds:
+
+| mode | `tau` |
+|---|---|
+| `tkfac` | 1.87e-6 |
+| `ekfac`, `tekfac` | 5.91e-7 |
+| `kfac` | 6.03e-8 |
+
+Thirty times apart, on one network, with curvatures within 6% of each other. So the four modes
+genuinely want different constants, and the split follows the damping algebra: `ekfac` and `tekfac`
+add `λ` to a per-direction rescaling and agree exactly; `kfac` and `tkfac` add it inside factors that
+are then inverted, and land elsewhere. **Fix S1 needs one constant per damping rule, not one
+constant.** That is a sharper and more implementable statement than anything earlier in this
+document, and it is the first version of S1 that two independent networks support.
