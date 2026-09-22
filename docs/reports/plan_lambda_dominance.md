@@ -584,7 +584,7 @@ momentum SGD) and no floor at all (`p = 0`).
 | 7 | **E7 to E14** | **done** | the operating point is real (+6.6 to +10.0 points on three networks of four) and sits between 1e-11 and 1e-10 for `ekfac`/`tekfac`. The eigenbasis ordering defect must be fixed there (E8, E10). The seed floor is 0.15 to 2.4 points depending on the network, not 0.04 to 0.18. `τ` does not transfer between networks better than a fixed number (E14) |
 | 8 | **S1**, across networks (one `τ` for every network) | **demoted** after E14 | a fixed `λ` does as well. See S1's status paragraph |
 | 9 | **S4 + one fixed `λ`**, tested by a change of batch | open, **demoted** by E15 | the simplest fix consistent with E14, but bounded by the best single `λ`, which S1 per layer beats in all six E15 pairs |
-| 10 | **S1 per layer**, as a direct arm against the best single `λ` | **done: E15, adopted** (jobs 21523753-62) | wins 6/6 against the single `λ` and 6/6 against a network-wide relative `λ`; `τ = 0.1` fits `ekfac`/`tekfac` on both networks. Next: the held-out network is E17's (ViT-S), subject to how E17 reads E15 rule 4 (see E15's results); then a batch change and the head-only decomposition. Before E15 it had never been tested. The spread between layers is mostly the head (S1's status paragraph). Must hold the cap per layer and the weight-decay rate still (rules 1 and 3) |
+| 10 | **S1 per layer**, as a direct arm against the best single `λ` | **done: E15, adopted** (jobs 21523753-62) | wins 6/6 against the single `λ` and 6/6 against a network-wide relative `λ`; `τ = 0.1` fits `ekfac`/`tekfac` on both networks. **E19**, pre-registered on 22 September, runs it on CCT and the two ResNets, where the clip loses, paired with E16's cells. Next: the held-out network is E17's (ViT-S), subject to how E17 reads E15 rule 4 (see E15's results); then a batch change and the head-only decomposition. Before E15 it had never been tested. The spread between layers is mostly the head (S1's status paragraph). Must hold the cap per layer and the weight-decay rate still (rules 1 and 3) |
 | 11 | **A floor or a clip instead of the added `λ`** (families A and B of `fr/etude_clipping_vs_damping.md`) | **E16, pre-registered**, code done and audited | the feasibility study found both degenerate at the shipped `λ`; E7-E14 found an operating point where `λ` no longer dominates, which is where they can differ. The clip is scale-free, so it is the one candidate that could transfer between networks where no single `λ` does |
 | 12 | **E15's and E16's verdicts, tested on a network nobody tuned them on** | **E17, pre-registered and amended**, waits for E16. From E15, candidate C does not qualify (rule 4 read literally); S1-b at `τ = 0.1` may run there only as an exploratory arm | their own transfer rules only ask whether one setting works on the networks it was chosen on. ViT-S is the network where the shipped Fisher arms lose to AdamW, and the λ work has never run it |
 | 13 | **Is ViT-S's deficit against AdamW the deficit of momentum SGD?** | **E18, done: refuted** (jobs 21532555-60) | at the shipped `λ` every Fisher arm should reduce to momentum SGD at `lr(1−β)/λ`. The arm that *is* that limit does **worse** than `diag` at equal steps (−6.2 points on CIFAR-10, −1.6 on CIFAR-100), so it does not explain the deficit. The gap is made in the first 200 steps, where `diag` has an implicit warm-up; a warm-up control would settle it |
@@ -2628,3 +2628,198 @@ is not the size of the step. Not run; to be pre-registered before it is.
 AdamW, and E18 says a Fisher arm at a lower `λ`, whose early steps are no longer held down by the
 identity seed, may also lose the implicit warm-up. Any E17 arm that runs with `ema_seed_first` or at
 a `λ` where the leftover identity no longer dominates should be read with this in mind.
+
+### E19 — pre-registered: does one safety constant per layer also win on CCT and the two ResNets?
+
+Written on 22 September 2026, **before any E19 code or run existed**. What had been read when this
+was written: E15's results (all ten jobs), E16's results (all 46 files, `e16_results.md`), and the
+comparison table `e16_vs_lambda.md`. So the networks are chosen knowing that the clip loses to the
+tuned single `λ` on exactly these three. That is the reason for the experiment, and it is said here
+rather than hidden. Anything below that changes after the first job is submitted is a deviation,
+and will be recorded as one.
+
+**The question.** E15 found that one constant per layer (S1-b, `λ_l = τ · c̄_l`) beats the best
+single `λ` on the two networks it ran on, `cnn_gn_cifar` and `vit_micro_cifar`. E16 found that the
+clip also beats the tuned single `λ` on those two. But the clip loses to it on the three other
+networks E16 ran: `cct_2_3x2_cifar` (−0.7 to −1.2 points), `resnet20_cifar` (−1.1 to −1.5) and
+`resnet50_cifar` (−5.4 to −6.7). S1-b has never run on those three. So the table comparing the two
+ways of handling `λ` has a hole exactly where the clip fails. E19 fills it, with two questions:
+
+1. On CCT, ResNet-20 and ResNet-50, does S1-b beat, tie with or lose to the tuned single `λ`?
+2. On the same networks, does it beat, tie with or lose to the clip?
+
+A third question comes with them, and E15 left it open: does `τ = 0.1`, the one value inside every
+`ekfac`/`tekfac` plateau of E15, also sit inside the plateau of networks it was not chosen on?
+
+**Why E19 can reuse E16's cells instead of rerunning them.** Every run of the E protocol starts from
+`torch.manual_seed(seed)` and reads the data in an order fixed by the seed. So an E19 run at seed `s`
+starts from the same weights and sees the same batches as every E16 run of that network at seed `s`.
+E16 ran every cell with the corrected normalisation statistic (`norm_exact_rescaling=True`), one
+process per `h100_1g.10gb` slice, 4 data-loader workers. E19 does the same. The optimizer and
+benchmark code have not changed since E16's commits (`git diff 7663d62..HEAD -- src/ benchmarks/`
+is empty on 22 September). So E19's cells can be paired by seed with E16's stored `add` and clip
+cells. Two checks make sure this holds rather than assume it (rule 0 below).
+
+This also removes one caveat of the current table. On `vit_micro_cifar`, E15's cells used the
+shipped statistic and E16's cells the corrected one. On the three E19 networks both sides use the
+corrected one.
+
+**What still differs between an S1-b cell and E16's `add` cell, and why it is small.** A per-layer
+`λ` has no single value to scale the learning rate by. So S1-b holds the step-size cap the way E15
+did: `hold_cap=True` and `lr = cap = base_lr / base_λ`. E16's `add` cells scale the learning rate
+instead, `lr = cap · λ`. `test_hold_cap_is_lr_times_lambda` shows that the two updates agree to
+rounding. Two more differences exist, on CCT only:
+
+- `pos_embed` belongs to no hooked layer. E15 and E16's clip arms freeze it. E16's `add` cells move
+  it by `cap · λ` times its momentum per step, i.e. `1e-11` times the momentum at the selected
+  `λ = 3e-11` (CCT's `cap` is 1/3).
+- CCT's weight decay is decoupled (`wd = 1e-2`). E16's clip arms run without it. E16's `add` cells
+  apply `lr · wd = 1e-13` of shrinkage per step at `λ = 3e-11`. Over the 21 090 steps of a run that
+  is at most 2.1e-9 (computed; an upper bound, since the cosine lowers `lr`).
+
+E19's cells follow E16's clip arms: `pos_embed` frozen and no decoupled decay. So S1-b and the clip
+share every setting except the rescaling rule, and S1-b and `add` differ only by the three small
+things above. On the two ResNets every parameter belongs to a hooked layer and the decay is coupled
+(added to the gradient), so only the rounding difference remains.
+
+**The arms**, for each (network, seed, mode). Modes: `ekfac` and `tekfac`.
+
+| arm | what it is | grid | networks |
+|---|---|---|---|
+| `s1b` | `damping="layer_relative"`: `λ_l = τ · c̄_l`, cap held per layer | CCT and ResNet-20: E15's eight values {1, 0.3, 0.1, 0.03, 0.01, 0.003, 0.001, 3e-4}. ResNet-50: {1, 0.3, 0.1, 0.03, 0.01} | all three |
+| `netadapt` | `damping="network_relative"`: one `λ(t) = τ · c̄_net(t)` for the whole network, cap held | E15's eight values | CCT, ResNet-20 |
+| `held` | one `λ` for the network, at E16's validation-selected `add` value, with S1-b's settings (`hold_cap`, `lr = cap`, freeze, decay) | `ekfac` / `tekfac`: 3e-11 / 3e-11 (CCT), 1e-11 / 3e-11 (ResNet-20), 3e-12 / 3e-12 (ResNet-50) | all three |
+| `wdctrl` | `s1b` at `τ = 0.1` with CCT's decoupled decay at the benchmark's rate, E15's convention: coefficient `wd · base_lr / cap`, so the decay is `base_lr · wd = 1e-5` per step at the top of the cosine | one cell | CCT |
+| `bridge` | seed 0 only: E16's `add` cell at E16's check `λ`, run exactly as E16 ran it | one cell | all three |
+
+Fixed in every cell: batch 32, 15 epochs, the clamped cosine, `eig_before_rescale=True`,
+`norm_exact_rescaling=True`, 4 data-loader workers, one process per `h100_1g.10gb` slice. On
+ResNet-50, `fisher_batch_samples=None` and `conv_sua=True`, as in E16 (`plan_floor_clip.md` §12).
+So the ResNet-50 verdict is a verdict on S1-b under SUA, as E16's was on the clip.
+
+Seeds: the ones E16 ran, since the pairing is with its cells. 0-4 on CCT and ResNet-20, 0-2 on
+ResNet-50.
+
+**Why these arms, and not E15's full design.**
+- `kfac` is left out. The clip exists only for `ekfac`/`tekfac`, E16 ran only those two, and `kfac`
+  wants a `τ` ten to thirty times higher (E15, rule 4), so it would need a grid of its own.
+- E15's single-`λ` grid is not rerun. E16's `add` arm is that grid, on the same seeds, statistic and
+  hardware. The `held` arm measures, at every seed, how much the settings that remain different
+  move the result, at the one value that matters.
+- E15's `reference` arm (the shipped `λ`) is not rerun. It votes in nothing.
+- ResNet-50 is reduced, as it was in E16, because one run takes about 40 minutes. Its S1-b grid is
+  the five half-decade values around E15's optimum, 0.1. E15's curves fall away on both sides of
+  0.1, and collapse at the bottom of the grid: 60 % at `τ = 0.001` and 51 % at 3e-4, against 70 % at
+  0.1 (`cnn_gn_cifar`/`ekfac`, five-seed test means). `netadapt` is left out of ResNet-50 for a
+  second reason. Under SUA, the optimizer counts a convolution's directions for one kernel offset
+  only (`num_directions` returns `(C_in + 1) · C_out`), so a 3×3 convolution is counted about 9
+  times too small, and the network-wide mean would weigh the layers wrongly. S1-b does not use that
+  count.
+
+**Rule 0 — the pairing is checked, not assumed.**
+- **0a. The bridge, seed 0, bit for bit.** For each (network, mode), the `bridge` cell is compared
+  with E16's stored seed-0 `add` cell at the same `λ`: 3e-11 on CCT, 1e-11 on ResNet-20, 3e-12 on
+  ResNet-50, both modes. The fields are E16's own determinism fields: test accuracy, test loss, the
+  validation curve, the distance travelled by the parameters, the step count. Identical means that
+  E19's code, commit and software reproduce E16 exactly. Every such check so far has been
+  bit-identical (the repro cells of E16 against E14 on 8 pairs; E16's ResNet-50 cells against its
+  calibration two days earlier, 10 of 10). But the cluster's software is not pinned
+  (`requirements-cluster.txt` sets minimum versions only), so a failure is possible. It would mean
+  the software changed. 0a is reported and decides nothing by itself; 0b decides.
+- **0b. `held` against `add`, every seed.** At E16's selected `λ`, paired by seed. It must be a tie
+  at 2 standard errors. If it is, E16's `add` and clip cells stand in for cells run with S1-b's
+  settings, and rules 2 and 3 use them. If it is not, on that network rule 2 compares S1-b with
+  `held` instead of `add` (same settings, same jobs), and rule 3 is reported with the measured
+  offset and gives no verdict.
+- **0c. Completeness.** As in E16's decision script: all E19 files from one clean commit;
+  production settings; every planned cell present exactly once; no crashed cell; `held` at the value
+  E16's own selection gives. A family with a missing or crashed cell gets "incomplete", never a
+  verdict. E16's files go through E16's own checks.
+
+**The decision rules, fixed now.** Test accuracy in %. A standard error is that of the paired
+differences over the seeds: 5 seeds, or 3 on ResNet-50, i.e. two degrees of freedom there.
+
+1. **Selection on validation, verdict on test**, as in E15 and E16. In each family, the value with
+   the best seed mean of the final-epoch validation accuracy. For `add` and the clips this is E16's
+   own selection, computed by E16's `select` on E16's files: `add` as in the `held` row above;
+   `clipema` q = 0.95 / 0.99 (CCT), 0.95 / 0.9 (ResNet-20), 0.7 / 0.95 (ResNet-50).
+2. **S1-b against the tuned single `λ`,** per (network, mode): `Δ` = S1-b − `add`, paired by seed.
+   **Win** if the mean of `Δ` is above 2 standard errors, **lose** if below −2, **tie** otherwise.
+   Summary over the six pairs, in E16 rule 3's words: **better** if no pair loses and at least two
+   networks win in both modes; **worse** if at least two networks lose in at least one mode;
+   **equivalent** if no pair loses; **mixed** otherwise.
+3. **S1-b against the clip,** per (network, mode): `Δ` = S1-b − `clipema`, the same test and the
+   same summary. `clip` and `clipfixed`, each at its own selected q, are reported beside it and do
+   not vote. One qualification is carried over from E16: on CCT, `clipema` gains +0.9 points at
+   `lr / 3` (E16 rule 5). So a win of S1-b over the clip on CCT may be partly a learning-rate effect
+   on the clip's side.
+4. **Does `τ = 0.1` transfer?** The plateau is E16 rule 4's, on test accuracy: every `τ` whose seed
+   mean lies within one standard error of the best mean, that standard error being the best value's
+   own. `τ = 0.1` **transfers** if it lies in the plateau of all six (network, mode) pairs. Otherwise
+   the pairs where it does are listed. Reported beside it: the same check on E15's four
+   `ekfac`/`tekfac` pairs, recomputed from E15's files, for ten pairs in all.
+5. **Layer or time?** On CCT and ResNet-20: `Δ` = S1-b − `netadapt`, each at its selected `τ`, the
+   same test as rule 2. As in E15, a tie means the gain of S1-b comes from following the curvature
+   over time, not from treating layers differently.
+
+**Reported, not voted.**
+- `wdctrl` − `s1b` at `τ = 0.1` on CCT, paired by seed: what the benchmark's decoupled decay
+  changes under S1-b. E15 measured the same kind of difference at −0.08 to −0.23 points for a single
+  `λ` on `vit_micro_cifar` (its Result 4). This number sizes the other convention gap left in the
+  table's ViT row, where E15's S1-b had the decay and E16's clip did not.
+- Every 1 000 steps, for every hooked layer, as in E15: `λ_l`, `c̄_l`, and the fraction of the
+  layer's directions whose curvature exceeds `λ_l`.
+
+**What E19 feeds.** Nothing to E17: E17's candidate list is fixed by its own amendment, which says
+that a good result of S1-b "can only motivate a new test, pre-registered on its own, on a fourth
+network". If rule 4 says `τ = 0.1` transfers, E19 is that motivation, and a test of S1-b on ViT-S
+would be pre-registered separately. No other consequence is drawn here.
+
+**Predictions, written before any run, so that they can fail.**
+- CCT: S1-b beats `add` in both modes. CCT is a transformer whose accuracy responds to `λ`, as
+  `vit_micro_cifar`'s does, and S1-b gained about 6 points there. `τ = 0.1` in its plateau.
+- ResNet-20: a tie in both modes. `add` stays within 0.5 points from `λ` = 1e-10 to 1e-11 there.
+- ResNet-50: no prediction of the sign. E15's logs show that, for `ekfac`/`tekfac`, S1-b gives some
+  layers a constant 2 to 25 times *below* the single optimum (the body of `cnn_gn_cifar` under
+  `ekfac`; the last block and final norm of `vit_micro_cifar`). ResNet-50's `add` loses 34 to 36
+  points one decade below its optimum (3e-12 to 3e-13, three-seed test means). If some of its layers
+  sit near that cliff, S1-b could lose there. This is the one place where E15's mechanism could hurt.
+- Rule 3: S1-b wins against the clip wherever rule 2 gives a tie or a win, since the clip is 0.7 to
+  6.7 points behind `add` on all three networks.
+- 0a passes and 0b is a tie on all three networks.
+
+**Cost.** Per-run times measured for E16's `add` cells on 1g slices: 190-202 s (CCT), 321-335 s
+(ResNet-20), 2 385-2 425 s (ResNet-50). E15 measured S1-b at +3 % and the network-adaptive arm at
++4-6 % over a single `λ`. Cells per (network, seed, mode) job: 18 on CCT, 17 on ResNet-20, 6 on
+ResNet-50, plus the bridge at seed 0. Each job is split into shards, one per 1g slice (2, 2 and 4),
+merged afterwards on a CPU. The largest shard, projected: about 35 min (CCT), 55 min (ResNet-20),
+85 min (ResNet-50), with limits of 1:00, 1:30 and 2:30. In all 182 + 172 + 38 = 392 runs, about
+53 h of 1g slices, in 64 shard jobs and 26 merges.
+
+**Not submitted until** the driver `fisher_ref/experiments/e19_layer_damping_transfer.py`, its job
+scripts, the decision script `fisher_ref/experiments/e19_decisions.py` and its tests exist, and a
+local smoke has run every arm on all three networks.
+
+**Note added before submission, 22 September 2026. No rule changes.** The driver, its three job
+scripts, the decision script and `tests/test_e19_layer_damping_transfer.py` (46 tests) now exist.
+Checked locally before any job was submitted:
+- **The premise of 0a.** For all six (network, mode) pairs, E16's own `run_cell` and E19's
+  `run_cell` were run on the same cell (E16's `add` cell at its check `λ`, seed 0, 512 training
+  examples, 16 steps, CPU, E19's `λ` log firing every 2 steps). The two outcomes are bit-identical on
+  every one of E16's determinism fields. So E19's log only reads the optimizer, and the bridge on
+  the cluster tests the software and hardware, not the code path.
+- **The inputs of the decision script.** Run on E16's 46 real files, it selects exactly the values
+  written in rule 1 (`add` and `clipema`, all six pairs) and finds no defect in them. Run on E15's
+  ten files, rule 4's plateau gives E15's own reported plateaus: {0.1}, {0.3, 0.1}, {0.1}, {0.1}.
+- **A smoke of every arm on every network,** one epoch on 96 to 128 training examples, both modes:
+  7 cells on CCT, 6 on ResNet-20, `held` and two `s1b` cells on ResNet-50. No crash. The logs show
+  `λ_l / c̄_l = τ` in every hooked layer (107 on ResNet-50, under SUA), `held` at its fixed `λ`,
+  `pos_embed` frozen and `wdctrl`'s coefficient at 3e-5 on CCT.
+- **The software on the cluster** is the one E16 ran: torch 2.14.0 and cuDNN 92101 (as torch reports it) in every E16
+  file, and in the E16 baseline files written on 22 September.
+
+One thing the smoke shows, already known from E15's pre-submission note: for the first few hundred
+steps every layer's stored curvature is still mostly the identity the running average starts from
+(0.08 at step 3 in every layer), so S1-b and `netadapt` give every layer the same `λ` and take large
+steps (`λ_l / (s + λ_l) = τ / (1 + τ)` of the capped step) while `held` barely moves. That is part of
+what S1-b is, and it is why rule 5 exists.

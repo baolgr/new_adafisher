@@ -861,6 +861,25 @@ root on `v^(t)` — is **identical across the five modes**.
 > steps. The seed-0 budgeted arms reproduce campaign 2 to <= 0.04 (CIFAR-10) and <= 0.31 points
 > (CIFAR-100). `plan_lambda_dominance.md`, "E18 — done".
 
+> **E19 — E15's per-layer `λ` on CCT and the two ResNets: pre-registered, code done, submitted**
+> (`plan_lambda_dominance.md` §E19). E16 found that the clip loses to the tuned single `λ` on exactly
+> the three networks where S1-b, E15's winner, had never run: `cct_2_3x2_cifar`, `resnet20_cifar`,
+> `resnet50_cifar`. E19 runs S1-b there (`ekfac`/`tekfac`; E15's eight `τ`, five on ResNet-50), plus
+> `netadapt` on CCT and ResNet-20. It does **not** rerun E16's `add` grid or its clips: every E19
+> cell pairs by seed with E16's stored cells, which share its initialisation, data order, corrected
+> statistic (`norm_exact_rescaling=True`), 1g hardware, 4 workers and optimizer code (`src/` and
+> `benchmarks/` unchanged since `7663d62`). Two checks license that pairing. **0a**: a seed-0
+> `bridge` cell, E16's `add` cell rebuilt by E19's driver, must be bit-identical to E16's stored one;
+> checked locally on CPU before submission for all six (network, mode) pairs, 16 steps with the `λ`
+> log firing every 2 steps. **0b**: a `held` single-`λ` cell with S1-b's settings (`hold_cap`,
+> `pos_embed` frozen, no decoupled decay) must tie with E16's `add` over every seed. Rules: S1-b −
+> `add` and S1-b − `clipema` at 2 SE, summarised in E16 rule 3's words; whether `τ = 0.1` transfers
+> (E16 rule 4's plateau); S1-b − `netadapt`. `wdctrl` measures CCT's decoupled decay under S1-b,
+> which sizes the convention gap left in the ViT row of `e16_vs_lambda.md`. 392 runs, ~53 h of 1g
+> slices, 64 shards and 26 merges (`fisher_ref/slurm/e19_submit.sh`), all from one clean clone,
+> `/home/blgr/new_adafisher_e19`: do not move it until every job has run. Read with
+> `fisher_ref/experiments/e19_decisions.py`, which needs E16's files beside E19's.
+
 ## Working language
 
 All code, comments, docstrings, reports and documentation are written in **English**, to the standard
@@ -1505,6 +1524,11 @@ Run these from the repository root on the laptop (the local checkout lives at
                                                                  #   gradients sum to the real grads, stored
                                                                  #   s*/Theta == autograd brute force (fp64);
                                                                  #   inert without norm layers; refusals
+.venv/bin/pytest tests/test_e19_layer_damping_transfer.py -v     # E19: the bridge cell is built exactly as
+                                                                 #   E16's add cell; every other cell has
+                                                                 #   S1-b's settings; grids, seeds, shards;
+                                                                 #   the decision script's rules 0b-4 and its
+                                                                 #   refusals on synthetic runs
 .venv/bin/pytest tests/test_sgdm_arm.py -v                        # the sgdm arm (E18): bit-identical to
                                                                  #   AdaFisherMulti with F~ = lam*I, torch
                                                                  #   SGD-momentum at the derived lr, the
