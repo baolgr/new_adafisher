@@ -2118,6 +2118,40 @@ and one fact about timing. The rest of this section is the text as first written
    write-up, so the commit alone cannot prove the order. Apart from this amendment, the text below is
    unchanged since it was first written.
 
+**Addendum — the candidates, 22 September 2026.** Written before any E17 job is submitted. As
+this section requires, it contains only the output of E15's and E16's pre-registered rules, applied
+as defined below. Nothing in it was chosen by looking at a curve.
+
+- **From E16.** `fisher_ref/experiments/e16_decisions.py`, unmodified (last changed in `d833a51`),
+  run on 22 September on E16's 46 output files. Its "E17 candidates" block reads:
+
+  | candidate | E16's output |
+  |---|---|
+  | A: `clipema`, `clip`, `clipfixed` | not a candidate. Rule 3 gives "mixed" for all three, and rule 4 finds no transferable `q` |
+  | B: the floor | not a candidate |
+  | D: the added `λ` | **5.4772255750516594e-11**, the geometric mean of the six validation-selected `λ`, since no `λ` transfers under rule 4 |
+
+  This is also the list in `docs/reports/e16_results.md`. By amendment 2, D runs with
+  `norm_exact_rescaling=True`, as every E16 cell did.
+- **From E15** (`plan_lambda_dominance.md`, "E15 — done").
+  - **C, S1-b: not a candidate.** E15 rule 3 says "adopted". E15 rule 4, read as written over its
+    six (network, mode) pairs, which amendment 1 makes the governing reading, does not say
+    "tuning-free". By amendment 1, S1-b at `τ = 0.1` may still run in stage 1 as an exploratory arm,
+    with no vote.
+  - **E15's network-adaptive arm: not a candidate.** Rules 2-4 applied to it in place of S1-b fail
+    at rule 3: it ties the single `λ` on `cnn_gn_cifar` in all three modes.
+- **So stage 1 has one voting candidate: D**, for `ekfac` and `tekfac`, at `λ = 5.4772e-11`. Its
+  oracle sweep is five values at half-decade spacing centred on it: 5.477e-10, 1.732e-10,
+  5.477e-11, 1.732e-11 and 5.477e-12. Next to it run the reference arm (the bench's `λ = 3e-3`) and,
+  optionally, the exploratory S1-b arm. If D reaches stage 2, its value there is fixed by the
+  conversion below: `λ/16 = 3.423e-12`.
+
+**Note, same date, not part of the addendum.** S1-b at `τ = 0.1` on ViT-S is now the subject of its
+own pre-registered experiment, E20 (`plan_e20_s1b_vit_small.md`, and its pointer at the end of this
+document). E17's exploratory S1-b arm is therefore redundant with E20. None of E17's rules depends on
+it, and whether to run it is left to whoever runs E17. E20 requires this addendum to be committed
+before its own stage 1 is submitted.
+
 Written on 21 September 2026, **before any result of E15 or E16 was read**, and before any run
 described here. What existed at that moment: E15's ten jobs had been submitted (21523753-62). The
 five `cnn_gn_cifar` jobs had finished and their outputs were on the cluster. They were not opened
