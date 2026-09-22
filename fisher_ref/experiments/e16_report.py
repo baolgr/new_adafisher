@@ -73,8 +73,14 @@ def load_baselines(model: str) -> Cells:
                     continue
                 for mode in MODES:
                     out.setdefault((mode, opt, float(c["lr"])), {})[seed] = c
-    # a value is kept only when every seed is there
-    return {k: v for k, v in out.items() if sorted(v) == SEEDS[model]}
+    # A value is kept only when every seed is there, and a baseline is used only when at least
+    # three of its lr values are complete: selecting over a part of the grid would read as a
+    # located optimum when the rest is still running.
+    out = {k: v for k, v in out.items() if sorted(v) == SEEDS[model]}
+    per_opt: Dict[str, int] = {}
+    for (_, opt, _) in out:
+        per_opt[opt] = per_opt.get(opt, 0) + 1
+    return {k: v for k, v in out.items() if per_opt[k[1]] >= 3 * len(MODES)}
 
 
 def baseline_choice(cells: Cells, mode: str, opt: str):

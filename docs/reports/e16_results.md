@@ -39,6 +39,16 @@ figures come from `fisher_ref/experiments/e16_report.py`; every cell is listed i
   networks. On ResNet-20 the loss is −1.1 to −1.7 points (5 seeds). On ResNet-50 it is −5.4 to
   −9.9 points (3 seeds), largest for `clipfixed`. The floor loses on ResNet-20 as well (−0.35 to
   −0.66).
+- **Against Adam/AdamW at the same protocol** (`e16_baselines.py`, lr = benchmark `baseline_lr` x
+  {1/3, 1, 3, 10, 30}, selected on validation, 5 seeds): the clip beats the better baseline on
+  every network it was run on, by **+5.2 / +4.9** (CNN-GN), **+4.9 / +4.0** (ViT-micro),
+  **+3.9 / +4.6** (CCT) and **+1.1 / +0.4** (ResNet-20, the second a tie). The comparison with the
+  tuned λ and the per-layer λ is in [`e16_vs_lambda.md`](e16_vs_lambda.md), where the one loss
+  against AdamW is E14's tuned λ on ViT-micro (−2.7). Two things to keep in mind: the benchmark's
+  `baseline_lr` was tuned at batch 128 and is 10-30x too small here, so the first grid understated
+  AdamW by 1.3 to 8 points; and AdamW on ViT-micro is still at the top of the extended grid
+  (58.0 % at x30, rising by 1.6 over x10), so its number there is a lower bound. ResNet-50's
+  baselines are still running.
 - **For E17:** no clip and no floor qualify as a candidate. The `add` candidate is the geometric
   mean of the six selected `λ`, 5.5e-11.
 
