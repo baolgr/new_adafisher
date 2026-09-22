@@ -153,10 +153,26 @@ LAMBDA_GRID = {
     # on. E14's three-seed sweep put both modes' optimum at 1e-11, on a plateau that is flat above it.
     "resnet20_cifar": [1e-10, 3e-11, 1e-11, 3e-12, 1e-12],
 }
+# ResNet-50 (fourth amendment): the grid e16_resnet50_calibration.py's pre-registered rule
+# (grid_from_scan) derives from its seed-0 add scan. None until that calibration has run: the
+# driver refuses to run ResNet-50 without it.
+RESNET50_GRID: Optional[List[float]] = [3e-11, 1e-11, 3e-12, 1e-12, 3e-13]
+if RESNET50_GRID is not None:
+    LAMBDA_GRID["resnet50_cifar"] = RESNET50_GRID
 # The networks the pre-registered rules 1-6 vote on, and the ones only read as a robustness check of
 # the clip on another architecture (plan_floor_clip.md §12).
 VOTING = ("cnn_gn_cifar", "vit_micro_cifar", "cct_2_3x2_cifar")
-EXPLORATORY = ("resnet20_cifar",)
+EXPLORATORY = ("resnet20_cifar", "resnet50_cifar")
+# ResNet-50's reduced design, fixed in the fourth amendment before its calibration ran: seeds 0-2,
+# add on its five-value grid, the three clip arms at three values of q, the seed-0 determinism
+# check (no repro: there is no stored E-series cell), and fisher_batch_samples=None in every cell
+# (the benchmark's 32 is refused with norm_exact_rescaling on BatchNorm; at batch 32 it caps
+# nothing). conv_sua stays as the benchmark sets it.
+REDUCED: Dict[str, Dict[str, Any]] = {
+    "resnet50_cifar": {"arms": ("dupcheck", "add", "clipema", "clip", "clipfixed"),
+                       "clip_grid": [0.95, 0.7, 0.3], "seeds": (0, 1, 2),
+                       "overrides": {"fisher_batch_samples": None}},
+}
 # Clip: the fraction of each module's active coordinates that is clipped. Sophia's README targets a
 # win_rate (the fraction NOT clipped) of 0.1-0.5, i.e. 0.5-0.9 here; the grid reaches past both
 # ends: 0.99 is almost sign-momentum in the eigenbasis, 0.1 almost the plain undamped step.
@@ -182,6 +198,8 @@ CHECK_LAMBDA = {
     ("cct_2_3x2_cifar", "ekfac"): 3e-11, ("cct_2_3x2_cifar", "tekfac"): 3e-11,
     ("resnet20_cifar", "ekfac"): 1e-11, ("resnet20_cifar", "tekfac"): 1e-11,
 }
+if RESNET50_GRID is not None:   # the centre of the calibrated grid, for both modes
+    CHECK_LAMBDA.update({("resnet50_cifar", m): RESNET50_GRID[2] for m in ("ekfac", "tekfac")})
 BASELINE_FILE = {"cnn_gn_cifar": "e14_seeds_cnn_eigfix", "vit_micro_cifar": "e13_seeds_vit_eigfix",
                  "cct_2_3x2_cifar": "e10_seeds_cct_eigfix", "resnet20_cifar": "e14_seeds_resnet20_eigfix"}
 # The one network without a hooked normalisation layer: there norm_exact_rescaling must be inert.
@@ -201,7 +219,11 @@ def check_production_settings() -> None:
     if NUM_WORKERS != PRODUCTION_WORKERS:
         problems.append(f"WARMUP_SGD_NUM_WORKERS={NUM_WORKERS}")
     if MODEL not in LAMBDA_GRID:
-        problems.append(f"E16_MODEL={MODEL!r} (not one of {sorted(LAMBDA_GRID)})")
+        problems.append(f"E16_MODEL={MODEL!r} (not one of {sorted(LAMBDA_GRID)}; ResNet-50 needs "
+                        "its calibrated grid first)")
+    if MODEL in REDUCED and SEED not in REDUCED[MODEL]["seeds"]:
+        problems.append(f"E16_SEED={SEED} (ResNet-50's reduced design runs seeds "
+                        f"{REDUCED[MODEL]['seeds']})")
     if problems and not SMOKE:
         raise SystemExit(
             "E16: non-production settings without E16_SMOKE=1: " + ", ".join(problems)
@@ -349,7 +371,12 @@ def safe_run_cell(bench, **kw) -> Dict[str, Any]:
 def plan_cells(model_name: str, base_lam: float, base_lr: float, wd: float, decoupled: bool,
                frozen: List[str]) -> List[Dict[str, Any]]:
     """Every cell of one (network, seed, mode) job, in ARM_ORDER."""
-    exact = {"norm_exact_rescaling": True}
+    # A reduced design (ResNet-50) runs a subset of the arms, its own q grid, and extra overrides
+    # in every cell; every other network runs everything.
+    reduced = REDUCED.get(model_name, {})
+    arms = [a for a in ARMS if a in reduced.get("arms", ARMS)]
+    clip_grid = reduced.get("clip_grid", CLIP_GRID)
+    exact = {"norm_exact_rescaling": True, **reduced.get("overrides", {})}
     check_lam = CHECK_LAMBDA[(model_name, MODE)]
 
     def lambda_cell(arm: str, lam: float, overrides: Dict[str, Any]) -> Dict[str, Any]:
@@ -358,24 +385,24 @@ def plan_cells(model_name: str, base_lam: float, base_lr: float, wd: float, deco
         return dict(arm=arm, value=lam, lam=lam, lr=lr, wd=wd, freeze=None, overrides=overrides)
 
     cells: List[Dict[str, Any]] = []
-    if "dupcheck" in ARMS and SEED == 0:
+    if "dupcheck" in arms and SEED == 0:
         cells.append(lambda_cell("dupcheck", check_lam, dict(exact)))
-    if "repro" in ARMS and SEED == 0:
+    if "repro" in arms and SEED == 0:
         cells.append(lambda_cell("repro", check_lam, {}))       # the shipped estimator
-    if "add" in ARMS:
+    if "add" in arms:
         cells += [lambda_cell("add", lam, dict(exact)) for lam in _grid(LAMBDA_GRID[model_name])]
-    if "floor" in ARMS:
+    if "floor" in arms:
         cells += [lambda_cell("floor", lam, {"rescale_form": "floor", **exact})
                   for lam in _grid(LAMBDA_GRID[model_name])]
     clip_wd = 0.0 if decoupled else wd
     for arm, threshold in CLIP_ARMS.items():
-        if arm in ARMS:
-            for q in _grid(CLIP_GRID):
+        if arm in arms:
+            for q in _grid(clip_grid):
                 cells.append(dict(arm=arm, value=q, lam=base_lam, lr=base_lr, wd=clip_wd,
                                   freeze=frozen, overrides={"rescale_form": "clip",
                                                             "clip_fraction": q, **threshold,
                                                             **exact}))
-    if "cliplr" in ARMS:
+    if "cliplr" in arms:
         for f in _grid(CLIPLR_FACTORS):
             cells.append(dict(arm="cliplr", value=f, lam=base_lam, lr=base_lr * f, wd=clip_wd,
                               freeze=frozen, overrides={"rescale_form": "clip",
@@ -512,7 +539,8 @@ def merge(shards: Optional[List[Dict[str, Any]]] = None) -> None:
         add_twin = cells.get(cell_key("add", lam))
         checks["determinism"] = same_run(cells.get(cell_key("dupcheck", lam)), add_twin)
         repro = cells.get(cell_key("repro", lam))
-        checks["repro_vs_e14"] = same_run(repro, stored_baseline_cell(lam))
+        if MODEL in BASELINE_FILE:   # ResNet-50 has no stored E-series cell, hence no repro
+            checks["repro_vs_e14"] = same_run(repro, stored_baseline_cell(lam))
         if MODEL in NO_HOOKED_NORM:
             checks["norm_exact_inert"] = same_run(repro, add_twin)
     merged = {**header(bench), "provenance": [s.get("provenance") for s in shards],

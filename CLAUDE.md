@@ -799,7 +799,10 @@ root on `v^(t)` — is **identical across the five modes**.
 > E14's 1e-11, ~46 h of 1g, projected). `resnet50_cifar` is first calibrated
 > (`e16_resnet50_calibration.py`: an add scan at seed 0 over 1e-8..3e-13 plus clip timings, 12
 > jobs), then gets a reduced design at 3 seeds on the grid the pre-registered rule derives from the
-> scan. A clip arm is "robust" on a ResNet if it loses to add in neither mode. The feasibility
+> scan. **Calibration done** (21546221-32): both modes peak at `lambda = 3e-12` (90.52 / 90.14 %
+> validation, seed 0; a 31-35-point cliff at 3e-13), so the grid is [3e-11, 1e-11, 3e-12, 1e-12,
+> 3e-13]; measured 2 486 s per add run and 3 320-3 735 s per clip run on a 1g slice; 5 shards per
+> (seed, mode), largest 2.69 h, ~73 h of 1g in total (`plan_floor_clip.md` §12.1). A clip arm is "robust" on a ResNet if it loses to add in neither mode. The feasibility
 > study's Sophia range was inverted:
 > `win_rate` is the fraction *not* clipped, so the published target is a clipped fraction of 0.5-0.9.
 
@@ -1443,7 +1446,7 @@ Run these from the repository root on the laptop (the local checkout lives at
 ## Running the tests
 
 ```bash
-.venv/bin/pytest tests/ -v                                    # everything: 1063 collected, 1022 passed and
+.venv/bin/pytest tests/ -v                                    # everything: 1067 collected, 1026 passed and
                                                                #   41 skipped by default (40 gated on --runslow,
                                                                #   1 needing curvlinops). Measured 2026-09-21,
                                                                #   after E16's fourth amendment.

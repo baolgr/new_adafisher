@@ -37,7 +37,7 @@ export WARMUP_SGD_NUM_WORKERS=4
 export E16_MODEL="${E16_MODEL:?set E16_MODEL on the sbatch line}"
 export E16_SEED="${E16_SEED:?set E16_SEED on the sbatch line}"
 export E16_MODE="${E16_MODE:?set E16_MODE on the sbatch line}"
-export E16_NSHARDS=3
+export E16_NSHARDS="${E16_NSHARDS:-3}"   # 3, or what e16_submit.sh passes (5 on resnet50)
 export E16_MERGE=1
 export E16_OUT="$SLURM_SUBMIT_DIR/fisher_ref/outputs/e16_floor_clip_${E16_MODEL}_s${E16_SEED}_${E16_MODE}.json"
 

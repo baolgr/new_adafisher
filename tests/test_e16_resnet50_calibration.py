@@ -76,3 +76,55 @@ def test_the_timing_cells_are_e16s_arms_at_one_q(cal, bench) -> None:
         assert o["norm_exact_rescaling"] is True and o["fisher_batch_samples"] is None
     with pytest.raises(SystemExit):
         cal.plan("scan9", bench)
+
+
+def _plan(monkeypatch, model: str, seed: int, grid=None):
+    import fisher_ref.experiments.e16_floor_clip as e16
+    from benchmarks.common.runner import discover_benchmarks
+    from fisher_ref.experiments.e5_unhooked_freeze_control import unhooked_parameter_names
+    monkeypatch.setattr(e16, "MODE", "ekfac")
+    monkeypatch.setattr(e16, "SEED", seed)
+    if grid is not None:
+        monkeypatch.setitem(e16.LAMBDA_GRID, model, grid)
+        monkeypatch.setitem(e16.CHECK_LAMBDA, (model, "ekfac"), grid[2])
+    b = discover_benchmarks()[model]
+    hp = b.hparams
+    return e16.plan_cells(model, hp.lam, hp.lr, hp.weight_decay, hp.decoupled_wd,
+                          unhooked_parameter_names(b))
+
+
+def test_the_reduced_design_matches_the_calibration_drivers_constants(cal) -> None:
+    import fisher_ref.experiments.e16_floor_clip as e16
+    r = e16.REDUCED["resnet50_cifar"]
+    assert list(r["clip_grid"]) == cal.REDUCED_Q and list(r["seeds"]) == cal.REDUCED_SEEDS
+
+
+def test_resnet50_plans_its_reduced_design(monkeypatch) -> None:
+    grid = [1e-10, 3e-11, 1e-11, 3e-12, 1e-12]
+    for seed, extra in ((0, 1), (1, 0)):
+        cells = _plan(monkeypatch, "resnet50_cifar", seed, grid)
+        arms = [c["arm"] for c in cells]
+        assert arms.count("dupcheck") == extra and "repro" not in arms
+        assert "floor" not in arms and "cliplr" not in arms
+        assert sorted(c["value"] for c in cells if c["arm"] == "add") == sorted(grid)
+        for arm in ("clipema", "clip", "clipfixed"):
+            assert [c["value"] for c in cells if c["arm"] == arm] == [0.95, 0.7, 0.3]
+        assert len(cells) == 5 + 9 + extra
+        assert all(c["overrides"]["fisher_batch_samples"] is None
+                   and c["overrides"]["norm_exact_rescaling"] is True for c in cells)
+
+
+def test_the_full_design_is_unchanged_on_every_other_network(monkeypatch) -> None:
+    for model in ("cnn_gn_cifar", "vit_micro_cifar", "cct_2_3x2_cifar", "resnet20_cifar"):
+        for seed, n in ((0, 36), (1, 34)):
+            cells = _plan(monkeypatch, model, seed)
+            assert len(cells) == n
+            assert all("fisher_batch_samples" not in c["overrides"] for c in cells)
+
+
+def test_the_driver_grid_is_the_rule_applied_to_the_scan(cal) -> None:
+    """The calibration (jobs 21546221-32) put both modes' best validation lambda at 3e-12; the
+    pre-registered rule turns that into the grid the driver runs, and nothing else does."""
+    import fisher_ref.experiments.e16_floor_clip as e16
+    assert e16.RESNET50_GRID == pytest.approx(cal.grid_from_scan({"ekfac": 3e-12, "tekfac": 3e-12}))
+    assert e16.CHECK_LAMBDA[("resnet50_cifar", "ekfac")] == pytest.approx(3e-12)

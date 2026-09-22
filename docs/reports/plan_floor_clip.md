@@ -596,7 +596,7 @@ exactly as its source experiment ran it".
 | driver, decisions script, job scripts | **done**. Local smokes: every arm on all three networks; two shards run concurrently and merged, with the determinism check and the inertness check passing |
 | the cluster jobs (30 x 3 shards + 30 merges) | **test done** on `cnn_gn_cifar`, seed 0, `ekfac` (jobs 21543912-15, commit `7663d62`): all 4 COMPLETED, 36 of 36 cells, the three seed-0 checks identical, clip cells at 0.80-0.84x their projected time. **The other 29 were submitted on 2026-09-21 from the same clone at the same commit**, `/home/blgr/new_adafisher_e16` at `7663d62`: 87 shard jobs (21546022-21546138 with their merges), so the test cell is part of the set. That clone is not touched until they have all run |
 | ResNet-20 (exploratory, §12): 10 x 3 shards + 10 merges | code done (fourth amendment's commit), not submitted; runs from a separate checkout at that commit, since the voting clone must stay at `7663d62` |
-| ResNet-50 (exploratory, §12): calibration, 12 jobs; then its reduced E16 | calibration code done, not submitted; the reduced E16 is coded once the calibration has fixed its grid |
+| ResNet-50 (exploratory, §12): calibration, 12 jobs; then its reduced E16 | **calibration done** (21546221-32, all COMPLETED, §12.1): grid [3e-11, 1e-11, 3e-12, 1e-12, 3e-13]; the reduced E16 is 6 (seed, mode) x 5 shards + 6 merges |
 | results | — |
 
 ---
@@ -830,4 +830,30 @@ residual convolutions. No prediction is made for ResNet-50's level; its calibrat
 above `λ` in float64, which Apple's MPS backend lacks, so every `floor` cell crashed in a local
 smoke. It is now an integer count over the size: the same number, exactly, on every device. On CUDA
 nothing changes: the `floor` cells of the cnn test ran.
+
+### 12.1 ResNet-50's calibration: done
+
+Jobs 21546221-32, all COMPLETED, from the fourth amendment's commit `672adfe`. Scan parts took
+1 h 20 to 1 h 24 each; timing parts 29-30 min.
+
+**Final validation accuracy of `add` at seed 0** (%, 15 epochs, E16's protocol):
+
+| `λ` | 1e-8 | 3e-9 | 1e-9 | 3e-10 | 1e-10 | 3e-11 | 1e-11 | **3e-12** | 1e-12 | 3e-13 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `ekfac` | 87.98 | 87.72 | 87.84 | 87.62 | 88.46 | 88.72 | 89.62 | **90.52** | 89.12 | 55.38 |
+| `tekfac` | 88.24 | 88.64 | 88.04 | 87.60 | 87.94 | 88.66 | 89.48 | **90.14** | 89.84 | 58.58 |
+
+- Both modes peak at **3e-12**, inside the scan, not at an edge. The pre-registered rule therefore
+  gives the grid **[3e-11, 1e-11, 3e-12, 1e-12, 3e-13]**, with the seed-0 checks at 3e-12.
+- Unlike ResNet-20, ResNet-50 is **not** flat in `λ`: +2.5 to +2.9 points from 1e-8 to 3e-12, then
+  a cliff of 31-35 points one step lower. The grid includes that cliff, as the rule dictates.
+- **Measured seconds per step** on a 1g slice, the slower of the two modes, times a 15-epoch run
+  (21 090 steps): `add` 2 486 s, `clip` 3 447 s, `clipema` 3 735 s, `clipfixed` 3 320 s. The
+  pre-calibration estimate of ~30 min per `add` run was 28 % low.
+- **Jobs:** 6 (seed, mode) x 5 shards, each on one 1g slice, plus 6 CPU merges. From the driver's
+  own shard assignment, the largest shard is 2.69 h (measured times), with the limit at 4:00. The
+  total is 73 h of 1g slices. The shard count is 5 rather than E16's 3, so that each job stays under
+  3 h; sharding changes nothing in any cell.
+- They run from a third checkout, at the commit that records this grid. The ResNet-20 jobs are
+  still running from `672adfe`, and that checkout must not move.
 

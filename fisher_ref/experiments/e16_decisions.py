@@ -72,6 +72,7 @@ from fisher_ref.experiments.e16_floor_clip import (  # noqa: E402
     EXPLORATORY,
     LAMBDA_GRID,
     NO_HOOKED_NORM,
+    REDUCED,
     VOTING,
 )
 
@@ -110,11 +111,17 @@ def _test(c: Cell) -> float:
     return 100 * t if _finite(t) else float("nan")
 
 
-def _usable(series: Optional[Series]) -> bool:
-    """Five seeds, each with a finite final validation and test accuracy, none crashed."""
-    return (series is not None and sorted(series) == sorted(SEEDS)
+def seeds_of(model: str) -> List[int]:
+    """The seeds a network runs: five, or a reduced design's own (ResNet-50: three)."""
+    return list(REDUCED[model]["seeds"]) if model in REDUCED else SEEDS
+
+
+def _usable(series: Optional[Series], seeds: Optional[List[int]] = None) -> bool:
+    """Every seed, each with a finite final validation and test accuracy, none crashed."""
+    seeds = SEEDS if seeds is None else seeds
+    return (series is not None and sorted(series) == sorted(seeds)
             and all(not series[s].get("crashed") and _finite(_final_val(series[s]))
-                    and _finite(_test(series[s])) for s in SEEDS))
+                    and _finite(_test(series[s])) for s in seeds))
 
 
 def _mean_se(xs: List[float]) -> Tuple[float, float]:
@@ -125,16 +132,27 @@ def _mean_se(xs: List[float]) -> Tuple[float, float]:
     return m, sd / math.sqrt(n)
 
 
+def arms_of(model: str) -> Tuple[str, ...]:
+    """The arms a network runs: all of them, or a reduced design's own."""
+    return tuple(REDUCED[model]["arms"]) if model in REDUCED else (
+        "dupcheck", "repro", "add", "floor", *CLIP_ARMS, "cliplr")
+
+
+def clip_grid_of(model: str) -> List[float]:
+    return list(REDUCED[model]["clip_grid"]) if model in REDUCED else CLIP_GRID
+
+
 def expected_keys(model: str, seed: int, mode: str) -> List[str]:
     """Every cell key the driver plans for one (network, seed, mode) job."""
-    keys = []
-    if seed == 0:
-        keys += [f"{mode}|dupcheck|{CHECK_LAMBDA[(model, mode)]:g}",
-                 f"{mode}|repro|{CHECK_LAMBDA[(model, mode)]:g}"]
-    keys += [f"{mode}|{arm}|{v:g}" for arm in ("add", "floor") for v in LAMBDA_GRID[model]]
+    arms = arms_of(model)
+    lam = CHECK_LAMBDA[(model, mode)]
+    keys = [f"{mode}|{a}|{lam:g}" for a in ("dupcheck", "repro") if seed == 0 and a in arms]
+    keys += [f"{mode}|{a}|{v:g}" for a in ("add", "floor") if a in arms for v in LAMBDA_GRID[model]]
     for arm in CLIP_ARMS:
-        keys += [f"{mode}|{arm}|{q:g}" for q in CLIP_GRID]
-    keys += [f"{mode}|cliplr|{f:g}" for f in CLIPLR_FACTORS]
+        if arm in arms:
+            keys += [f"{mode}|{arm}|{q:g}" for q in clip_grid_of(model)]
+    if "cliplr" in arms:
+        keys += [f"{mode}|cliplr|{f:g}" for f in CLIPLR_FACTORS]
     return keys
 
 
@@ -143,7 +161,7 @@ def load(model: str, problems: List[str], commits: set,
     """``{(mode, family, value): {seed: run}}`` for every E16 arm, with every file checked. Each
     defect found is appended to ``problems``."""
     out: Dict[Key, Series] = {}
-    for seed in SEEDS:
+    for seed in seeds_of(model):
         for mode in MODES:
             path = DIR / f"e16_floor_clip_{model}_s{seed}_{mode}.json"
             if not path.exists():
@@ -177,7 +195,8 @@ def load(model: str, problems: List[str], commits: set,
                         "identical"):
                     problems.append(f"{path.name}: norm_exact_rescaling not inert on {model} "
                                     f"({gates.get('norm_exact_inert')})")
-                diagnostics[f"{model}|{mode}|repro_vs_e14"] = gates.get("repro_vs_e14")
+                if "repro_vs_e14" in gates:
+                    diagnostics[f"{model}|{mode}|repro_vs_e14"] = gates.get("repro_vs_e14")
             for key, c in e16["cells"].items():
                 if c.get("crashed"):
                     problems.append(f"{path.name}: {key} crashed ({c.get('error')})")
@@ -194,34 +213,36 @@ def load(model: str, problems: List[str], commits: set,
     return out
 
 
-def select(data: Dict[Key, Series], mode: str, family: str,
-           values: List[float]) -> Tuple[Optional[float], List[float]]:
+def select(data: Dict[Key, Series], mode: str, family: str, values: List[float],
+           seeds: Optional[List[int]] = None) -> Tuple[Optional[float], List[float]]:
     """Rule 1: the value with the best seed-mean final-epoch VALIDATION accuracy. Returns
     ``(value, unusable values)``; the choice is None if any value of the grid is unusable,
     because a selection over part of a grid is not the pre-registered selection."""
-    unusable = [v for v in values if not _usable(data.get((mode, family, v)))]
+    seeds = SEEDS if seeds is None else seeds
+    unusable = [v for v in values if not _usable(data.get((mode, family, v)), seeds)]
     if unusable:
         return None, unusable
-    means = {v: _mean_se([_final_val(data[(mode, family, v)][s]) for s in SEEDS])[0]
+    means = {v: _mean_se([_final_val(data[(mode, family, v)][s]) for s in seeds])[0]
              for v in values}
     return max(values, key=lambda v: means[v]), []
 
 
-def paired(a: Series, b: Series) -> Tuple[float, float, str]:
+def paired(a: Series, b: Series, seeds: Optional[List[int]] = None) -> Tuple[float, float, str]:
     """Rule 2: mean and standard error of test(a) - test(b), paired by seed, and the verdict. A
     zero standard error with a nonzero mean means identical runs somewhere: flagged, not voted."""
-    m, se = _mean_se([_test(a[s]) - _test(b[s]) for s in SEEDS])
+    m, se = _mean_se([_test(a[s]) - _test(b[s]) for s in (SEEDS if seeds is None else seeds)])
     if se == 0:
         return m, se, "tie" if m == 0 else "degenerate"
     return m, se, "win" if m > 2 * se else "lose" if m < -2 * se else "tie"
 
 
-def plateaus(data: Dict[Key, Series], mode: str, family: str,
-             values: List[float]) -> Tuple[List[float], List[float]]:
+def plateaus(data: Dict[Key, Series], mode: str, family: str, values: List[float],
+             seeds: Optional[List[int]] = None) -> Tuple[List[float], List[float]]:
     """Rule 4 on TEST accuracy: (the pre-registered plateau -- within one SE of the best mean,
     SE of the best; the two-sample variant E13's own numbers used, reported only)."""
-    stats = {v: _mean_se([_test(data[(mode, family, v)][s]) for s in SEEDS]) for v in values
-             if _usable(data.get((mode, family, v)))}
+    seeds = SEEDS if seeds is None else seeds
+    stats = {v: _mean_se([_test(data[(mode, family, v)][s]) for s in seeds]) for v in values
+             if _usable(data.get((mode, family, v)), seeds)}
     if len(stats) != len(values):
         return [], []
     best = max(stats, key=lambda v: stats[v][0])
@@ -259,8 +280,10 @@ def exploratory(voting_commits: set, transfer: Dict[str, List[float]],
           "plan_floor_clip.md §12) =====")
     out: Dict[str, Any] = {}
     for model in EXPLORATORY_MODELS:
-        if not any((DIR / f"e16_floor_clip_{model}_s{s}_{md}.json").exists()
-                   for s in SEEDS for md in MODES):
+        seeds, arms = seeds_of(model), arms_of(model)
+        if model not in LAMBDA_GRID or not any(
+                (DIR / f"e16_floor_clip_{model}_s{s}_{md}.json").exists()
+                for s in seeds for md in MODES):
             out[model] = "not run"
             print(f"{model}: not run")
             continue
@@ -269,31 +292,31 @@ def exploratory(voting_commits: set, transfer: Dict[str, List[float]],
         data = load(model, x_problems, x_commits, diagnostics)
         if len(x_commits) > 1:
             x_problems.append(f"the files come from {len(x_commits)} commits: {sorted(x_commits)}")
-        grids = {"add": LAMBDA_GRID[model], "floor": LAMBDA_GRID[model],
-                 **{a: CLIP_GRID for a in CLIP_ARMS}}
+        grids = {f: LAMBDA_GRID[model] for f in ("add", "floor") if f in arms}
+        grids.update({a: clip_grid_of(model) for a in CLIP_ARMS if a in arms})
         # Pairing never crosses networks, so one commit per network is what matters; a commit
         # other than the voting networks' is reported, not a defect.
         row: Dict[str, Any] = {"problems": x_problems, "commits": sorted(x_commits),
                                "same_commit_as_voting": x_commits == voting_commits}
-        per_arm: Dict[str, List[str]] = {a: [] for a in CLIP_ARMS}
+        per_arm: Dict[str, List[str]] = {a: [] for a in CLIP_ARMS if a in arms}
         for mode in MODES:
-            chosen = {family: select(data, mode, family, values)[0]
+            chosen = {family: select(data, mode, family, values, seeds)[0]
                       for family, values in grids.items()}
             row[f"{mode}|chosen"] = chosen
             print(f"{model:16s} {mode:6s}  chosen on validation: "
                   + ", ".join(f"{k} {v}" for k, v in chosen.items()))
-            for family in FAMILIES:
+            for family in (f for f in FAMILIES if f in grids):
                 if chosen["add"] is None or chosen[family] is None:
                     v = "incomplete"
                 else:
                     m, se, v = paired(data[(mode, family, chosen[family])],
-                                      data[(mode, "add", chosen["add"])])
+                                      data[(mode, "add", chosen["add"])], seeds)
                     row[f"{mode}|{family}_minus_add"] = {"mean": m, "se": se, "verdict": v}
                     print(f"    {family:9s} - add       = {m:+6.2f} +- {se:4.2f}   -> {v}")
                 if family in per_arm:
                     per_arm[family].append(v)
-            for family in CLIP_ARMS:
-                one_se, two_sample = plateaus(data, mode, family, CLIP_GRID)
+            for family in per_arm:
+                one_se, two_sample = plateaus(data, mode, family, clip_grid_of(model), seeds)
                 inside = [q for q in transfer.get(family, []) if q in one_se]
                 row[f"{mode}|plateau_{family}"] = {
                     "one_se_of_best": one_se, "two_sample": two_sample,

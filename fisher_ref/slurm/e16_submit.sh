@@ -31,6 +31,10 @@ case "$model" in
   vit_micro_cifar) short=vit; limit=01:15:00 ;;
   cct_2_3x2_cifar) short=cct; limit=01:30:00 ;;
   resnet20_cifar)  short=r20; limit=02:30:00 ;;   # exploratory (plan_floor_clip.md §12)
+  # exploratory, reduced design at seeds 0-2 on its calibrated grid (plan_floor_clip.md §12): 5
+  # shards, the largest 2.69 h from the calibration's MEASURED per-run times (add 2486 s, clips
+  # 3320-3735 s on a 1g slice), so each job stays under 3 h instead of 5 with 3 shards
+  resnet50_cifar)  short=r50; limit=04:00:00; nshards=5 ;;
   *) echo "e16_submit: unknown model '$model'" >&2; exit 1 ;;
 esac
 case "$mode" in ekfac|tekfac) ;; *) echo "e16_submit: mode must be ekfac or tekfac" >&2; exit 1 ;; esac
@@ -42,9 +46,10 @@ if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
 fi
 test -e dataset || { echo "e16_submit: no dataset/ in $(pwd)" >&2; exit 1; }
 
-vars="ALL,E16_MODEL=$model,E16_SEED=$seed,E16_MODE=$mode"
+nshards="${nshards:-3}"
+vars="ALL,E16_MODEL=$model,E16_SEED=$seed,E16_MODE=$mode,E16_NSHARDS=$nshards"
 ids=()
-for shard in 0 1 2; do
+for shard in $(seq 0 $((nshards - 1))); do
   ids+=("$(sbatch --parsable --job-name="e16_${short}_s${seed}_${mode}_p${shard}" --time="$limit" \
            --export="$vars,E16_SHARD=$shard" fisher_ref/slurm/e16_floor_clip.sh)")
 done
