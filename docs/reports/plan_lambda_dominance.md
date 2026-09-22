@@ -2829,3 +2829,14 @@ what S1-b is, and it is why rule 5 exists.
 shard jobs and 26 merge jobs, IDs 21599711 to 21599803 (three IDs in that range, 21599759, 21599792
 and 21599794, belong to other jobs). That clone is not pulled or modified until every E19 job has
 run, since a pending job reads the code when it starts.
+
+### E20 — pre-registered separately: S1-b at `τ = 0.1` on ViT-S
+
+Pre-registered on 22 September 2026 in its own file,
+[`plan_e20_s1b_vit_small.md`](plan_e20_s1b_vit_small.md), before any ViT-S run of S1-b. It is the
+separate ViT-S test E19's pre-registration and E17's amendment both point to. It leaves E17's
+amendment unchanged: in E17, candidate C stays excluded from the vote. E20 was decided by the user
+after E15's and E16's results were known, and says so. Its primary claim is that S1-b at the
+transferred `τ = 0.1` beats the single `λ` transferred from E15 (1e-10), on a network neither was
+tuned on. **Ordering:** apart from a calibration of the shipped setting, no E20 job runs before
+E17's addendum naming its candidates is committed; `fisher_ref/slurm/e20_submit.sh` checks it.
