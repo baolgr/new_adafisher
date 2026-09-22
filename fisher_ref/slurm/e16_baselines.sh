@@ -14,6 +14,8 @@
 #       --export=ALL,E16B_MODEL=resnet50_cifar,E16B_SEED=$s,E16B_OPT=$o fisher_ref/slurm/e16_baselines.sh
 #   done; done
 #
+# Grid extension: the same loop with --export=...,E16B_FACTORS=10:30,E16B_TAG=ext (two runs per job;
+# ":" because --export splits on commas).
 # --time: three runs per job. An Adam step costs no more than an E16 add step, whose 15-epoch runs
 # were measured at 75 / 150 / 210 / 330 / 2 490 s on a 1g slice (cnn / vit / cct / resnet20 /
 # resnet50), so the limits are ~2-4x three add runs. The E-series line, as every E16 job.
@@ -40,6 +42,7 @@ pip install --no-index -r requirements-cluster.txt
 export PYTHONPATH="$SLURM_SUBMIT_DIR/src:$SLURM_SUBMIT_DIR"
 export OMP_NUM_THREADS="$SLURM_CPUS_PER_TASK"
 unset E16B_SMOKE E16B_TRAIN_SUBSET E16B_DIR
+export E16B_FACTORS="${E16B_FACTORS:-1/3:1:3}" E16B_TAG="${E16B_TAG:-}"
 export WARMUP_SGD_DATA_ROOT="$SLURM_SUBMIT_DIR/dataset"
 export WARMUP_SGD_EPOCHS=15
 export WARMUP_SGD_DEVICE=auto

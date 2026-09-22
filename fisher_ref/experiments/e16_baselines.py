@@ -15,9 +15,16 @@ is a reference added after E16's results were read; it votes in none of E16's ru
 One job = (network, seed, optimizer): 3 cells. Output:
 ``fisher_ref/outputs/e16b_<model>_s<seed>_<optimizer>.json``.
 
+**Grid extension (after the first 40 jobs).** At batch 32 the selected lr was the grid's top (x3) in
+7 of 8 (network, optimizer) pairs, still rising, so the optimum was not located. A second job per
+(network, seed, optimizer) runs x{10, 30} (``E16B_FACTORS=10:30``, ``E16B_TAG=ext``) into
+``..._<optimizer>_ext.json``; the report reads both files as one grid.
+
 Environment variables::
 
     E16B_MODEL, E16B_SEED, E16B_OPT (adam | adamw)   required
+    E16B_FACTORS   ':'-separated lr factors (default: 1/3:1:3; production also allows 10:30)
+    E16B_TAG       file suffix, e.g. "ext" -> ..._<optimizer>_ext.json (default: none)
     E16B_DIR       output directory (default: fisher_ref/outputs)
     E16B_SMOKE     "1" allows non-production settings (WARMUP_SGD_*, E16B_TRAIN_SUBSET)
     WARMUP_SGD_*   as elsewhere; production is 15 epochs, 4 workers
@@ -49,7 +56,12 @@ from fisher_ref.experiments.warmup_sgd_baseline import (  # noqa: E402
 
 MODELS = ("cnn_gn_cifar", "vit_micro_cifar", "cct_2_3x2_cifar", "resnet20_cifar", "resnet50_cifar")
 OPTS = ("adam", "adamw")
-LR_FACTORS = (1 / 3, 1.0, 3.0)
+ALLOWED_FACTORS = (1 / 3, 1.0, 3.0, 10.0, 30.0)
+LR_FACTORS = tuple(
+    ALLOWED_FACTORS[0] if f.strip() == "1/3" else float(f)
+    # ":"-separated: sbatch --export splits its argument on commas
+    for f in (os.environ.get("E16B_FACTORS") or "1/3:1:3").replace(",", ":").split(":") if f.strip())
+TAG = os.environ.get("E16B_TAG", "")
 BATCH = 32
 MODEL = os.environ.get("E16B_MODEL", "")
 SEED = int(os.environ.get("E16B_SEED", "0"))
@@ -96,17 +108,20 @@ def main() -> None:
     problems = []
     if MODEL not in MODELS or OPT not in OPTS:
         raise SystemExit(f"E16B: need E16B_MODEL in {MODELS} and E16B_OPT in {OPTS}")
+    if not LR_FACTORS or (not set(LR_FACTORS) <= set(ALLOWED_FACTORS) and not SMOKE):
+        raise SystemExit(f"E16B: lr factors {LR_FACTORS} outside {ALLOWED_FACTORS}")
     if (EPOCHS != 15 or NUM_WORKERS != 4 or TRAIN_SUBSET is not None) and not SMOKE:
         raise SystemExit(f"E16B: non-production settings (epochs {EPOCHS}, workers {NUM_WORKERS}, "
                          f"subset {TRAIN_SUBSET}) without E16B_SMOKE=1")
     import fisher_ref.experiments.e16_floor_clip as e16  # provenance only
     bench = discover_benchmarks()[MODEL]
     base = bench.hparams.baseline_lr
-    out = DIR / f"e16b_{MODEL}_s{SEED}_{OPT}.json"
+    out = DIR / f"e16b_{MODEL}_s{SEED}_{OPT}{'_' + TAG if TAG else ''}.json"
     prov = e16.provenance()
     res: Dict[str, Any] = {"model": MODEL, "seed": SEED, "opt": OPT, "epochs": EPOCHS,
                            "batch_size": BATCH, "baseline_lr": base,
                            "weight_decay": bench.hparams.weight_decay, "smoke": SMOKE,
+                           "lr_factors": list(LR_FACTORS), "tag": TAG,
                            "provenance": prov, "problems": problems, "cells": {}}
     print(f"E16B | {MODEL} | seed={SEED} | {OPT} | lr {base:g} x {LR_FACTORS} | "
           f"commit {prov['git_commit']} dirty={prov['git_dirty']} gpu {prov['gpu']}", flush=True)
