@@ -877,7 +877,8 @@ root on `v^(t)` — is **identical across the five modes**.
 > (E16 rule 4's plateau); S1-b − `netadapt`. `wdctrl` measures CCT's decoupled decay under S1-b,
 > which sizes the convention gap left in the ViT row of `e16_vs_lambda.md`. 392 runs, ~53 h of 1g
 > slices, 64 shards and 26 merges (`fisher_ref/slurm/e19_submit.sh`), all from one clean clone,
-> `/home/blgr/new_adafisher_e19`: do not move it until every job has run. Read with
+> `/home/blgr/new_adafisher_e19` at `e387113` (jobs 21599711-21599803, submitted 22 September):
+> do not move it until every job has run. Read with
 > `fisher_ref/experiments/e19_decisions.py`, which needs E16's files beside E19's.
 
 ## Working language

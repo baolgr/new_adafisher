@@ -2823,3 +2823,9 @@ steps every layer's stored curvature is still mostly the identity the running av
 (0.08 at step 3 in every layer), so S1-b and `netadapt` give every layer the same `λ` and take large
 steps (`λ_l / (s + λ_l) = τ / (1 + τ)` of the capped step) while `held` barely moves. That is part of
 what S1-b is, and it is why rule 5 exists.
+
+**Submitted on 22 September 2026,** from a new clone, `/home/blgr/new_adafisher_e19`, at `e387113`
+(the commit that holds this section up to the note above): 26 (network, seed, mode) groups, i.e. 64
+shard jobs and 26 merge jobs, IDs 21599711 to 21599803 (three IDs in that range, 21599759, 21599792
+and 21599794, belong to other jobs). That clone is not pulled or modified until every E19 job has
+run, since a pending job reads the code when it starts.
