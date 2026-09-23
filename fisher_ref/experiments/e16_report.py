@@ -66,7 +66,8 @@ def load_baselines(model: str) -> Cells:
     out: Cells = {}
     for seed in SEEDS[model]:
         for opt in BASELINES:
-            files = [DIR / f"e16b_{model}_s{seed}_{opt}{t}.json" for t in ("", "_ext")]
+            files = [DIR / f"e16b_{model}_s{seed}_{opt}{t}.json"
+                     for t in ("", "_ext", "_ext2")]
             for c in (c for f in files if f.exists()
                       for c in json.load(open(f))["cells"].values()):
                 if c.get("crashed"):

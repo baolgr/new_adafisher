@@ -17,13 +17,15 @@ One job = (network, seed, optimizer): 3 cells. Output:
 
 **Grid extension (after the first 40 jobs).** At batch 32 the selected lr was the grid's top (x3) in
 7 of 8 (network, optimizer) pairs, still rising, so the optimum was not located. A second job per
-(network, seed, optimizer) runs x{10, 30} (``E16B_FACTORS=10:30``, ``E16B_TAG=ext``) into
+(network, seed, optimizer) runs x{10, 30} (``E16B_FACTORS=10:30``, ``E16B_TAG=ext``). On ResNet-50 the opposite happened -- both
+baselines were best at the grid's *bottom* (x1/3) and fell monotonically above it -- so a third job
+runs x{1/10, 1/30} (``E16B_TAG=ext2``) into
 ``..._<optimizer>_ext.json``; the report reads both files as one grid.
 
 Environment variables::
 
     E16B_MODEL, E16B_SEED, E16B_OPT (adam | adamw)   required
-    E16B_FACTORS   ':'-separated lr factors (default: 1/3:1:3; production also allows 10:30)
+    E16B_FACTORS   ':'-separated lr factors (default: 1/3:1:3; also 10:30 and 1/10:1/30)
     E16B_TAG       file suffix, e.g. "ext" -> ..._<optimizer>_ext.json (default: none)
     E16B_DIR       output directory (default: fisher_ref/outputs)
     E16B_SMOKE     "1" allows non-production settings (WARMUP_SGD_*, E16B_TRAIN_SUBSET)
@@ -56,9 +58,9 @@ from fisher_ref.experiments.warmup_sgd_baseline import (  # noqa: E402
 
 MODELS = ("cnn_gn_cifar", "vit_micro_cifar", "cct_2_3x2_cifar", "resnet20_cifar", "resnet50_cifar")
 OPTS = ("adam", "adamw")
-ALLOWED_FACTORS = (1 / 3, 1.0, 3.0, 10.0, 30.0)
+ALLOWED_FACTORS = (1 / 30, 1 / 10, 1 / 3, 1.0, 3.0, 10.0, 30.0)
 LR_FACTORS = tuple(
-    ALLOWED_FACTORS[0] if f.strip() == "1/3" else float(f)
+    {"1/30": 1 / 30, "1/10": 1 / 10, "1/3": 1 / 3}.get(f.strip(), None) or float(f)
     # ":"-separated: sbatch --export splits its argument on commas
     for f in (os.environ.get("E16B_FACTORS") or "1/3:1:3").replace(",", ":").split(":") if f.strip())
 TAG = os.environ.get("E16B_TAG", "")
