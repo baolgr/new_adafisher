@@ -178,12 +178,21 @@ def _probe_batches(inputs: Tensor, targets: Tensor, batch_size: int, *, seed: in
 def rewarm(bench: Benchmark, run: RunRef, fraction: float, spec: RewarmSpec, *,
            hparams: HParams, data_root: str, device: Any = "cpu", num_workers: int = 2,
            probes: Optional[Tuple[Tensor, Tensor]] = None,
-           allow_short: bool = False) -> Tuple[nn.Module, Any]:
+           allow_short: bool = False, batch_size: Optional[int] = None,
+           optimizer_kwargs: Optional[Mapping[str, Any]] = None) -> Tuple[nn.Module, Any]:
     """Load ``theta`` at ``fraction``, run ``spec.steps`` steps of the arm's own configuration, and
     return the (model, optimizer) pair with its memory warmed.
 
     The returned model is this function's **own** copy, never the caller's — see the module
     docstring for why the reference needs a second one.
+
+    ``batch_size`` overrides the run's own, and ``optimizer_kwargs`` are passed straight to
+    ``build_optimizer``. Both default to "exactly what the run used", which is what lot 5 needs.
+    They exist for an experiment that reads the state of an optimizer configured *differently* from
+    the arm whose weights it starts from — E21 re-warms at the safety constant E14 tuned, which was
+    tuned at batch 32 while these runs trained at 128, and the stored curvature carries the batch
+    size through ``1/batch^2`` (``CLAUDE.md`` §4.3). Reading a batch-32 constant against a batch-128
+    curvature would compare two operating points at once.
     """
     if spec.mode not in ("diag", "kfac", "ekfac", "tkfac", "tekfac"):
         raise ValueError(f"not a Fisher mode: {spec.mode!r}")
@@ -198,11 +207,14 @@ def rewarm(bench: Benchmark, run: RunRef, fraction: float, spec: RewarmSpec, *,
             f"12-87 % wrong). Use at least {minimum} steps, or pass allow_short=True knowingly."
         )
     settings = loader_settings(run, bench)
+    if batch_size is not None:
+        settings = {**settings, "batch_size": int(batch_size)}
     loaded = load_theta(run, fraction, device=device)
     model = loaded.model
     before = copy.deepcopy({name: p.detach().clone() for name, p in model.named_parameters()})
 
-    optimizer = build_optimizer(spec.mode, model, replace(hparams, lr=spec.lr))
+    optimizer = build_optimizer(spec.mode, model, replace(hparams, lr=spec.lr),
+                                **dict(optimizer_kwargs or {}))
     stream: Generator[Tuple[Tensor, Tensor], None, None]
     if spec.data == "probes":
         if probes is None:
