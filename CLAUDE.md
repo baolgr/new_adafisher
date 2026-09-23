@@ -877,8 +877,26 @@ root on `v^(t)` — is **identical across the five modes**.
 > (E16 rule 4's plateau); S1-b − `netadapt`. `wdctrl` measures CCT's decoupled decay under S1-b,
 > which sizes the convention gap left in the ViT row of `e16_vs_lambda.md`. 392 runs, ~53 h of 1g
 > slices, 64 shards and 26 merges (`fisher_ref/slurm/e19_submit.sh`), all from one clean clone,
-> `/home/blgr/new_adafisher_e19` at `e387113` (jobs 21599711-21599803, submitted 22 September):
-> do not move it until every job has run. Read with
+> `/home/blgr/new_adafisher_e19` at `e387113` (jobs 21599711-21599803).
+>
+> **E19 is done** (`plan_lambda_dominance.md`, "E19 — done"): all 90 jobs COMPLETED, 392 runs,
+> 54.1 h of 1g against the 53 h projected, **zero** non-finite losses, no defect found by the
+> decision script. Both gates passed: the `bridge` cell is **bit-identical** to E16's stored cell on
+> all six (network, mode) pairs, and `held` − `add` ties on all six, so E16's cells are valid
+> partners. **Three results.** (1) **E15's per-layer rule does not transfer.** It loses to the tuned
+> single `λ` on CCT (−1.13, −1.08) and ResNet-50 (−2.93, −2.29) — behind on all 16 (pair, seed)
+> cells of those two — and gains only +0.33 (tie) and +0.48 (win) on ResNet-20. (2) **It does beat
+> the clip** (rule 3 "better"): tie on CCT, +1.4 to +4.4 on the ResNets. So of the two candidates the
+> λ side is ahead, but over the five networks now measured **nothing beats a `λ` tuned per network**.
+> (3) **The level is right, the spread is what costs.** A relative rule finds the tuned constant's
+> scale without tuning (geometric-mean `λ_l` is 0.23× to 4× it), but it also gives the head a `λ`
+> 558-4090× the tuned one and the flattest layers 0.01-0.56×, which evens out every layer's step to
+> `τ/(1+τ)` of the cap. At a matched typical level that spread costs −1.1 on CCT and −7 to −10 on
+> ResNet-50, and buys +0.2 to +0.5 on ResNet-20. On CCT **rule 5 reverses**: the network-wide
+> relative `λ` beats the per-layer one by ~1.0 point and ties the tuned constant. And **`τ = 0.1` no
+> longer transfers**: the selected `τ` is 0.3 on CCT and ResNet-20, 0.1 on ResNet-50, and over the
+> ten `ekfac`/`tekfac` pairs now measured no single `τ` lies in every plateau. Any new S1-b run,
+> ViT-S included, must sweep `τ` or report a bound. Read with
 > `fisher_ref/experiments/e19_decisions.py`, which needs E16's files beside E19's.
 
 ## Working language

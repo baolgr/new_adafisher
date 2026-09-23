@@ -2874,3 +2874,105 @@ after E15's and E16's results were known, and says so. Its primary claim is that
 transferred `τ = 0.1` beats the single `λ` transferred from E15 (1e-10), on a network neither was
 tuned on. **Ordering:** apart from a calibration of the shipped setting, no E20 job runs before
 E17's addendum naming its candidates is committed; `fisher_ref/slurm/e20_submit.sh` checks it.
+
+### E19 — done. One safety constant per layer does not transfer: it loses on CCT and ResNet-50, and `τ = 0.1` does not carry over.
+
+Ninety jobs (21599711-21599803: 64 shards and 26 merges), all COMPLETED with exit code 0, from the
+clone `/home/blgr/new_adafisher_e19` at `e387113`. 392 runs, 54.1 h of `h100_1g.10gb` slices against
+the 53 h projected. Longest shard: 36 min (CCT), 1 h 03 (ResNet-20), 1 h 26 (ResNet-50), against
+limits of 1:00, 1:30 and 2:30. **Zero** non-finite training losses, every planned cell present
+exactly once, no unplanned cell, and `e19_decisions.py` reports no defect in E19's 30 files or in
+E16's 46. Outputs: `fisher_ref/outputs/e19_layer_damping_{model}_s{seed}_{mode}.json` and
+`e19_decisions.json`.
+
+**The protocol held, so E16's cells are valid partners.**
+- **0a:** the `bridge` cell is **bit-identical** to E16's stored seed-0 `add` cell on all six
+  (network, mode) pairs — test accuracy, test loss, the validation curve, the distance travelled by
+  the parameters and the step count. E19's code, commit and software reproduce E16 exactly.
+- **0b:** `held` − `add` is a **tie** on all six pairs: −0.03, −0.12 (CCT), −0.30, −0.05
+  (ResNet-20), −0.06, +0.01 (ResNet-50), each within 2 standard errors of zero. The settings that
+  differ between an S1-b cell and an E16 `add` cell (the held cap, the frozen `pos_embed`, the
+  absent decoupled decay) do not move the result.
+
+**Result 1 — the pre-registered verdicts.** Test accuracy in %, seed mean; `Δ` paired by seed
+(5 seeds, 3 on ResNet-50). Each family at its validation-selected value.
+
+| network | mode | `add` (tuned `λ`) | S1-b | `clipema` | `netadapt` | rule 2: S1-b − `add` | rule 3: S1-b − clip | rule 5: S1-b − `netadapt` |
+|---|---|---|---|---|---|---|---|---|
+| CCT | `ekfac` | **82.77** (3e-11) | 81.64 (`τ`=0.3) | 81.57 | 82.61 (0.03) | **−1.13 ± 0.16, lose** | +0.08 ± 0.32, tie | **−0.97 ± 0.25, lose** |
+| | `tekfac` | **82.97** (3e-11) | 81.89 (0.3) | 82.25 | 82.92 (0.03) | **−1.08 ± 0.16, lose** | −0.36 ± 0.21, tie | **−1.02 ± 0.11, lose** |
+| ResNet-20 | `ekfac` | 86.84 (1e-11) | **87.17** (0.3) | 85.77 | 86.54 (0.3) | +0.33 ± 0.17, tie | **+1.40 ± 0.28, win** | +0.63 ± 0.15, win |
+| | `tekfac` | 86.60 (3e-11) | **87.07** (0.3) | 85.10 | 86.80 (0.3) | **+0.48 ± 0.17, win** | **+1.98 ± 0.19, win** | +0.28 ± 0.30, tie |
+| ResNet-50 | `ekfac` | **90.46** (3e-12) | 87.53 (0.1) | 85.09 | — | **−2.93 ± 0.29, lose** | **+2.44 ± 0.07, win** | — |
+| | `tekfac` | **90.62** (3e-12) | 88.33 (0.1) | 83.96 | — | **−2.29 ± 0.26, lose** | **+4.36 ± 0.41, win** | — |
+
+- **Rule 2: worse.** S1-b loses to the tuned single `λ` on CCT and on ResNet-50, in both modes, and
+  is behind on **every one of the 16 (pair, seed) cells** of those two networks. On ResNet-20 it
+  gains +0.33 (tie) and +0.48 (win). So E15's "S1-b wins in all six pairs" does **not** transfer to
+  the three networks it had not been run on.
+- **Rule 3: better.** S1-b never loses to the clip: it ties on CCT and beats it on both ResNets, by
+  +1.4 to +4.4 against `clipema` and by up to +7.6 against `clipfixed` on ResNet-50. That answers
+  the question this experiment was built for — but it answers it in the weak direction: the clip
+  loses to the tuned `λ` on those networks and S1-b loses too, on two of the three.
+- **Rule 4: `τ = 0.1` does not transfer.** The selected `τ` is **0.3** on CCT and ResNet-20 and
+  **0.1** on ResNet-50, and the one-standard-error plateaus are {1, 0.3}, {0.3}, {0.3}, {0.3},
+  {0.1, 0.03}, {0.1}. `τ = 0.1` is inside only the two ResNet-50 plateaus. Over the ten
+  `ekfac`/`tekfac` pairs now measured — E15's four, recomputed here from its files, plus these six —
+  **no single value is inside every plateau**. E15's rule 4, already failing when `kfac` was
+  included, now fails for `ekfac`/`tekfac` alone.
+- **Rule 5 reverses on CCT.** There the network-wide relative `λ` **beats** the per-layer one by
+  +0.97 and +1.02, and ties the tuned constant (82.61 and 82.92 against 82.77 and 82.97). On
+  ResNet-20 S1-b keeps a small edge (+0.63, win; +0.28, tie). E15 read its rule-2 win as "per
+  layer" because rule 5 agreed on both its networks. On CCT the same test says the opposite:
+  following the curvature **over time** is what helps, and treating layers differently costs a
+  point.
+
+**Result 2 — the level is right; the spread between layers is what costs.** The typical constant
+S1-b produces is close to the tuned one: the geometric mean of `λ_l` over layers and steps (from
+step 4 000) is **1.19×** and **1.18×** the tuned `λ` on CCT, 3.99× and 1.24× on ResNet-20, and
+0.30× and 0.23× on ResNet-50. So a relative rule finds the right scale without tuning. What it
+also does is spread `λ` across layers, and that is where the loss is:
+
+| what the rule does to a layer's step | CCT | ResNet-20 | ResNet-50 |
+|---|---|---|---|
+| step scale `λ / (c̄_l + λ)` under the tuned single `λ`, smallest layer (always the head) | 1.6e-4 | 1.4e-5 | 8.0e-5 |
+| the same, largest layer | 0.76 | 0.86 | 0.97 |
+| under S1-b, **every** layer, by construction `τ / (1 + τ)` | 0.231 | 0.231 | 0.091 |
+| `λ_l` of the head, divided by the tuned `λ` | 902× | 4 090× | 558× |
+| `λ_l` of the flattest layers, divided by the tuned `λ` | 0.22-0.29× | 0.08-0.56× | 0.010-0.027× |
+
+Read plainly: under one tuned constant the head crawls (it moves by 1e-4 of the capped step) while
+the flattest layers move at nearly the full cap. S1-b makes every layer move by the same fraction of
+the cap. On `cnn_gn_cifar` and `vit_micro_cifar` (E15) and on ResNet-20 that evening-out helps. On
+CCT and ResNet-50 it costs.
+
+The spread is isolated from the level by comparing at a matched typical constant: at the `τ` whose
+geometric-mean `λ_l` is closest to the tuned `λ`, S1-b is **−1.13 and −1.08** on CCT (the same `τ`
+it selects), **+0.19 and +0.48** on ResNet-20, and **−9.94 and −6.99** on ResNet-50. On ResNet-50
+the per-layer spread costs 7 to 10 points at a matched level; its selected `τ` = 0.1 is a
+compromise that gives up on the level (0.23-0.30× the tuned `λ`) to limit the damage.
+
+**Result 3 — one `τ` cannot set the head and the body at once.** Raising `τ` raises `λ` in every
+layer together. On ResNet-50 the body wants `τ` ≈ 0.3 to reach the tuned level, and the head is
+already 558× above it at `τ` = 0.1; at `τ` = 0.3 the network loses 5.8 points against `τ` = 0.1
+(81.77 against 87.53, `ekfac`). This is the coupling E15's own follow-up named — "single `λ` for the
+body, relative `λ` for the head only" — and E19 does not test it.
+
+**What E19 establishes, and what it does not.**
+- Over the five networks where a per-layer `λ`, a clip and a tuned single `λ` have now been
+  compared, **nothing beats the tuned single `λ`**: the clip loses on three of five
+  (`cct_2_3x2_cifar`, both ResNets), and the per-layer rule loses on two of three networks it had
+  not been fitted on. The per-layer rule remains the better of the two candidates — it never loses
+  to the clip, and it wins on both ResNets — but it is not a replacement for tuning `λ` per network.
+- **CCT's plateau touches the top of the grid** for `ekfac` ({1, 0.3}), so its optimum is a bound.
+  The curve is flat there (81.64 at both 0.3 and 1), and `τ → ∞` is plain momentum at the cap, so a
+  large gain above `τ` = 1 is unlikely; it is not measured.
+- ResNet-50 carries three seeds, and runs under SUA and `fisher_batch_samples=None`, as E16's did.
+- Everything is at the E protocol: batch 32, 15 epochs, two modes. Nothing here is a statement about
+  the benchmark protocol.
+- The `wdctrl` diagnostic: giving CCT's decoupled decay its benchmark rate under S1-b changes
+  −0.03 ± 0.03 (`ekfac`) and −0.00 ± 0.17 (`tekfac`). So the decay convention is not what separates
+  the columns of the comparison table, on this network. E15 measured the same kind of difference at
+  −0.08 to −0.23 on `vit_micro_cifar`.
+- **For any future S1-b run on a new network**, including ViT-S: `τ = 0.1` is no longer a value one
+  can transfer. Either it is swept, or the result is a bound.
