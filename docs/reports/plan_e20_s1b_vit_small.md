@@ -167,6 +167,50 @@ unset. It is written only if stage 2 is triggered, and pre-registered before it 
 
 ---
 
-## 5. Deviations
+## 5. Deviations and amendments
 
-*None yet.*
+### Amendment 1, 23 September 2026 — a network-wide relative arm, and a second reading of `τ`
+
+**When this was written.** Stage 1's fifteen jobs (21645885-99) had finished on the cluster. **No
+E20 output had been opened**, by this session or any other: this text and the new jobs are committed
+before the first read, and that order is the only evidence available. What triggered the amendment
+is E19's results, measured on three other networks (`plan_lambda_dominance.md`, "E19 — done"), not
+anything from ViT-S.
+
+**What E19 found that bears on E20.** Three things.
+1. `τ = 0.1` is no longer a value that transfers. The `τ` E19 selects is 0.3 on CCT and ResNet-20 and
+   0.1 on ResNet-50, and over the ten `ekfac`/`tekfac` pairs now measured no single `τ` lies inside
+   every plateau.
+2. S1-b loses to a single `λ` tuned per network on CCT and ResNet-50, and gains a little on
+   ResNet-20. So E15's "S1-b wins everywhere" does not survive three new networks.
+3. On CCT — the only transformer among them — the **network-wide** relative `λ` beats the per-layer
+   one by about one point and ties the tuned single `λ`. E15's rule 5 said the opposite on its two
+   networks.
+
+**What changes.**
+- **A new arm, `netadapt`**: one `λ(t) = τ × (mean curvature of the whole network)`
+  (`damping="network_relative"`), on E15's eight `τ`, both modes, five seeds, with S1-b's settings
+  otherwise. It is run as ten new jobs; stage 1's fifteen files are not touched.
+- **A second reading of S1-b, at `τ = 0.3`**, reported beside the primary one.
+
+**What does not change.** The transferred value stays `τ = 0.1`, and rule 3 at that value stays
+E20's primary claim. Rules 1 to 5 are unchanged, and so are their verdicts. Stage 1's existing cells
+are not re-run.
+
+**The new rules, fixed now.** Same conventions as section 2.1: paired by seed on test accuracy,
+win/tie/loss at 2 standard errors, any value chosen on ViT-S chosen on the five-seed mean of the
+final validation accuracy.
+
+6. **Network-wide against per-layer.** `netadapt` at its selected `τ` against S1-b at its selected
+   `τ`. This is E19's rule 5 on ViT-S. It says which of the two relative rules is the better one
+   here.
+7. **Network-wide against a tuned single `λ`.** `netadapt` at its selected `τ` against the single
+   `λ` at its selected value. Both are tuned on ViT-S, so this asks whether a relative rule is worth
+   anything once the constant is tuned.
+8. **Reported, not voted on:** S1-b at `τ = 0.3` against the single `λ` at the transferred 1e-10,
+   paired. `τ = 0.3` is what E19 selected on its two smaller networks. It is a second reading of the
+   same question rule 3 asks, at the value a reader of E19 would have transferred instead. Also
+   reported: `netadapt` at `τ = 0.03`, the value E19 selected on CCT, against the same single `λ`.
+
+**Cost.** Ten jobs, 8 cells each, about 70 minutes per job at the 8.73 minutes per run the
+calibration measured, so about 12 GPU-hours.

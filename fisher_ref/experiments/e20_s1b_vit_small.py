@@ -28,6 +28,8 @@ Environment variables::
 
     E20_SEED      required, 0-4
     E20_JOB       required: ekfac | tekfac | adamw | calib
+    E20_ARMS      "netadapt" runs amendment 1's network-wide relative arm instead of the three
+                  arms above (same tau grid, same settings); default: reference, single, s1b
     E20_VALUES    extension job only: ':'-separated values from EXTENSIONS (tau, or AdamW lr)
     E20_TAG       extension job only: file suffix, e.g. "ext_hi"
     E20_OUT       output path (default: fisher_ref/outputs/e20_vit_small_cifar_s<seed>_<job>[_<tag>].json)
@@ -61,6 +63,7 @@ BATCH = 32
 SEED = int(os.environ["E20_SEED"]) if os.environ.get("E20_SEED") else None
 JOB = os.environ.get("E20_JOB", "")
 TAG = os.environ.get("E20_TAG", "")
+ARMS = os.environ.get("E20_ARMS", "")
 SMOKE = os.environ.get("E20_SMOKE", "0") == "1"
 TRAIN_SUBSET = int(os.environ["E20_TRAIN_SUBSET"]) if os.environ.get("E20_TRAIN_SUBSET") else None
 GRID_LIMIT = int(os.environ["E20_GRID_LIMIT"]) if os.environ.get("E20_GRID_LIMIT") else None
@@ -113,21 +116,26 @@ def _held(bench) -> Dict[str, Any]:
     return dict(lr=cap, wd=wd, freeze=unhooked_parameter_names(bench))
 
 
+def _relative(arm: str, t: float, base_lam: float, held: Dict[str, Any]) -> Dict[str, Any]:
+    damping = "layer_relative" if arm == "s1b" else "network_relative"
+    return dict(arm=arm, value=t, lam=base_lam,
+                overrides={"hold_cap": True, "damping": damping, "damping_tau": t}, **held)
+
+
 def fisher_cells(bench, mode: str) -> List[Dict[str, Any]]:
     """Every Fisher cell of one (seed, mode) job on ViT-S, in the order they run."""
     base_lam = bench.hparams.lam
     held = _held(bench)
-    if VALUES:   # an extension job: S1-b values only
-        return [dict(arm="s1b", value=t, lam=base_lam,
-                     overrides={"hold_cap": True, "damping": "layer_relative", "damping_tau": t},
-                     **held) for t in VALUES]
+    if VALUES:   # an extension job: relative values only, in whichever arm was asked for
+        arm = "netadapt" if ARMS == "netadapt" else "s1b"
+        return [_relative(arm, t, base_lam, held) for t in VALUES]
+    if ARMS == "netadapt":   # amendment 1: the network-wide relative arm, on the same tau grid
+        return [_relative("netadapt", t, base_lam, held) for t in _grid(TAU_GRID)]
     cells = [dict(arm="reference", value=base_lam, lam=base_lam,
                   overrides={"hold_cap": True}, **held)]
     cells += [dict(arm="single", value=lam, lam=lam, overrides={"hold_cap": True}, **held)
               for lam in _grid(SINGLE_GRID)]
-    cells += [dict(arm="s1b", value=t, lam=base_lam,
-                   overrides={"hold_cap": True, "damping": "layer_relative", "damping_tau": t},
-                   **held) for t in _grid(TAU_GRID)]
+    cells += [_relative("s1b", t, base_lam, held) for t in _grid(TAU_GRID)]
     return cells
 
 
@@ -161,6 +169,10 @@ def main() -> None:
             and not SMOKE:
         raise SystemExit(f"E20: non-production settings (epochs {EPOCHS}, workers {NUM_WORKERS}, "
                          f"subset {TRAIN_SUBSET}, grid limit {GRID_LIMIT}) without E20_SMOKE=1")
+    if ARMS not in ("", "netadapt"):
+        raise SystemExit(f"E20: E20_ARMS is 'netadapt' or unset; got {ARMS!r}")
+    if ARMS == "netadapt" and JOB not in ("ekfac", "tekfac"):
+        raise SystemExit("E20: the netadapt arm runs in an ekfac or tekfac job")
     if VALUES:
         family = "adamw" if JOB == "adamw" else "s1b"
         if JOB == "calib" or not TAG or not set(VALUES) <= set(EXTENSIONS[family]):
@@ -174,7 +186,7 @@ def main() -> None:
     out = Path(os.environ.get("E20_OUT") or ROOT / "fisher_ref/outputs" /
                f"e20_{MODEL}_s{SEED}_{JOB}{'_' + TAG if TAG else ''}.json")
     prov = provenance()
-    res: Dict[str, Any] = {"model": MODEL, "seed": SEED, "job": JOB, "tag": TAG,
+    res: Dict[str, Any] = {"model": MODEL, "seed": SEED, "job": JOB, "tag": TAG, "arms": ARMS,
                            "values": VALUES, "grid_limit": GRID_LIMIT,
                            "train_subset": TRAIN_SUBSET, "hparams": asdict(bench.hparams),
                            "provenance": prov, "problems": [], "bridge": None, "cells": {}}
@@ -182,7 +194,7 @@ def main() -> None:
           f"commit {prov['git_commit']} dirty={prov['git_dirty']} | gpu {prov['gpu']}\n"
           f"frozen in the Fisher cells: {', '.join(unhooked_parameter_names(bench))}", flush=True)
 
-    if JOB in ("ekfac", "tekfac") and SEED == 0 and not VALUES:
+    if JOB in ("ekfac", "tekfac") and SEED == 0 and not VALUES and ARMS != "netadapt":
         t0 = time.time()
         b = bridge_cell(JOB)
         want_acc, want_move = BRIDGE[JOB]

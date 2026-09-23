@@ -43,7 +43,7 @@ def _default_effects(job, arm, value):
 
 
 def write_set(tmp: Path, effects=_default_effects, *, drop=None, bridge_ok=True, dirty=None,
-              commit_of=None, crash=None, extra=None) -> Path:
+              commit_of=None, crash=None, extra=None, netadapt=None) -> Path:
     for seed in range(5):
         for job in ("ekfac", "tekfac", "adamw"):
             if drop == (seed, job):
@@ -61,6 +61,14 @@ def write_set(tmp: Path, effects=_default_effects, *, drop=None, bridge_ok=True,
             f = {"cells": cells, "provenance": prov, "problems": [],
                  "bridge": {"reproduced": bridge_ok} if job != "adamw" and seed == 0 else None}
             (tmp / f"e20_{drv.MODEL}_s{seed}_{job}.json").write_text(json.dumps(f))
+            if netadapt and job in ("ekfac", "tekfac"):
+                na = {}
+                for value in netadapt:
+                    a = _acc(job, "netadapt", value, seed, effects)
+                    na[f"{job}|netadapt|{value:g}"] = {"arm": "netadapt", "value": value,
+                                                       "test_acc": a, "epoch_val_acc": [a]}
+                (tmp / f"e20_{drv.MODEL}_s{seed}_{job}_netadapt.json").write_text(
+                    json.dumps({"cells": na, "provenance": prov, "problems": []}))
             if extra and job in extra:
                 ext_cells = {}
                 for value in extra[job]:
@@ -155,6 +163,25 @@ def test_adamw_at_the_top_of_its_grid_is_flagged(tmp_path: Path) -> None:
         return {3e-2: 9.0}.get(value, 2.0) if arm == "adamw" else _default_effects(job, arm, value)
     res = dec.decide(write_set(tmp_path, eff))
     assert res["adamw"]["at_edge"] and res["adamw"]["chosen_lr"] == 3e-2
+
+
+def test_amendment_1_rules_are_read_when_the_netadapt_arm_is_there(tmp_path: Path) -> None:
+    """Rules 6-8 appear only with netadapt cells, and the tau = 0.3 reading only needs the grid."""
+    def eff(job, arm, value):
+        if arm == "netadapt":
+            return {0.03: 7.0, 0.01: 5.0}.get(value, 1.0)
+        return _default_effects(job, arm, value)
+    plain = dec.decide(write_set(tmp_path, eff))
+    assert "rule6_netadapt_vs_s1b_tuned" not in plain["modes"]["ekfac"]
+    # tau = 0.3 is in S1-b's own grid, so its reading is there without any new run
+    assert plain["modes"]["ekfac"]["reported_s1b_at_e19_tau"]["mean"] == pytest.approx(3.0)
+
+    with_na = dec.decide(write_set(tmp_path, eff, netadapt=[0.03, 0.01]))
+    r = with_na["modes"]["ekfac"]
+    assert r["rule6_netadapt_vs_s1b_tuned"]["tau_netadapt"] == 0.03
+    assert r["rule6_netadapt_vs_s1b_tuned"]["mean"] == pytest.approx(1.0)   # 7.0 - 6.0
+    assert r["rule7_netadapt_vs_single_tuned"]["mean"] == pytest.approx(5.0)   # 7.0 - 2.0
+    assert r["reported_netadapt_at_e19_tau"]["mean"] == pytest.approx(5.0)
 
 
 # --------------------------------------------------------------------------------------------

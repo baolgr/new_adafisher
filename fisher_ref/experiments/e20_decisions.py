@@ -38,6 +38,11 @@ from fisher_ref.experiments.e20_s1b_vit_small import (  # noqa: E402
 SEEDS = range(5)
 MODES = ("ekfac", "tekfac")
 
+# Amendment 1: a second reading of S1-b at the value E19 selected on CCT and ResNet-20, and the
+# network-wide relative arm, whose cells arrive in their own files and merge into their job's grid.
+TAU_E19 = 0.3
+TAU_NETADAPT_E19 = 0.03
+
 
 def _load(directory: Path, seed: int, job: str) -> Tuple[Optional[Dict[str, Any]], List[Dict]]:
     """The job's main file, and its extension files (sorted by name)."""
@@ -172,6 +177,23 @@ def decide(directory: Path) -> Dict[str, Any]:
                       "single_1e-10": _mean(t("single", LAMBDA_TRANSFERRED)),
                       "adamw": _mean(adamw_at)},
         }
+        # Amendment 1's rules 6-8: the netadapt cells if that arm was run, and the tau = 0.3
+        # reading, which needs no new run because 0.3 is already in S1-b's grid.
+        na = _grid_keys(cells, mode, "netadapt")
+        if na:
+            na_star = _chosen_on_val(cells, mode, "netadapt")
+            out["modes"][mode]["rule6_netadapt_vs_s1b_tuned"] = {
+                **paired(t("netadapt", na_star), t("s1b", tau_star)),
+                "tau_netadapt": na_star, "tau_s1b": tau_star}
+            out["modes"][mode]["rule7_netadapt_vs_single_tuned"] = {
+                **paired(t("netadapt", na_star), t("single", lam_star)),
+                "tau_netadapt": na_star, "lambda": lam_star}
+            if TAU_NETADAPT_E19 in na:
+                out["modes"][mode]["reported_netadapt_at_e19_tau"] = paired(
+                    t("netadapt", TAU_NETADAPT_E19), t("single", LAMBDA_TRANSFERRED))
+        if TAU_E19 in taus:
+            out["modes"][mode]["reported_s1b_at_e19_tau"] = paired(
+                t("s1b", TAU_E19), t("single", LAMBDA_TRANSFERRED))
     r3 = [out["modes"][m]["rule3_s1b_vs_single_transferred"]["verdict"] for m in MODES]
     r2 = [out["modes"][m]["rule2_transfer"]["verdict"] for m in MODES]
     out["verdict_per_layer"] = ("confirmed" if all(v == "win" for v in r3)
@@ -195,8 +217,12 @@ def main() -> None:
     for mode, r in res["modes"].items():
         print(f"\n{mode}: test means {', '.join(f'{k} {v:.2f}' for k, v in r['means'].items())}")
         for rule in ("rule1_helps", "rule3_s1b_vs_single_transferred", "rule4_s1b_vs_single_tuned",
-                     "rule5_s1b_vs_adamw_tuned"):
-            x = r[rule]
+                     "rule5_s1b_vs_adamw_tuned", "rule6_netadapt_vs_s1b_tuned",
+                     "rule7_netadapt_vs_single_tuned", "reported_s1b_at_e19_tau",
+                     "reported_netadapt_at_e19_tau"):
+            x = r.get(rule)
+            if x is None:
+                continue
             print(f"  {rule:34s} {x['mean']:+.2f} +- {x['se']:.2f}  -> {x['verdict']}")
         x = r["rule2_transfer"]
         print(f"  {'rule2_transfer':34s} plateau {x['plateau']} best {x['best']:g} -> {x['verdict']}")
